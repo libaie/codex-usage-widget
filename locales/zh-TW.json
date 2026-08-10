@@ -39,7 +39,7 @@
     "token.composition": "輸入 / 輸出比例",
     "token.input": "輸入",
     "token.output": "輸出",
-    "token.reasoningShare": "推理占輸出的比例",
+    "token.reasoningShare": "推理佔輸出的比例",
     "cache.hit": "快取命中權杖",
     "cache.miss": "快取遺漏權杖",
     "cache.taskHit": "本任務快取命中權杖",

@@ -2407,13 +2407,16 @@ if ($SelfTest) {
     Assert-Widget ($script:CurrentLanguageCode -ceq 'zh-CN' -and $script:CurrentLanguageCulture.Name -ceq 'zh-CN') 'localization should use the selected pack and culture.'
     Assert-Widget ((Get-WidgetText 'app.title') -ceq '用量小组件') 'the Simplified Chinese pack should expose approved UI text.'
     Assert-Widget ((Get-WidgetText 'countdown.daysHours' @(2, 3)) -ceq '2 天 3 小时后重置') 'localized placeholders should format with the active culture.'
-    $englishPack = Read-WidgetLanguagePack 'en-US' $PSScriptRoot
+    $englishStrings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\en-US.json')) | ConvertFrom-Json -ErrorAction Stop).strings
+    $englishKeys = @($englishStrings.PSObject.Properties.Name | Sort-Object)
+    Assert-Widget ($englishKeys.Count -eq 100 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 100 keys.'
     foreach ($code in $languageCodes) {
-        $pack = Read-WidgetLanguagePack $code $PSScriptRoot
-        Assert-Widget ((@($pack.Strings.Keys | Sort-Object) -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) ($code + ' should contain every canonical language key and no unknown keys.')
+        $strings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot ('locales\' + $code + '.json'))) | ConvertFrom-Json -ErrorAction Stop).strings
+        $keys = @($strings.PSObject.Properties.Name | Sort-Object)
+        Assert-Widget ($keys.Count -eq 100 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 100 keys as English.')
         foreach ($key in $requiredLanguageKeys) {
-            $englishPlaceholders = @([regex]::Matches($englishPack.Strings[$key], '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
-            $packPlaceholders = @([regex]::Matches($pack.Strings[$key], '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
+            $englishPlaceholders = @([regex]::Matches($englishStrings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
+            $packPlaceholders = @([regex]::Matches($strings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
             Assert-Widget (($englishPlaceholders -join "`n") -ceq ($packPlaceholders -join "`n")) ($code + ' should preserve the placeholder contract for ' + $key + '.')
         }
     }
@@ -2642,6 +2645,8 @@ if ($SelfTest) {
     Assert-Widget ((Get-WidgetText 'detail.title') -ceq '用量詳細資料') 'Traditional Chinese title should be translated.'
     Set-WidgetLanguage -Code 'ja-JP'
     Assert-Widget ((Get-WidgetText 'detail.title') -ceq '使用量の詳細') 'Japanese title should be translated.'
+    Assert-Widget ((Get-WidgetText 'cache.localHit') -ceq '累計キャッシュヒット' -and
+        (Get-WidgetText 'cache.localMiss') -ceq '累計キャッシュミス') 'Japanese cumulative cache labels should fit the detail card.'
     Assert-Widget ((Format-TokenCount 40860000) -ceq '4086万') 'Japanese token counts should use 万.'
     Set-WidgetLanguage -Code 'ko-KR'
     Assert-Widget ((Get-WidgetText 'detail.title') -ceq '사용량 세부 정보') 'Korean title should be translated.'
