@@ -5,6 +5,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+$personalPathPattern = '(?i)C:[\\/]+Users[\\/]+'
+$tempPathPattern = '(?i)AppData[\\/]+Local[\\/]+Temp'
 
 $commonRuntimePaths = @(
     'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs',
@@ -18,18 +20,34 @@ $commonRuntimePaths = @(
 function Fail-ReleasePackage([string]$Message) { throw "Release package check failed: $Message" }
 
 $secretJsonKeys = @('password', 'token', 'api_key', 'secret')
-function Test-SecretJsonKey([AllowNull()][object]$Value) {
-    if ($null -eq $Value) { return $false }
+function Find-ForbiddenJsonContent([AllowNull()][object]$Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) {
+        if ($Value -match $personalPathPattern) { return 'personal Windows path' }
+        if ($Value -match $tempPathPattern) { return 'temporary-directory path' }
+        return $null
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) {
+            if ($secretJsonKeys -icontains [string]$key) { return 'secret-like JSON property' }
+            $reason = Find-ForbiddenJsonContent $Value[$key]
+            if ($null -ne $reason) { return $reason }
+        }
+        return $null
+    }
     if ($Value -is [array]) {
         foreach ($item in $Value) {
-            if (Test-SecretJsonKey $item) { return $true }
+            $reason = Find-ForbiddenJsonContent $item
+            if ($null -ne $reason) { return $reason }
         }
-        return $false
+        return $null
     }
     foreach ($property in @($Value.PSObject.Properties | Where-Object MemberType -eq 'NoteProperty')) {
-        if ($secretJsonKeys -icontains $property.Name -or (Test-SecretJsonKey $property.Value)) { return $true }
+        if ($secretJsonKeys -icontains $property.Name) { return 'secret-like JSON property' }
+        $reason = Find-ForbiddenJsonContent $property.Value
+        if ($null -ne $reason) { return $reason }
     }
-    return $false
+    return $null
 }
 
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
@@ -49,7 +67,9 @@ else {
     $scanPaths = @($scanPaths | ForEach-Object { $_ -replace '/', '\' })
 }
 
-$missingPaths = @($requiredPaths | Where-Object { $scanPaths -notcontains $_ })
+$missingPaths = @($requiredPaths | Where-Object {
+    $scanPaths -notcontains $_ -or -not [IO.File]::Exists((Join-Path $package $_))
+})
 if ($missingPaths.Count -gt 0) { Fail-ReleasePackage ('missing required file(s): ' + ($missingPaths -join ', ')) }
 
 if ($RuntimeArchive) {
@@ -68,8 +88,8 @@ foreach ($relativePath in $scanPaths) {
 
     $fullPath = Join-Path $package $relativePath
     $content = [IO.File]::ReadAllText($fullPath)
-    if ($content -match '(?i)(?<![A-Za-z0-9])C:\\Users\\[A-Za-z0-9._-]+(?:\\|(?=$|[^A-Za-z0-9._-]))') { Fail-ReleasePackage "personal Windows path in file: $relativePath" }
-    if ($content -match '(?i)AppData\\Local\\Temp') { Fail-ReleasePackage "temporary-directory path in file: $relativePath" }
+    if ($content -match $personalPathPattern) { Fail-ReleasePackage "personal Windows path in file: $relativePath" }
+    if ($content -match $tempPathPattern) { Fail-ReleasePackage "temporary-directory path in file: $relativePath" }
     if ($content -match '(?i)(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{30,}') { Fail-ReleasePackage "GitHub token pattern in file: $relativePath" }
     if ($content -match '(?i)(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}') { Fail-ReleasePackage "GitHub token pattern in file: $relativePath" }
     if ($content -match '(?i)(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}') { Fail-ReleasePackage "API token pattern in file: $relativePath" }
@@ -80,12 +100,21 @@ foreach ($relativePath in $scanPaths) {
         foreach ($jsonText in $jsonTexts) {
             try { $jsonValue = $jsonText | ConvertFrom-Json }
             catch {
-                if ($jsonText -match '(?i)"(password|token|api_key|secret)"\s*:') {
-                    Fail-ReleasePackage "secret-like JSON property in file: $relativePath"
+                $propertyPattern = '(?<name>"(?:\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}|[^"\\\x00-\x1F])*")\s*:'
+                foreach ($propertyMatch in [regex]::Matches($jsonText, $propertyPattern)) {
+                    try {
+                        $propertyObject = '{' + $propertyMatch.Groups['name'].Value + ':null}' | ConvertFrom-Json
+                        $propertyName = @($propertyObject.PSObject.Properties)[0].Name
+                    }
+                    catch { continue }
+                    if ($secretJsonKeys -icontains $propertyName) {
+                        Fail-ReleasePackage "secret-like JSON property in file: $relativePath"
+                    }
                 }
                 continue
             }
-            if (Test-SecretJsonKey $jsonValue) { Fail-ReleasePackage "secret-like JSON property in file: $relativePath" }
+            $reason = Find-ForbiddenJsonContent $jsonValue
+            if ($null -ne $reason) { Fail-ReleasePackage "$reason in file: $relativePath" }
         }
     }
 }
