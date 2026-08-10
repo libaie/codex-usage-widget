@@ -2626,6 +2626,18 @@ if ($SelfTest) {
     ) }
     $script:DetailPopup = [pscustomobject]@{ IsOpen = $true }
     Set-WidgetLanguage -Code 'en-US'
+    $statusWidthProbe = [System.Windows.Controls.TextBlock]::new()
+    $statusWidthProbe.FontFamily = $script:UsageStatusText.FontFamily
+    $statusWidthProbe.FontSize = $script:UsageStatusText.FontSize
+    $statusWidthProbe.FontStretch = $script:UsageStatusText.FontStretch
+    $statusWidthProbe.FontStyle = $script:UsageStatusText.FontStyle
+    $statusWidthProbe.FontWeight = $script:UsageStatusText.FontWeight
+    foreach ($statusKey in 'status.sufficient', 'status.attention', 'status.waiting', 'status.waitingObservation') {
+        $statusWidthProbe.Text = Get-WidgetText $statusKey
+        $statusWidthProbe.Measure([System.Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
+        Assert-Widget ($statusWidthProbe.DesiredSize.Width -le 118) ('English ' + $statusKey + ' is ' +
+            $statusWidthProbe.DesiredSize.Width.ToString('0.##', [cultureinfo]::InvariantCulture) + 'px; it should fit the 118px status column.')
+    }
     Assert-Widget ((Format-TokenCount 40860000) -ceq '40.9M') 'English token counts should use M.'
     Assert-Widget ((Format-TokenCount 12300) -ceq '12.3K' -and
         (Format-TokenCount 1250000000) -ceq '1.25B') 'English compact token counts should preserve the K and B rounding contracts.'
