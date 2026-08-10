@@ -13,7 +13,7 @@ A polished, draggable Windows desktop widget for locally observed Codex usage, t
 
 ## Overview
 
-Codex Usage Widget turns locally recorded Codex activity into a compact desktop percentage ring. Hovering the ring opens a full Chinese detail card, while the normal desktop state stays minimal and unobtrusive.
+Codex Usage Widget turns locally recorded Codex activity into a compact desktop percentage ring. Hovering the ring opens a localized detail card, while the normal desktop state stays minimal and unobtrusive.
 
 ## Screenshots
 
@@ -29,8 +29,9 @@ Codex Usage Widget turns locally recorded Codex activity into a compact desktop 
 
 - Compact percentage-only ring that stays above normal windows.
 - Free dragging with automatic snapping near the current screen edge.
+- Five display languages: Simplified Chinese, Traditional Chinese, English, Japanese, and Korean.
 - Eight synchronized themes: Glacier Cyan, Nebula Purple, Deep Sea Blue, Sakura Mist, Aurora Green, Mica Silver, Sunset Orange, and Lime Glow.
-- A Chinese detail card on hover, including the limiting window, reset countdown, recently active tasks, token totals, context usage, input/output composition, and reasoning share.
+- A localized detail card on hover, including the limiting window, reset countdown, recently active tasks, token totals, context usage, input/output composition, and reasoning share.
 - Per-task cache-hit and cache-miss tokens, plus a separate cumulative local cache ledger that never falls when the active task changes.
 - Tasks updated within the last 30 minutes appear as lightweight capsules; hovering or focusing one reveals its own details.
 - Tray controls, keyboard access, low-usage notifications, single-instance protection, and a built-in self-test.
@@ -61,6 +62,12 @@ CodexUsageWidget/
 ├── Start-CodexUsageWidget.cmd
 ├── README.md
 ├── README.zh-CN.md
+├── locales/
+│   ├── zh-CN.json
+│   ├── zh-TW.json
+│   ├── en-US.json
+│   ├── ja-JP.json
+│   └── ko-KR.json
 ├── assets/screenshots/
 └── fixtures/
     ├── rate-limits.jsonl
@@ -76,13 +83,15 @@ CodexUsageWidget/
 | Hold the left mouse button and drag | Move the widget; release near an edge to snap it into place. |
 | Hover for about 250 ms | Open the usage detail card. |
 | Hover or focus an active task | Show that task's token, cache, and context data. |
-| Right-click the ring | Open the theme and exit menu. |
+| Right-click the ring | Open the language, theme, and exit menu. |
 | Enter or Space while the ring is focused | Toggle the detail card. |
 | Esc | Close the detail card. |
 | Shift+F10 | Open the same context menu from the keyboard. |
 | Tray menu | Show or exit the widget. |
 
-The selected position and theme are restored on the next launch. The detail accent color follows the ring theme; at 20% and 10% remaining, both views switch to warning and critical colors.
+On first launch, the widget follows the Windows UI language. An unsupported Windows language or a missing optional language pack falls back to English. Right-click the ring and choose **Language** to switch immediately; the choice is saved for the next launch.
+
+The selected position and theme are also restored on the next launch. The detail accent color follows the ring theme; at 20% and 10% remaining, both views switch to warning and critical colors.
 
 ## Data directory discovery
 
@@ -97,7 +106,7 @@ The Codex data directory is resolved in this order:
 |---|---|
 | Codex session events | Resolved `.codex\sessions` directory, read only |
 | Task name index | Resolved `.codex\session_index.jsonl`, read only when present |
-| Widget position, theme, and manual data path | `%LOCALAPPDATA%\CodexUsageWidget\preferences.json` |
+| Widget position, theme, language, and manual data path | `%LOCALAPPDATA%\CodexUsageWidget\preferences.json` |
 | Cumulative cache-token ledger | `%LOCALAPPDATA%\CodexUsageWidget\cache-token-ledger.json` |
 
 ## How the numbers are calculated
@@ -130,7 +139,7 @@ These are token quantities, not request counts and not official account-level st
 
 The widget does not scan the whole disk, inspect other Windows users, call a remote service, or read/store account credentials. It only reads local session records needed for the display and writes its own preferences and cumulative cache ledger under the current user's `%LOCALAPPDATA%` directory.
 
-Theme changes affect presentation only; they do not change task filtering, token calculations, or the cache ledger. Screenshots included in this project use fictional demo tasks and contain no real session or account data.
+Theme and language changes affect presentation only. They do not change statistics, cache accumulation, token calculations, or quota data. Screenshots included in this project use fictional demo tasks and contain no real session or account data.
 
 ## Self-test
 
