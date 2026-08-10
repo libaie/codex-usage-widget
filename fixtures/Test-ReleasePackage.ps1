@@ -1,0 +1,93 @@
+param(
+    [Parameter(Mandatory)][string]$PackageRoot,
+    [switch]$RuntimeArchive
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+
+$commonRuntimePaths = @(
+    'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs',
+    'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md',
+    'locales\en-US.json', 'locales\zh-CN.json', 'locales\zh-TW.json',
+    'locales\ja-JP.json', 'locales\ko-KR.json',
+    'assets\screenshots\widget-ring.png', 'assets\screenshots\widget-details.png',
+    'fixtures\rate-limits.jsonl', 'fixtures\Test-Launcher.ps1', 'fixtures\Test-ReleasePackage.ps1'
+)
+
+function Fail-ReleasePackage([string]$Message) { throw "Release package check failed: $Message" }
+
+$secretJsonKeys = @('password', 'token', 'api_key', 'secret')
+function Test-SecretJsonKey([AllowNull()][object]$Value) {
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [array]) {
+        foreach ($item in $Value) {
+            if (Test-SecretJsonKey $item) { return $true }
+        }
+        return $false
+    }
+    foreach ($property in @($Value.PSObject.Properties | Where-Object MemberType -eq 'NoteProperty')) {
+        if ($secretJsonKeys -icontains $property.Name -or (Test-SecretJsonKey $property.Value)) { return $true }
+    }
+    return $false
+}
+
+$package = (Resolve-Path -LiteralPath $PackageRoot).Path
+if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage "package root is not a directory: $package" }
+
+$requiredPaths = @($commonRuntimePaths)
+if (-not $RuntimeArchive) { $requiredPaths += @('SECURITY.md', 'CONTRIBUTING.md') }
+
+if ($RuntimeArchive) {
+    $scanPaths = @([IO.Directory]::GetFiles($package, '*', [IO.SearchOption]::AllDirectories) | ForEach-Object {
+        $_.Substring($package.TrimEnd('\').Length + 1)
+    })
+}
+else {
+    $scanPaths = @(& git -C $package -c core.quotepath=false ls-files --cached --others --exclude-standard --)
+    if ($LASTEXITCODE -ne 0) { Fail-ReleasePackage "git could not enumerate repository candidates under $package" }
+    $scanPaths = @($scanPaths | ForEach-Object { $_ -replace '/', '\' })
+}
+
+$missingPaths = @($requiredPaths | Where-Object { $scanPaths -notcontains $_ })
+if ($missingPaths.Count -gt 0) { Fail-ReleasePackage ('missing required file(s): ' + ($missingPaths -join ', ')) }
+
+if ($RuntimeArchive) {
+    $unexpectedPaths = @($scanPaths | Where-Object { $commonRuntimePaths -notcontains $_ })
+    if ($unexpectedPaths.Count -gt 0) { Fail-ReleasePackage ('unexpected runtime file(s): ' + ($unexpectedPaths -join ', ')) }
+}
+
+foreach ($relativePath in $scanPaths) {
+    if ($relativePath -match '(?i)(^|[\\/])(backups|dist|sessions)([\\/]|$)' -or
+        $relativePath -match '(?i)(^|[\\/])(preferences\.json|cache-token-ledger\.json|reminders\.json)$') {
+        Fail-ReleasePackage "forbidden path: $relativePath"
+    }
+
+    if ([IO.Path]::GetExtension($relativePath) -notin @('.ps1', '.vbs', '.cmd', '.md', '.json', '.jsonl', '.gitignore')) { continue }
+    if ($relativePath -ieq 'fixtures\Test-ReleasePackage.ps1') { continue }
+
+    $fullPath = Join-Path $package $relativePath
+    $content = [IO.File]::ReadAllText($fullPath)
+    if ($content -match '(?i)(?<![A-Za-z0-9])C:\\Users\\[A-Za-z0-9._-]+(?:\\|(?=$|[^A-Za-z0-9._-]))') { Fail-ReleasePackage "personal Windows path in file: $relativePath" }
+    if ($content -match '(?i)AppData\\Local\\Temp') { Fail-ReleasePackage "temporary-directory path in file: $relativePath" }
+    if ($content -match '(?i)(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{30,}') { Fail-ReleasePackage "GitHub token pattern in file: $relativePath" }
+    if ($content -match '(?i)(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}') { Fail-ReleasePackage "GitHub token pattern in file: $relativePath" }
+    if ($content -match '(?i)(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}') { Fail-ReleasePackage "API token pattern in file: $relativePath" }
+    if ($content -match '(?i)-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----') { Fail-ReleasePackage "private-key header in file: $relativePath" }
+    $extension = [IO.Path]::GetExtension($relativePath)
+    if ($extension -in @('.json', '.jsonl')) {
+        $jsonTexts = if ($extension -eq '.json') { @($content) } else { @($content -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 }) }
+        foreach ($jsonText in $jsonTexts) {
+            try { $jsonValue = $jsonText | ConvertFrom-Json }
+            catch {
+                if ($jsonText -match '(?i)"(password|token|api_key|secret)"\s*:') {
+                    Fail-ReleasePackage "secret-like JSON property in file: $relativePath"
+                }
+                continue
+            }
+            if (Test-SecretJsonKey $jsonValue) { Fail-ReleasePackage "secret-like JSON property in file: $relativePath" }
+        }
+    }
+}
+
+([char[]](0x5F00, 0x6E90, 0x5305, 0x68C0, 0x67E5, 0x901A, 0x8FC7, 0x3002) -join '')

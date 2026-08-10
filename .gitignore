@@ -1,0 +1,10 @@
+/dist/
+/backups/
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
+preferences.json
+cache-token-ledger.json
+reminders.json
+sessions/
