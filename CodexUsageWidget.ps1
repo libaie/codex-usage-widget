@@ -7,6 +7,9 @@ $script:CacheTokenLedger = $null
 $script:ReminderGateCache = $null
 $script:InstanceMutex = $null
 $script:OwnsInstanceMutex = $false
+$script:WidgetLanguagePacks = $null
+$script:CurrentLanguageCode = $null
+$script:CurrentLanguageCulture = [cultureinfo]'en-US'
 
 function Stop-InstanceMutex {
     if ($null -eq $script:InstanceMutex) { return }
@@ -689,6 +692,153 @@ function Save-TextAtomically {
         }
     }
     return $saved
+}
+
+function Get-WidgetLanguageCodes { @('zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR') }
+
+function Get-WidgetRequiredLanguageKeys {
+    @(
+        'app.title', 'app.alreadyRunning',
+        'menu.showWidget', 'menu.showDetails', 'menu.hideDetails', 'menu.language', 'menu.exit',
+        'language.zh-CN', 'language.zh-TW', 'language.en-US', 'language.ja-JP', 'language.ko-KR',
+        'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura', 'theme.aurora', 'theme.mica', 'theme.sunset', 'theme.lime',
+        'detail.title', 'detail.remaining', 'detail.observed', 'detail.status',
+        'activity.title', 'activity.window30m', 'activity.empty30m', 'activity.namesUnavailable',
+        'task.noTokenData', 'task.activePrefix',
+        'token.total', 'token.context', 'token.contextUsage', 'token.composition', 'token.input', 'token.output', 'token.reasoningShare',
+        'cache.hit', 'cache.miss', 'cache.taskHit', 'cache.taskMiss', 'cache.localHit', 'cache.localMiss',
+        'status.waitingObservation', 'status.observationNormal', 'status.sufficient', 'status.attention', 'status.critical', 'status.waiting', 'status.unavailable', 'status.noData',
+        'diagnostic.missingDirectory', 'diagnostic.emptyDirectory', 'diagnostic.readFailed', 'diagnostic.noValidEvent', 'diagnostic.unavailable',
+        'limit.unknown', 'limit.days', 'limit.hours', 'limit.minutes',
+        'countdown.daysHours', 'countdown.hoursMinutes', 'countdown.minutes', 'countdown.waiting',
+        'number.tenThousand', 'number.hundredMillion', 'number.thousand', 'number.million', 'number.billion',
+        'composition.values', 'cache.value',
+        'reminder.title', 'reminder.body',
+        'picker.description', 'picker.openFailed', 'picker.invalidDirectory',
+        'fatal.template', 'fatal.startProblem', 'fatal.unsupportedHost', 'fatal.unsupportedThread',
+        'fatal.uiLoadCause', 'fatal.mutexCause', 'fatal.windowCause', 'fatal.notificationCause', 'fatal.workerCause',
+        'fatal.useLauncherFix', 'fatal.exitOldFix', 'fatal.uiRepairFix', 'fatal.restartNotificationFix', 'fatal.restoreFix',
+        'accessibility.ringName', 'accessibility.ringHelp', 'accessibility.localObservation', 'accessibility.waitingState', 'accessibility.unavailableState',
+        'accessibility.criticalState', 'accessibility.attentionState', 'accessibility.normalState', 'accessibility.usageSummary', 'accessibility.activeTask'
+    )
+}
+
+function Read-WidgetLanguagePack {
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    if ($Code -cnotin @(Get-WidgetLanguageCodes)) { throw [ArgumentException]::new('Unsupported language code.', 'Code') }
+    $path = Join-Path $Root ('locales\' + $Code + '.json')
+    $file = [System.IO.FileInfo]::new($path)
+    if (-not $file.Exists) { throw [System.IO.FileNotFoundException]::new('Language pack not found.', $path) }
+    if ($file.Length -gt 262144) { throw [System.IO.InvalidDataException]::new('Language pack exceeds 256 KiB.') }
+
+    $pack = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+    if ($pack -isnot [pscustomobject]) { throw [System.IO.InvalidDataException]::new('Language pack root must be an object.') }
+    $codeProperty = $pack.PSObject.Properties['code']
+    $cultureProperty = $pack.PSObject.Properties['culture']
+    $nativeNameProperty = $pack.PSObject.Properties['nativeName']
+    $stringsProperty = $pack.PSObject.Properties['strings']
+    if ($null -eq $codeProperty -or $codeProperty.Value -isnot [string] -or $codeProperty.Value -cne $Code -or
+        $null -eq $cultureProperty -or $cultureProperty.Value -isnot [string] -or $cultureProperty.Value -cne $Code -or
+        $null -eq $nativeNameProperty -or $nativeNameProperty.Value -isnot [string] -or
+        $nativeNameProperty.Value.Length -lt 1 -or $nativeNameProperty.Value.Length -gt 64 -or
+        $null -eq $stringsProperty -or $stringsProperty.Value -isnot [pscustomobject]) {
+        throw [System.IO.InvalidDataException]::new('Language pack metadata is invalid.')
+    }
+
+    $required = [Collections.Hashtable]::new([StringComparer]::Ordinal)
+    foreach ($key in Get-WidgetRequiredLanguageKeys) { $required[$key] = $true }
+    $strings = [Collections.Hashtable]::new([StringComparer]::Ordinal)
+    foreach ($property in $stringsProperty.Value.PSObject.Properties) {
+        if ($property.Value -isnot [string] -or $property.Value.Length -gt 1000) {
+            throw [System.IO.InvalidDataException]::new('Language-pack strings must be strings no longer than 1000 characters.')
+        }
+        if ($required.ContainsKey($property.Name)) { $strings[$property.Name] = [string]$property.Value }
+    }
+    return [pscustomobject]@{
+        Code = [string]$codeProperty.Value
+        NativeName = [string]$nativeNameProperty.Value
+        Culture = [string]$cultureProperty.Value
+        Strings = $strings
+    }
+}
+
+function Resolve-WidgetLanguageCode {
+    param(
+        [AllowNull()]$SavedLanguage,
+        [Parameter(Mandatory)][cultureinfo]$UiCulture
+    )
+
+    if ($SavedLanguage -is [string] -and $SavedLanguage -cin @(Get-WidgetLanguageCodes)) { return $SavedLanguage }
+    $name = $UiCulture.Name
+    if ($name -match '^zh-(Hans|CN|SG)') { return 'zh-CN' }
+    if ($name -match '^zh-(Hant|TW|HK|MO)') { return 'zh-TW' }
+    if ($name -match '^ja(?:-|$)') { return 'ja-JP' }
+    if ($name -match '^ko(?:-|$)') { return 'ko-KR' }
+    return 'en-US'
+}
+
+function Initialize-WidgetLocalization {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [AllowNull()]$SavedLanguage,
+        [Parameter(Mandatory)][cultureinfo]$UiCulture
+    )
+
+    try {
+        $english = Read-WidgetLanguagePack 'en-US' $Root
+        foreach ($key in Get-WidgetRequiredLanguageKeys) {
+            if (-not $english.Strings.ContainsKey($key)) { throw [System.IO.InvalidDataException]::new('English language pack is incomplete.') }
+            try { [void][string]::Format([cultureinfo]::InvariantCulture, $english.Strings[$key], [object[]](0..9)) }
+            catch { throw [System.IO.InvalidDataException]::new('English language pack has an invalid format string.', $_.Exception) }
+        }
+    }
+    catch {
+        throw [System.IO.InvalidDataException]::new('English language pack is unavailable or invalid. / 英语语言包缺失或无效。', $_.Exception)
+    }
+
+    $packs = [Collections.Hashtable]::new([StringComparer]::Ordinal)
+    $packs['en-US'] = $english
+    foreach ($code in Get-WidgetLanguageCodes) {
+        if ($code -ceq 'en-US') { continue }
+        $path = Join-Path $Root ('locales\' + $code + '.json')
+        if (-not [System.IO.File]::Exists($path)) { continue }
+        try {
+            $pack = Read-WidgetLanguagePack $code $Root
+            foreach ($key in @($pack.Strings.Keys)) {
+                $englishPlaceholders = @([regex]::Matches($english.Strings[$key], '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
+                $translatedPlaceholders = @([regex]::Matches($pack.Strings[$key], '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
+                try { [void][string]::Format([cultureinfo]::InvariantCulture, $pack.Strings[$key], [object[]](0..9)) }
+                catch { [void]$pack.Strings.Remove($key); continue }
+                if (($englishPlaceholders -join "`n") -cne ($translatedPlaceholders -join "`n")) { [void]$pack.Strings.Remove($key) }
+            }
+            $packs[$code] = $pack
+        }
+        catch { }
+    }
+
+    $selectedCode = Resolve-WidgetLanguageCode $SavedLanguage $UiCulture
+    if (-not $packs.ContainsKey($selectedCode)) { $selectedCode = 'en-US' }
+    $script:WidgetLanguagePacks = $packs
+    $script:CurrentLanguageCode = $selectedCode
+    $script:CurrentLanguageCulture = [cultureinfo]::GetCultureInfo($packs[$selectedCode].Culture)
+}
+
+function Get-WidgetText {
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [object[]]$Arguments
+    )
+
+    if ($null -eq $script:WidgetLanguagePacks) { throw [InvalidOperationException]::new('Widget localization is not initialized.') }
+    $text = $script:WidgetLanguagePacks[$script:CurrentLanguageCode].Strings[$Key]
+    if ($null -eq $text) { $text = $script:WidgetLanguagePacks['en-US'].Strings[$Key] }
+    if ($null -eq $text) { throw [Collections.Generic.KeyNotFoundException]::new('Unknown widget language key: ' + $Key) }
+    if ($PSBoundParameters.ContainsKey('Arguments')) { return [string]::Format($script:CurrentLanguageCulture, $text, $Arguments) }
+    return $text
 }
 
 function Update-CumulativeCacheTokens {
@@ -2115,6 +2265,70 @@ function Get-WidgetXaml {
 
 if ($SelfTest) {
     $ErrorActionPreference = 'Stop'
+    $languageCodes = @(Get-WidgetLanguageCodes)
+    Assert-Widget (($languageCodes -join ',') -ceq 'zh-CN,zh-TW,en-US,ja-JP,ko-KR') 'the language catalog should expose the approved five codes.'
+    Assert-Widget ((Resolve-WidgetLanguageCode $null ([cultureinfo]'zh-Hans-CN')) -ceq 'zh-CN') 'Simplified Chinese UI culture should map to zh-CN.'
+    Assert-Widget ((Resolve-WidgetLanguageCode $null ([cultureinfo]'zh-Hant-TW')) -ceq 'zh-TW') 'Traditional Chinese UI culture should map to zh-TW.'
+    Assert-Widget ((Resolve-WidgetLanguageCode $null ([cultureinfo]'ja-JP')) -ceq 'ja-JP') 'Japanese UI culture should map to ja-JP.'
+    Assert-Widget ((Resolve-WidgetLanguageCode $null ([cultureinfo]'ko-KR')) -ceq 'ko-KR') 'Korean UI culture should map to ko-KR.'
+    Assert-Widget ((Resolve-WidgetLanguageCode $null ([cultureinfo]'fr-FR')) -ceq 'en-US') 'unsupported UI cultures should fall back to English.'
+    Assert-Widget ((Resolve-WidgetLanguageCode 'ja-JP' ([cultureinfo]'en-US')) -ceq 'ja-JP') 'a saved valid language should win.'
+    Assert-Widget ((Resolve-WidgetLanguageCode 'bad-code' ([cultureinfo]'en-US')) -ceq 'en-US') 'an invalid saved language should be ignored.'
+    Assert-Widget ((Resolve-WidgetLanguageCode 'JA-jp' ([cultureinfo]'en-US')) -ceq 'en-US') 'saved language codes should be case-sensitive.'
+
+    $requiredLanguageKeys = @(Get-WidgetRequiredLanguageKeys)
+    Assert-Widget ($requiredLanguageKeys.Count -eq 100 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 100) 'the required language-key catalog should contain exactly 100 unique keys.'
+    $temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+    $temporaryLocaleRoot = Join-Path $temporaryParent ('CodexUsageWidget-Locale-' + [guid]::NewGuid().ToString('N'))
+    $temporaryLocales = Join-Path $temporaryLocaleRoot 'locales'
+    try {
+        [void][System.IO.Directory]::CreateDirectory($temporaryLocales)
+        $temporaryPackPath = Join-Path $temporaryLocales 'en-US.json'
+        [System.IO.File]::WriteAllText($temporaryPackPath, ('x' * 262145), [System.Text.UTF8Encoding]::new($false))
+        $rejected = $false
+        try { [void](Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot) } catch { $rejected = $true }
+        Assert-Widget $rejected 'language packs larger than 256 KiB should be rejected.'
+
+        $invalidPacks = @(
+            '{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":{"value":"bad"}}}',
+            '{"code":"EN-us","nativeName":"English","culture":"en-US","strings":{"app.title":"Usage widget"}}',
+            '{"code":"en-US","nativeName":"English","culture":"EN-us","strings":{"app.title":"Usage widget"}}',
+            '{"code":"en-US","nativeName":"","culture":"en-US","strings":{"app.title":"Usage widget"}}',
+            ('{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":"' + ('x' * 1001) + '"}}')
+        )
+        foreach ($invalidPack in $invalidPacks) {
+            [System.IO.File]::WriteAllText($temporaryPackPath, $invalidPack, [System.Text.UTF8Encoding]::new($false))
+            $rejected = $false
+            try { [void](Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot) } catch { $rejected = $true }
+            Assert-Widget $rejected 'invalid language-pack metadata or string values should be rejected.'
+        }
+        [System.IO.File]::WriteAllText($temporaryPackPath, '{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":"Usage widget"}}', [System.Text.UTF8Encoding]::new($false))
+        $safeEnglishFailure = $null
+        try { Initialize-WidgetLocalization $temporaryLocaleRoot $null ([cultureinfo]'en-US') } catch { $safeEnglishFailure = $_.Exception.Message }
+        Assert-Widget ($safeEnglishFailure -match 'English language pack' -and $safeEnglishFailure -match '英语语言包') 'invalid English packs should use the built-in bilingual exception contract.'
+    }
+    finally {
+        $fullTemporaryLocaleRoot = [System.IO.Path]::GetFullPath($temporaryLocaleRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        Assert-Widget ([System.IO.Path]::GetDirectoryName($fullTemporaryLocaleRoot) -ceq $temporaryParent -and
+            [System.IO.Path]::GetFileName($fullTemporaryLocaleRoot).StartsWith('CodexUsageWidget-Locale-', [StringComparison]::Ordinal)) 'locale-test cleanup should remain inside the unique temporary root.'
+        if ([System.IO.Directory]::Exists($fullTemporaryLocaleRoot)) { [System.IO.Directory]::Delete($fullTemporaryLocaleRoot, $true) }
+    }
+
+    Initialize-WidgetLocalization $PSScriptRoot 'zh-CN' ([cultureinfo]'en-US')
+    Assert-Widget ($script:CurrentLanguageCode -ceq 'zh-CN' -and $script:CurrentLanguageCulture.Name -ceq 'zh-CN') 'localization should use the selected pack and culture.'
+    Assert-Widget ((Get-WidgetText 'app.title') -ceq '用量小组件') 'the Simplified Chinese pack should expose approved UI text.'
+    Assert-Widget ((Get-WidgetText 'countdown.daysHours' @(2, 3)) -ceq '2 天 3 小时后重置') 'localized placeholders should format with the active culture.'
+    $englishPack = Read-WidgetLanguagePack 'en-US' $PSScriptRoot
+    foreach ($code in 'en-US', 'zh-CN') {
+        $pack = Read-WidgetLanguagePack $code $PSScriptRoot
+        Assert-Widget ((@($pack.Strings.Keys | Sort-Object) -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) ($code + ' should contain every canonical language key and no unknown keys.')
+        foreach ($key in $requiredLanguageKeys) {
+            $englishPlaceholders = @([regex]::Matches($englishPack.Strings[$key], '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
+            $packPlaceholders = @([regex]::Matches($pack.Strings[$key], '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
+            Assert-Widget (($englishPlaceholders -join "`n") -ceq ($packPlaceholders -join "`n")) ($code + ' should preserve the placeholder contract for ' + $key + '.')
+        }
+    }
+
     $widgetXaml = Get-WidgetXaml
     Assert-Widget ($widgetXaml -match '(?s)<Window\b[^>]*\bWidth="100"[^>]*\bHeight="100"') 'the widget window should be 100 by 100.'
     Assert-Widget ($widgetXaml -match 'x:Name="CircleHost"\s+Width="82"\s+Height="82"') 'the circle host should be 82 by 82.'
