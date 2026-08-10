@@ -2962,6 +2962,7 @@ if ($SelfTest) {
     $runtimeStart = $sourceText.LastIndexOf($runtimeMarker, [StringComparison]::Ordinal)
     $runtimeSource = if ($runtimeStart -ge 0) { $sourceText.Substring($runtimeStart) } else { '' }
     Assert-Widget ($runtimeSource.Length -gt 0) 'runtime source should follow the self-test return guard.'
+    Assert-Widget ($runtimeSource.Contains('-UiCulture ([cultureinfo]::CurrentUICulture)')) 'startup localization should evaluate the current UI culture before argument binding.'
     $pickerFunctionName = 'Show-CodexDataDirectoryPicker'
     Assert-Widget ($runtimeSource.Contains(('function ' + $pickerFunctionName))) 'runtime should provide a Codex data directory picker.'
     $pickerCallMarker = '$selectedCodexDataDirectory = Show-CodexDataDirectoryPicker'
@@ -3789,7 +3790,7 @@ $script:WidgetPreferences = Get-WidgetPreferences
 try {
     Initialize-WidgetLocalization -Root $PSScriptRoot `
         -SavedLanguage $script:WidgetPreferences.Language `
-        -UiCulture [cultureinfo]::CurrentUICulture
+        -UiCulture ([cultureinfo]::CurrentUICulture)
 }
 catch {
     Show-WidgetFatalError `
