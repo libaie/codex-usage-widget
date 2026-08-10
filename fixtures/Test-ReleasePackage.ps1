@@ -193,7 +193,7 @@ foreach ($relativePath in $scanPaths) {
         Fail-ReleasePackage "forbidden path: $relativePath"
     }
 
-    if ([IO.Path]::GetExtension($relativePath) -ceq '.png') { continue }
+    if ([IO.Path]::GetExtension($relativePath) -ieq '.png') { continue }
 
     $fullPath = Join-Path $package $relativePath
     $content = [IO.File]::ReadAllText($fullPath)
@@ -204,8 +204,8 @@ foreach ($relativePath in $scanPaths) {
     if ($content -match '(?i)(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}') { Fail-ReleasePackage "API token pattern in file: $relativePath" }
     if ($content -match '(?i)-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----') { Fail-ReleasePackage "private-key header in file: $relativePath" }
     $extension = [IO.Path]::GetExtension($relativePath)
-    if ($extension -cin @('.json', '.jsonl')) {
-        $jsonTexts = if ($extension -ceq '.json') { @($content) } else { @($content -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 }) }
+    if ($extension -iin @('.json', '.jsonl')) {
+        $jsonTexts = if ($extension -ieq '.json') { @($content) } else { @($content -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 }) }
         foreach ($jsonText in $jsonTexts) {
             try { $jsonValue = $jsonText | ConvertFrom-Json }
             catch {
