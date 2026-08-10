@@ -28,7 +28,10 @@ function Format-WidgetFatalError {
         [Parameter(Mandatory)][string]$Fix
     )
 
-    return "$Problem`r`n`r`n原因：$Cause`r`n处理：$Fix"
+    if ($null -ne $script:WidgetLanguagePacks) {
+        return Get-WidgetText 'fatal.template' @($Problem, $Cause, $Fix)
+    }
+    return "Problem / 问题：$Problem`r`n`r`nCause / 原因：$Cause`r`nFix / 解决办法：$Fix"
 }
 
 function Show-WidgetFatalError {
@@ -39,10 +42,11 @@ function Show-WidgetFatalError {
     )
 
     $body = Format-WidgetFatalError $Problem $Cause $Fix
+    $title = if ($null -ne $script:WidgetLanguagePacks) { Get-WidgetText 'app.title' } else { 'Usage widget / 用量小组件' }
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [void][System.Windows.Forms.MessageBox]::Show(
-            $body, '用量小组件',
+            $body, $title,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error)
         return
@@ -50,7 +54,7 @@ function Show-WidgetFatalError {
     catch { }
     try {
         $shell = New-Object -ComObject WScript.Shell
-        [void]$shell.Popup($body, 0, '用量小组件', 16)
+        [void]$shell.Popup($body, 0, $title, 16)
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
     }
     catch { }
@@ -1018,19 +1022,19 @@ function Register-UsageReminderThreshold {
 
 function Get-WidgetThemes {
     @(
-        [pscustomobject]@{ Name = '冰川青'; Start = '#7BFFE0'; End = '#55CFFF' },
-        [pscustomobject]@{ Name = '星云紫'; Start = '#D8A7FF'; End = '#7C8CFF' },
-        [pscustomobject]@{ Name = '深海蓝'; Start = '#82D9FF'; End = '#4478FF' },
-        [pscustomobject]@{ Name = '樱雾粉'; Start = '#FFB1D8'; End = '#FF719D' },
-        [pscustomobject]@{ Name = '极光绿'; Start = '#7CFFB2'; End = '#38D989' },
-        [pscustomobject]@{ Name = '云母银'; Start = '#F1F5FF'; End = '#9DAAC3' },
-        [pscustomobject]@{ Name = '日落橙'; Start = '#FFC28A'; End = '#FF806D' },
-        [pscustomobject]@{ Name = '青柠光'; Start = '#DCFF7C'; End = '#7DDB66' }
+        [pscustomobject]@{ NameKey = 'theme.glacier'; Start = '#7BFFE0'; End = '#55CFFF' },
+        [pscustomobject]@{ NameKey = 'theme.nebula'; Start = '#D8A7FF'; End = '#7C8CFF' },
+        [pscustomobject]@{ NameKey = 'theme.ocean'; Start = '#82D9FF'; End = '#4478FF' },
+        [pscustomobject]@{ NameKey = 'theme.sakura'; Start = '#FFB1D8'; End = '#FF719D' },
+        [pscustomobject]@{ NameKey = 'theme.aurora'; Start = '#7CFFB2'; End = '#38D989' },
+        [pscustomobject]@{ NameKey = 'theme.mica'; Start = '#F1F5FF'; End = '#9DAAC3' },
+        [pscustomobject]@{ NameKey = 'theme.sunset'; Start = '#FFC28A'; End = '#FF806D' },
+        [pscustomobject]@{ NameKey = 'theme.lime'; Start = '#DCFF7C'; End = '#7DDB66' }
     )
 }
 
 function Get-WidgetPreferences {
-    $preferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 0; CodexDataDirectory = $null }
+    $preferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 0; CodexDataDirectory = $null; Language = $null }
     try {
         $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'preferences.json'
         if (-not [System.IO.File]::Exists($path)) { return $preferences }
@@ -1048,6 +1052,10 @@ function Get-WidgetPreferences {
         $codexDataDirectory = $stored.PSObject.Properties['CodexDataDirectory']
         if ($null -ne $codexDataDirectory) {
             $preferences.CodexDataDirectory = ConvertTo-CodexDataDirectoryPath $codexDataDirectory.Value
+        }
+        $language = $stored.PSObject.Properties['Language']
+        if ($null -ne $language -and $language.Value -is [string] -and @(Get-WidgetLanguageCodes) -ccontains $language.Value) {
+            $preferences.Language = $language.Value
         }
         $themeCount = @(Get-WidgetThemes).Count
         $theme = $stored.PSObject.Properties['Theme']
@@ -1068,13 +1076,15 @@ function Save-WidgetPreferences {
         [Parameter(Mandatory)]$Top,
         [Parameter(Mandatory)][AllowNull()]$Monitor,
         [Parameter(Mandatory)]$Theme,
-        [AllowNull()]$CodexDataDirectory = $null
+        [AllowNull()]$CodexDataDirectory = $null,
+        [AllowNull()][string]$Language = $null
     )
 
     if ($Left -is [bool] -or $Left -isnot [System.ValueType] -or
         $Top -is [bool] -or $Top -isnot [System.ValueType] -or
         $Theme -is [bool] -or $Theme -isnot [System.ValueType] -or
-        ($null -ne $Monitor -and ($Monitor -isnot [string] -or $Monitor.Length -gt 256 -or [string]::IsNullOrWhiteSpace($Monitor)))) { return $false }
+        ($null -ne $Monitor -and ($Monitor -isnot [string] -or $Monitor.Length -gt 256 -or [string]::IsNullOrWhiteSpace($Monitor))) -or
+        ($null -ne $Language -and @(Get-WidgetLanguageCodes) -cnotcontains $Language)) { return $false }
     $codexDataDirectoryPath = ConvertTo-CodexDataDirectoryPath $CodexDataDirectory
     if ($null -ne $CodexDataDirectory -and $null -eq $codexDataDirectoryPath) { return $false }
     try {
@@ -1092,6 +1102,7 @@ function Save-WidgetPreferences {
     $json = [pscustomobject]@{
         Left = $leftValue; Top = $topValue; Monitor = $Monitor; Theme = [int]$themeValue
         CodexDataDirectory = $codexDataDirectoryPath
+        Language = $Language
     } | ConvertTo-Json -Compress
     return Save-TextAtomically -Path $path -Text $json
 }
@@ -1228,10 +1239,10 @@ function Get-WidgetAppearance {
         throw [ArgumentException]::new('Theme must be an integer in the theme catalog.', 'Theme')
     }
     if ($remaining -le 10) {
-        return [pscustomobject]@{ Name = '紧急'; Start = '#FF657D'; End = '#FF657D' }
+        return [pscustomobject]@{ NameKey = 'accessibility.criticalState'; Start = '#FF657D'; End = '#FF657D' }
     }
     if ($remaining -le 20) {
-        return [pscustomobject]@{ Name = '注意'; Start = '#FFD166'; End = '#FFD166' }
+        return [pscustomobject]@{ NameKey = 'accessibility.attentionState'; Start = '#FFD166'; End = '#FFD166' }
     }
     return $themes[[int]$themeNumber]
 }
@@ -1241,13 +1252,29 @@ function Format-TokenCount {
 
     $number = ConvertTo-FiniteWidgetNumber $Value 'Value'
     if ($number -lt 0) { throw [ArgumentException]::new('Value must not be negative.', 'Value') }
-    $culture = [Globalization.CultureInfo]::GetCultureInfo('zh-CN')
-    if ($number -ge 100000000) {
-        return ($number / 100000000).ToString('0.##', $culture) + ' 亿'
+    $culture = $script:CurrentLanguageCulture
+    if ($script:CurrentLanguageCode -cne 'en-US') {
+        if ($number -ge 100000000) {
+            return Get-WidgetText 'number.hundredMillion' @(($number / 100000000).ToString('0.##', $culture))
+        }
+        if ($number -ge 10000) {
+            $compact = $number / 10000
+            return Get-WidgetText 'number.tenThousand' @($compact.ToString($(if ($compact -ge 1000) { '0' } else { '0.#' }), $culture))
+        }
     }
-    if ($number -ge 10000) {
-        $compact = $number / 10000
-        return $compact.ToString($(if ($compact -ge 1000) { '0' } else { '0.#' }), $culture) + ' 万'
+    else {
+        if ($number -ge 1000000000) {
+            return Get-WidgetText 'number.billion' @(($number / 1000000000).ToString('0.##', $culture))
+        }
+        foreach ($compactNumber in @(
+            @(1000000, 'number.million'),
+            @(1000, 'number.thousand')
+        )) {
+            if ($number -ge $compactNumber[0]) {
+                $compact = $number / $compactNumber[0]
+                return Get-WidgetText $compactNumber[1] @($compact.ToString('0.#', $culture))
+            }
+        }
     }
     return $number.ToString('N0', $culture)
 }
@@ -1273,11 +1300,11 @@ function Get-TokenDetailPresentation {
     $reasoningVisible = $null -ne $values.ReasoningOutputPercent
     $anyVisible = $cumulativeVisible -or $contextVisible -or $contextPercentVisible -or
         $compositionVisible -or $cachedVisible -or $reasoningVisible
-    $culture = [Globalization.CultureInfo]::GetCultureInfo('zh-CN')
-    $cacheHitRate = if ($null -ne $values.CacheHitPercent) { ([double]$values.CacheHitPercent).ToString('0.0', $culture) + '%' } else { '—' }
-    $cacheMissRate = if ($null -ne $values.CacheMissPercent) { ([double]$values.CacheMissPercent).ToString('0.0', $culture) + '%' } else { '—' }
-    $cacheHitLabel = if ($TaskCache) { '该任务缓存命中令牌　' } else { '本机累计缓存命中令牌　' }
-    $cacheMissLabel = if ($TaskCache) { '该任务缓存未命中令牌　' } else { '本机累计缓存未命中令牌　' }
+    $culture = $script:CurrentLanguageCulture
+    $cacheHitRate = if ($null -ne $values.CacheHitPercent) { ([double]$values.CacheHitPercent).ToString('0.0', $culture) } else { $null }
+    $cacheMissRate = if ($null -ne $values.CacheMissPercent) { ([double]$values.CacheMissPercent).ToString('0.0', $culture) } else { $null }
+    $cacheHitLabel = Get-WidgetText $(if ($TaskCache) { 'cache.taskHit' } else { 'cache.localHit' })
+    $cacheMissLabel = Get-WidgetText $(if ($TaskCache) { 'cache.taskMiss' } else { 'cache.localMiss' })
     $cumulativeValueText = if ($cumulativeVisible) { Format-TokenCount $values.CumulativeTokens } else { $null }
     $contextValueText = if ($contextVisible) {
         (Format-TokenCount $values.ContextTokens) + ' / ' + (Format-TokenCount $values.ContextLimit)
@@ -1286,14 +1313,18 @@ function Get-TokenDetailPresentation {
         ([double]$values.ContextPercent).ToString('0.0', $culture) + '%'
     } else { $null }
     $compositionValueText = if ($compositionVisible) {
-        '输入 ' + ([double]$values.InputPercent).ToString('0.0', $culture) +
-            '%　输出 ' + ([double]$values.OutputPercent).ToString('0.0', $culture) + '%'
+        Get-WidgetText 'composition.values' @(
+            ([double]$values.InputPercent).ToString('0.0', $culture),
+            ([double]$values.OutputPercent).ToString('0.0', $culture)
+        )
     } else { $null }
     $cacheHitValueText = if ($cachedVisible) {
-        (Format-TokenCount $values.CacheHitTokens) + '（' + $cacheHitRate + '）'
+        $text = Get-WidgetText 'cache.value' @((Format-TokenCount $values.CacheHitTokens), $(if ($null -ne $cacheHitRate) { $cacheHitRate } else { '__WIDGET_RATE__' }))
+        if ($null -ne $cacheHitRate) { $text } else { $text.Replace('__WIDGET_RATE__%', '—') }
     } else { $null }
     $cacheMissValueText = if ($cachedVisible) {
-        (Format-TokenCount $values.CacheMissTokens) + '（' + $cacheMissRate + '）'
+        $text = Get-WidgetText 'cache.value' @((Format-TokenCount $values.CacheMissTokens), $(if ($null -ne $cacheMissRate) { $cacheMissRate } else { '__WIDGET_RATE__' }))
+        if ($null -ne $cacheMissRate) { $text } else { $text.Replace('__WIDGET_RATE__%', '—') }
     } else { $null }
     $reasoningValueText = if ($reasoningVisible) {
         ([double]$values.ReasoningOutputPercent).ToString('0.0', $culture) + '%'
@@ -1301,18 +1332,18 @@ function Get-TokenDetailPresentation {
     [pscustomobject]@{
         AnyVisible              = $anyVisible
         CumulativeVisible       = $cumulativeVisible
-        CumulativeText          = if ($cumulativeVisible) { '累计令牌　' + $cumulativeValueText } else { $null }
+        CumulativeText          = if ($cumulativeVisible) { (Get-WidgetText 'token.total') + '　' + $cumulativeValueText } else { $null }
         CumulativeValueText     = $cumulativeValueText
         ContextVisible          = $contextVisible
-        ContextText             = if ($contextVisible) { '上下文　' + $contextValueText } else { $null }
+        ContextText             = if ($contextVisible) { (Get-WidgetText 'token.context') + '　' + $contextValueText } else { $null }
         ContextValueText        = $contextValueText
         ContextPercentVisible   = $contextPercentVisible
-        ContextPercentText      = if ($contextPercentVisible) { '上下文占用　' + $contextPercentValueText } else { $null }
+        ContextPercentText      = if ($contextPercentVisible) { (Get-WidgetText 'token.contextUsage') + '　' + $contextPercentValueText } else { $null }
         ContextPercentValueText = $contextPercentValueText
         ContextBarVisible       = $contextPercentVisible
         ContextPercent          = $values.ContextPercent
         CompositionVisible      = $compositionVisible
-        CompositionText         = if ($compositionVisible) { '输入 / 输出构成　' + $compositionValueText } else { $null }
+        CompositionText         = if ($compositionVisible) { (Get-WidgetText 'token.composition') + '　' + $compositionValueText } else { $null }
         CompositionValueText    = $compositionValueText
         CompositionBarVisible   = $compositionVisible
         InputPercent            = $values.InputPercent
@@ -1321,10 +1352,10 @@ function Get-TokenDetailPresentation {
         CacheHitValueText       = $cacheHitValueText
         CacheMissValueText      = $cacheMissValueText
         CachedText              = if ($cachedVisible) {
-            $cacheHitLabel + $cacheHitValueText + "`n" + $cacheMissLabel + $cacheMissValueText
+            $cacheHitLabel + '　' + $cacheHitValueText + "`n" + $cacheMissLabel + '　' + $cacheMissValueText
         } else { $null }
         ReasoningVisible        = $reasoningVisible
-        ReasoningText           = if ($reasoningVisible) { '输出中推理占比　' + $reasoningValueText } else { $null }
+        ReasoningText           = if ($reasoningVisible) { (Get-WidgetText 'token.reasoningShare') + '　' + $reasoningValueText } else { $null }
         ReasoningValueText      = $reasoningValueText
     }
 }
@@ -1352,7 +1383,7 @@ function Set-DetailText {
 function Format-LimitWindow {
     param([AllowNull()]$Minutes)
 
-    if ($null -eq $Minutes) { return '未知周期' }
+    if ($null -eq $Minutes) { return Get-WidgetText 'limit.unknown' }
     $number = ConvertTo-FiniteWidgetNumber $Minutes 'Minutes'
     $typeCode = [Type]::GetTypeCode($Minutes.GetType())
     if ($number -le 0 -or
@@ -1369,10 +1400,10 @@ function Format-LimitWindow {
     else {
         [decimal]$number
     }
-    $culture = [Globalization.CultureInfo]::GetCultureInfo('zh-CN')
-    if ($exactMinutes -ge 1440 -and $exactMinutes % 1440 -eq 0) { return ($exactMinutes / 1440).ToString('0', $culture) + ' 天' }
-    if ($exactMinutes -ge 60 -and $exactMinutes % 60 -eq 0) { return ($exactMinutes / 60).ToString('0', $culture) + ' 小时' }
-    return $exactMinutes.ToString('0', $culture) + ' 分钟'
+    $culture = $script:CurrentLanguageCulture
+    if ($exactMinutes -ge 1440 -and $exactMinutes % 1440 -eq 0) { return Get-WidgetText 'limit.days' @(($exactMinutes / 1440).ToString('0', $culture)) }
+    if ($exactMinutes -ge 60 -and $exactMinutes % 60 -eq 0) { return Get-WidgetText 'limit.hours' @(($exactMinutes / 60).ToString('0', $culture)) }
+    return Get-WidgetText 'limit.minutes' @($exactMinutes.ToString('0', $culture))
 }
 
 function Format-ResetCountdown {
@@ -1383,55 +1414,91 @@ function Format-ResetCountdown {
 
     if ($null -eq $State) { return '—' }
     $current = Get-CurrentLimitState -State $State -Now $Now
-    if ($null -eq $current) { return '等待新周期' }
+    if ($null -eq $current) { return Get-WidgetText 'countdown.waiting' }
     $remaining = ([datetime]$current.ResetAt) - $Now
     if ($remaining.TotalDays -ge 1) {
-        return '{0} 天 {1} 小时后重置' -f [math]::Floor($remaining.TotalDays), $remaining.Hours
+        return Get-WidgetText 'countdown.daysHours' @([math]::Floor($remaining.TotalDays), $remaining.Hours)
     }
     if ($remaining.TotalHours -ge 1) {
-        return '{0} 小时 {1} 分钟后重置' -f [math]::Floor($remaining.TotalHours), $remaining.Minutes
+        return Get-WidgetText 'countdown.hoursMinutes' @([math]::Floor($remaining.TotalHours), $remaining.Minutes)
     }
-    return '{0} 分钟后重置' -f [math]::Max(1, [math]::Ceiling($remaining.TotalMinutes))
+    return Get-WidgetText 'countdown.minutes' @([math]::Max(1, [math]::Ceiling($remaining.TotalMinutes)))
 }
 
 function Format-UsageDiagnostic {
     param([AllowNull()][string]$Code)
 
     switch ($Code) {
-        'missing_directory' { return '未找到本机会话目录，请先完成一次编码任务。' }
-        'empty_directory'   { return '还没有本机会话记录，完成一次编码任务后会自动刷新。' }
-        'read_failed'       { return '会话记录读取失败，请确认当前账户可以读取后重试。' }
-        'no_valid_event'    { return '没有找到可识别的用量事件，可先运行自检确认兼容性。' }
-        default             { return '暂无可用数据。' }
+        'missing_directory' { return Get-WidgetText 'diagnostic.missingDirectory' }
+        'empty_directory'   { return Get-WidgetText 'diagnostic.emptyDirectory' }
+        'read_failed'       { return Get-WidgetText 'diagnostic.readFailed' }
+        'no_valid_event'    { return Get-WidgetText 'diagnostic.noValidEvent' }
+        default             { return Get-WidgetText 'diagnostic.unavailable' }
     }
 }
 
 function Get-WidgetVisibleStrings {
-    @(
-        '用量小组件', '显示小组件', '显示详情', '关闭详情', '退出小组件', '用量详情',
-        '冰川青', '星云紫', '深海蓝', '樱雾粉', '极光绿', '云母银', '日落橙', '青柠光',
-        '最紧限制', '剩余用量', '活动任务列表', '最近 30 分钟', '最近 30 分钟暂无活动任务',
-        '本机观测正常', '等待本机观测', '最近观测', '状态', '余量充足', '请留意用量', '请留意', '用量紧急',
-        '任务名称暂不可用', '该任务暂无令牌数据', '累计令牌', '上下文',
-        '上下文占用', '输入 / 输出构成', '输入', '输出', '本机累计缓存命中令牌', '本机累计缓存未命中令牌',
-        '该任务缓存命中令牌', '该任务缓存未命中令牌', '缓存命中令牌', '缓存未命中令牌',
-        '输出中推理占比', '距离重置', '本机最近观测',
-        '未知周期', '等待新周期', '暂无可用数据', '正常', '注意', '紧急',
-        '状态正常', '状态注意', '状态紧急', '状态等待', '状态不可用',
-        '观测口径为本机会话记录', '用量圆环',
-        '回车键、空格键、换挡键加功能键十',
-        '回车键或空格键显示详情，换挡键加功能键十打开菜单，退出键关闭详情',
-        '无法启动用量小组件。', '当前启动环境不受支持。', '当前线程模式不受支持。',
-        '系统界面组件未能加载。', '无法建立单实例保护。', '窗口创建失败。',
-        '系统通知初始化失败。', '后台读取未能启动。', '请双击启动文件运行。',
-        '请确认系统界面组件完整后重试。', '请退出残留实例后重试。',
-        '请运行自检；若失败，请恢复上一版本。', '请重启系统通知后重试。',
-        '用量小组件已经在运行。', '原因：', '处理：', '将在重置',
-        '未找到本机会话目录，请先完成一次编码任务。',
-        '还没有本机会话记录，完成一次编码任务后会自动刷新。',
-        '会话记录读取失败，请确认当前账户可以读取后重试。',
-        '没有找到可识别的用量事件，可先运行自检确认兼容性。'
+    foreach ($key in Get-WidgetRequiredLanguageKeys) { Get-WidgetText $key }
+}
+
+function Apply-WidgetLanguage {
+    foreach ($binding in @(
+        @('DetailTitleText', 'detail.title'), @('RemainingLabelText', 'detail.remaining'),
+        @('ObservedLabelText', 'detail.observed'), @('StatusLabelText', 'detail.status'),
+        @('ActivityTitleText', 'activity.title'), @('ActivityWindowText', 'activity.window30m'),
+        @('TaskNoDataText', 'task.noTokenData'), @('CumulativeLabelText', 'token.total'),
+        @('ContextLabelText', 'token.context'), @('ContextPercentLabelText', 'token.contextUsage'),
+        @('CompositionLabelText', 'token.composition'), @('TaskCacheHitLabelText', 'cache.hit'),
+        @('TaskCacheMissLabelText', 'cache.miss'), @('ReasoningLabelText', 'token.reasoningShare'),
+        @('GlobalCacheHitLabelText', 'cache.localHit'), @('GlobalCacheMissLabelText', 'cache.localMiss')
+    )) {
+        $control = Get-Variable -Name $binding[0] -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+        if ($null -ne $control) { $control.Text = Get-WidgetText $binding[1] }
+    }
+    if ($null -ne $script:WidgetWindow) {
+        $script:WidgetWindow.Title = Get-WidgetText 'app.title'
+        [System.Windows.Automation.AutomationProperties]::SetName($script:WidgetWindow, (Get-WidgetText 'app.title'))
+    }
+    if ($null -ne $script:CircleHost) {
+        [System.Windows.Automation.AutomationProperties]::SetName($script:CircleHost, (Get-WidgetText 'accessibility.ringName'))
+        [System.Windows.Automation.AutomationProperties]::SetHelpText($script:CircleHost, (Get-WidgetText 'accessibility.ringHelp'))
+    }
+    if ($null -ne $script:NotifyIcon) { $script:NotifyIcon.Text = Get-WidgetText 'app.title' }
+    if ($null -ne $script:TrayShowItem) { $script:TrayShowItem.Text = Get-WidgetText 'menu.showWidget' }
+    if ($null -ne $script:TrayExitItem) { $script:TrayExitItem.Text = Get-WidgetText 'menu.exit' }
+    if ($null -ne $script:DetailMenuItem) {
+        $script:DetailMenuItem.Header = Get-WidgetText $(if ($null -ne $script:DetailPopup -and $script:DetailPopup.IsOpen) { 'menu.hideDetails' } else { 'menu.showDetails' })
+    }
+    if ($null -ne $script:LanguageMenuItem) { $script:LanguageMenuItem.Header = Get-WidgetText 'menu.language' }
+    if ($null -ne $script:ExitMenuItem) { $script:ExitMenuItem.Header = Get-WidgetText 'menu.exit' }
+    $themes = @(Get-WidgetThemes)
+    foreach ($item in @($script:ThemeMenuItems)) {
+        $index = [int]$item.Tag
+        if ($index -ge 0 -and $index -lt $themes.Count) { $item.Header = Get-WidgetText $themes[$index].NameKey }
+    }
+    foreach ($item in @($script:LanguageMenuItems)) { $item.Header = Get-WidgetText ('language.' + [string]$item.Tag) }
+}
+
+function Set-WidgetLanguage {
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [switch]$Persist
     )
+
+    if (@(Get-WidgetLanguageCodes) -cnotcontains $Code -or
+        $null -eq $script:WidgetLanguagePacks -or -not $script:WidgetLanguagePacks.ContainsKey($Code)) { return }
+    try { $culture = [cultureinfo]::GetCultureInfo($script:WidgetLanguagePacks[$Code].Culture) }
+    catch { return }
+    $script:CurrentLanguageCode = $Code
+    $script:CurrentLanguageCulture = $culture
+    if ($null -ne $script:WidgetPreferences) { $script:WidgetPreferences.Language = $Code }
+    Apply-WidgetLanguage
+    Set-WidgetState -State $script:LastUsageState
+    if ($Persist -and $null -ne $script:WidgetPreferences) {
+        [void](Save-WidgetPreferences -Left $script:WidgetPreferences.Left -Top $script:WidgetPreferences.Top `
+            -Monitor $script:WidgetPreferences.Monitor -Theme $script:WidgetPreferences.Theme `
+            -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory -Language $script:WidgetPreferences.Language)
+    }
 }
 
 function Update-WidgetCountdown {
@@ -1646,7 +1713,7 @@ function Set-ActiveTaskList {
         $row.Focusable = $true
         $row.Tag = $task
         $row.ToolTip = $task.Name
-        [System.Windows.Automation.AutomationProperties]::SetName($row, ('活动任务，' + $task.Name))
+        [System.Windows.Automation.AutomationProperties]::SetName($row, (Get-WidgetText 'accessibility.activeTask' @($task.Name)))
         $label = [System.Windows.Controls.TextBlock]::new()
         $label.Text = $task.Name
         $label.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
@@ -1683,9 +1750,9 @@ function Set-ActiveTaskList {
     }
 
     $script:ActiveTaskEmptyText.Text = if ($NamesAvailable) {
-        '最近 30 分钟暂无活动任务'
+        Get-WidgetText 'activity.empty30m'
     } else {
-        '任务名称暂不可用'
+        Get-WidgetText 'activity.namesUnavailable'
     }
     Set-DetailVisibility $script:ActiveTaskEmptyText ($script:ActiveTaskList.Children.Count -eq 0)
     if ($null -ne $selectedTask) {
@@ -1727,7 +1794,7 @@ function Set-WidgetState {
 
     $observedProperty = if ($null -ne $usageState) { $usageState.PSObject.Properties['ObservedAt'] } else { $null }
     $observedText = if ($null -ne $observedProperty -and $observedProperty.Value -is [datetime]) {
-        ([datetime]$observedProperty.Value).ToString('yyyy-MM-dd HH:mm')
+        ([datetime]$observedProperty.Value).ToString('g', $script:CurrentLanguageCulture)
     } else { $null }
     $diagnosticText = $null
     if ($null -ne $script:LastUsageDiagnostic) {
@@ -1745,45 +1812,45 @@ function Set-WidgetState {
         Set-WidgetAppearance -Unavailable
         $script:RemainingDetailText.Text = '—'
         $script:RemainingDetailUnitText.Visibility = 'Collapsed'
-        $script:DetailStatusText.Text = '等待本机观测'
+        $script:DetailStatusText.Text = Get-WidgetText 'status.waitingObservation'
         if ($null -ne $usageState) {
-            $script:LimitWindowText.Text = '等待新周期'
-            $script:UsageStatusText.Text = '等待新周期'
-            $automationName = '用量圆环，状态等待，等待新周期，本机最近观测保留，观测口径为本机会话记录'
+            $script:LimitWindowText.Text = Get-WidgetText 'status.waiting'
+            $script:UsageStatusText.Text = Get-WidgetText 'status.waiting'
+            $automationName = Get-WidgetText 'accessibility.waitingState'
         }
         else {
-            $script:LimitWindowText.Text = '暂无可用数据'
-            $script:UsageStatusText.Text = '暂无数据'
-            $automationName = '用量圆环，状态不可用，暂无可用数据，观测口径为本机会话记录'
+            $script:LimitWindowText.Text = Get-WidgetText 'status.unavailable'
+            $script:UsageStatusText.Text = Get-WidgetText 'status.noData'
+            $automationName = Get-WidgetText 'accessibility.unavailableState'
         }
     }
     else {
         $remainingPercent = [double]$currentLimit.RemainingPercent
-        $script:RemainingText.Text = '{0:0}%' -f $remainingPercent
-        $script:RemainingDetailText.Text = '{0:0}' -f $remainingPercent
+        $script:RemainingText.Text = $remainingPercent.ToString('0', $script:CurrentLanguageCulture) + '%'
+        $script:RemainingDetailText.Text = $remainingPercent.ToString('0', $script:CurrentLanguageCulture)
         $script:RemainingDetailUnitText.Visibility = 'Visible'
         $windowMinutes = $currentLimit.PSObject.Properties['WindowMinutes']
         $windowText = Format-LimitWindow $(if ($null -eq $windowMinutes) { $null } else { $windowMinutes.Value })
-        $script:LimitWindowText.Text = $windowText + '限制'
+        $script:LimitWindowText.Text = $windowText
         Set-RingPercent $remainingPercent
         Set-WidgetAppearance $remainingPercent
         if ($remainingPercent -le 10) {
-            $script:DetailStatusText.Text = '用量紧急'
-            $script:UsageStatusText.Text = '用量紧急'
-            $status = '状态紧急'
+            $script:DetailStatusText.Text = Get-WidgetText 'status.critical'
+            $script:UsageStatusText.Text = Get-WidgetText 'status.critical'
+            $status = Get-WidgetText 'accessibility.criticalState'
         }
         elseif ($remainingPercent -le 20) {
-            $script:DetailStatusText.Text = '请留意用量'
-            $script:UsageStatusText.Text = '请留意'
-            $status = '状态注意'
+            $script:DetailStatusText.Text = Get-WidgetText 'status.attention'
+            $script:UsageStatusText.Text = Get-WidgetText 'status.attention'
+            $status = Get-WidgetText 'accessibility.attentionState'
         }
         else {
-            $script:DetailStatusText.Text = '本机观测正常'
-            $script:UsageStatusText.Text = '余量充足'
-            $status = '状态正常'
+            $script:DetailStatusText.Text = Get-WidgetText 'status.observationNormal'
+            $script:UsageStatusText.Text = Get-WidgetText 'status.sufficient'
+            $status = Get-WidgetText 'accessibility.normalState'
         }
-        $automationName = '用量圆环，{0}，剩余用量 {1:0}%，最紧限制 {2}，本机最近观测 {3}，观测口径为本机会话记录' -f
-            $status, $remainingPercent, $windowText, ([datetime]$usageState.ObservedAt).ToString('yyyy-MM-dd HH:mm:ss')
+        $automationName = Get-WidgetText 'accessibility.usageSummary' @(
+            $status, $remainingPercent, $windowText, ([datetime]$usageState.ObservedAt).ToString('g', $script:CurrentLanguageCulture))
     }
     Update-WidgetCountdown
 
@@ -1804,7 +1871,7 @@ function Set-WidgetState {
     [System.Windows.Automation.AutomationProperties]::SetName(
         $script:WidgetWindow, $automationName)
     [System.Windows.Automation.AutomationProperties]::SetHelpText(
-        $script:CircleHost, '回车键或空格键显示详情，换挡键加功能键十打开菜单，退出键关闭详情')
+        $script:CircleHost, (Get-WidgetText 'accessibility.ringHelp'))
     Update-WidgetCountdown
 }
 
@@ -1814,7 +1881,7 @@ function Get-WidgetXaml {
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     x:Name="WidgetWindow"
-    Title="用量小组件"
+    Title=""
     Width="100"
     Height="100"
     MinWidth="100"
@@ -1827,12 +1894,12 @@ function Get-WidgetXaml {
     Background="Transparent"
     Topmost="True"
     ShowInTaskbar="False"
-    FontFamily="Microsoft YaHei UI"
+    FontFamily="Segoe UI, Microsoft YaHei UI, Yu Gothic UI, Malgun Gothic"
     Foreground="#F4F7F6"
     Focusable="True"
     UseLayoutRounding="True"
     SnapsToDevicePixels="True"
-    AutomationProperties.Name="用量小组件">
+    AutomationProperties.Name="">
     <Grid
         x:Name="CircleHost"
         Width="82"
@@ -1842,8 +1909,8 @@ function Get-WidgetXaml {
         Background="Transparent"
         Cursor="SizeAll"
         Focusable="True"
-        AutomationProperties.Name="用量圆环"
-        AutomationProperties.HelpText="回车键、空格键、换挡键加功能键十">
+        AutomationProperties.Name=""
+        AutomationProperties.HelpText="">
         <Ellipse
             x:Name="GlowRing"
             Margin="7"
@@ -1979,7 +2046,8 @@ function Get-WidgetXaml {
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock
-                                    Text="用量详情"
+                                    x:Name="DetailTitleText"
+                                    Text=""
                                     FontSize="18"
                                     FontWeight="Bold"
                                     Foreground="#FFF6F3EE"/>
@@ -1996,7 +2064,7 @@ function Get-WidgetXaml {
                                         Fill="#FF7BFFE0"/>
                                     <TextBlock
                                         x:Name="DetailStatusText"
-                                        Text="等待本机观测"
+                                        Text=""
                                         FontSize="11"
                                         Foreground="#FF7BFFE0"/>
                                 </StackPanel>
@@ -2008,7 +2076,8 @@ function Get-WidgetXaml {
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <TextBlock
-                                        Text="剩余用量"
+                                        x:Name="RemainingLabelText"
+                                        Text=""
                                         FontSize="12"
                                         Foreground="#999C9990"/>
                                     <StackPanel Margin="0,3,0,0" Orientation="Horizontal">
@@ -2054,7 +2123,8 @@ function Get-WidgetXaml {
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Margin="0,0,12,0">
                                     <TextBlock
-                                        Text="最近观测"
+                                        x:Name="ObservedLabelText"
+                                        Text=""
                                         FontSize="11"
                                         Foreground="#849C9990"/>
                                     <TextBlock
@@ -2068,13 +2138,14 @@ function Get-WidgetXaml {
                                 <Border Grid.Column="1" Background="#24FFFFFF"/>
                                 <StackPanel Grid.Column="2" Margin="14,0,0,0">
                                     <TextBlock
-                                        Text="状态"
+                                        x:Name="StatusLabelText"
+                                        Text=""
                                         FontSize="11"
                                         Foreground="#849C9990"/>
                                     <TextBlock
                                         x:Name="UsageStatusText"
                                         Margin="0,4,0,0"
-                                        Text="暂无数据"
+                                        Text=""
                                         FontSize="12"
                                         FontWeight="SemiBold"
                                         Foreground="#FFF6F3EE"/>
@@ -2096,13 +2167,15 @@ function Get-WidgetXaml {
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <TextBlock
-                                        Text="活动任务列表"
+                                        x:Name="ActivityTitleText"
+                                        Text=""
                                         FontSize="15"
                                         FontWeight="SemiBold"
                                         Foreground="#FFF6F3EE"/>
                                     <TextBlock
+                                        x:Name="ActivityWindowText"
                                         Grid.Column="1"
-                                        Text="最近 30 分钟"
+                                        Text=""
                                         FontSize="11"
                                         HorizontalAlignment="Right"
                                         VerticalAlignment="Center"
@@ -2111,7 +2184,7 @@ function Get-WidgetXaml {
                                 <TextBlock
                                     x:Name="ActiveTaskEmptyText"
                                     Margin="0,9,0,0"
-                                    Text="最近 30 分钟暂无活动任务"
+                                    Text=""
                                     FontSize="12"
                                     Foreground="#999C9990"/>
                                 <StackPanel x:Name="ActiveTaskList" Margin="0,5,0,0"/>
@@ -2140,7 +2213,7 @@ function Get-WidgetXaml {
                                         <TextBlock
                                             x:Name="TaskNoDataText"
                                             Margin="0,8,0,0"
-                                            Text="该任务暂无令牌数据"
+                                            Text=""
                                             FontSize="12"
                                             Foreground="#999C9990"
                                             Visibility="Collapsed"/>
@@ -2149,7 +2222,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="累计令牌" FontSize="12" Foreground="#C0BDBBB4"/>
+                                            <TextBlock x:Name="CumulativeLabelText" Text="" FontSize="12" Foreground="#C0BDBBB4"/>
                                             <TextBlock x:Name="CumulativeText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="#FFF6F3EE"/>
                                         </Grid>
                                         <Grid x:Name="ContextRow" Margin="0,8,0,0" Visibility="Collapsed">
@@ -2157,7 +2230,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="上下文" FontSize="12" Foreground="#C0BDBBB4"/>
+                                            <TextBlock x:Name="ContextLabelText" Text="" FontSize="12" Foreground="#C0BDBBB4"/>
                                             <TextBlock x:Name="ContextText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="#FFF6F3EE"/>
                                         </Grid>
                                         <Grid x:Name="ContextPercentRow" Margin="0,6,0,0" Visibility="Collapsed">
@@ -2165,7 +2238,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="上下文占用" FontSize="11" Foreground="#999C9990"/>
+                                            <TextBlock x:Name="ContextPercentLabelText" Text="" FontSize="11" Foreground="#999C9990"/>
                                             <TextBlock x:Name="ContextPercentText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="11" Foreground="#BDBDBBB4"/>
                                         </Grid>
                                         <Border
@@ -2189,7 +2262,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="输入 / 输出构成" FontSize="11" Foreground="#999C9990"/>
+                                            <TextBlock x:Name="CompositionLabelText" Text="" FontSize="11" Foreground="#999C9990"/>
                                             <TextBlock x:Name="CompositionText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="11" Foreground="#BDBDBBB4"/>
                                         </Grid>
                                         <Border
@@ -2214,7 +2287,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="缓存命中令牌" FontSize="11" Foreground="#999C9990"/>
+                                            <TextBlock x:Name="TaskCacheHitLabelText" Text="" FontSize="11" Foreground="#999C9990"/>
                                             <TextBlock x:Name="TaskCachedText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="11" Foreground="#BDBDBBB4"/>
                                         </Grid>
                                         <Grid x:Name="TaskCacheMissRow" Margin="0,6,0,0" Visibility="Collapsed">
@@ -2222,7 +2295,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="缓存未命中令牌" FontSize="11" Foreground="#999C9990"/>
+                                            <TextBlock x:Name="TaskCacheMissLabelText" Text="" FontSize="11" Foreground="#999C9990"/>
                                             <TextBlock x:Name="TaskCacheMissText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="11" Foreground="#BDBDBBB4"/>
                                         </Grid>
                                         <Grid x:Name="ReasoningRow" Margin="0,6,0,0" Visibility="Collapsed">
@@ -2230,7 +2303,7 @@ function Get-WidgetXaml {
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="输出中推理占比" FontSize="11" Foreground="#999C9990"/>
+                                            <TextBlock x:Name="ReasoningLabelText" Text="" FontSize="11" Foreground="#999C9990"/>
                                             <TextBlock x:Name="ReasoningText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="11" Foreground="#BDBDBBB4"/>
                                         </Grid>
                                     </StackPanel>
@@ -2241,7 +2314,7 @@ function Get-WidgetXaml {
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="本机累计缓存命中令牌" FontSize="12" Foreground="#999C9990"/>
+                                    <TextBlock x:Name="GlobalCacheHitLabelText" Text="" FontSize="12" Foreground="#999C9990"/>
                                     <TextBlock x:Name="CachedText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="12" Foreground="#BDBDBBB4"/>
                                 </Grid>
                                 <Grid x:Name="GlobalCacheMissRow" Margin="0,6,0,0" Visibility="Collapsed">
@@ -2249,7 +2322,7 @@ function Get-WidgetXaml {
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="本机累计缓存未命中令牌" FontSize="12" Foreground="#999C9990"/>
+                                    <TextBlock x:Name="GlobalCacheMissLabelText" Text="" FontSize="12" Foreground="#999C9990"/>
                                     <TextBlock x:Name="CachedMissText" Grid.Column="1" Text="—" TextAlignment="Right" FontSize="12" Foreground="#BDBDBBB4"/>
                                 </Grid>
                             </StackPanel>
@@ -2265,6 +2338,7 @@ function Get-WidgetXaml {
 
 if ($SelfTest) {
     $ErrorActionPreference = 'Stop'
+    Initialize-WidgetLocalization -Root $PSScriptRoot -SavedLanguage 'zh-CN' -UiCulture ([cultureinfo]'zh-CN')
     $languageCodes = @(Get-WidgetLanguageCodes)
     Assert-Widget (($languageCodes -join ',') -ceq 'zh-CN,zh-TW,en-US,ja-JP,ko-KR') 'the language catalog should expose the approved five codes.'
     Assert-Widget ((Resolve-WidgetLanguageCode $null ([cultureinfo]'zh-Hans-CN')) -ceq 'zh-CN') 'Simplified Chinese UI culture should map to zh-CN.'
@@ -2331,6 +2405,9 @@ if ($SelfTest) {
 
     $widgetXaml = Get-WidgetXaml
     Assert-Widget ($widgetXaml -match '(?s)<Window\b[^>]*\bWidth="100"[^>]*\bHeight="100"') 'the widget window should be 100 by 100.'
+    Assert-Widget ($widgetXaml -match 'FontFamily="Segoe UI, Microsoft YaHei UI, Yu Gothic UI, Malgun Gothic"' -and
+        $widgetXaml -match 'Title=""' -and $widgetXaml -match 'AutomationProperties.Name=""' -and
+        $widgetXaml -match 'AutomationProperties.HelpText=""' -and $widgetXaml -notmatch '[\p{IsCJKUnifiedIdeographs}]') 'XAML should keep the exact multilingual font fallback and contain no localized text.'
     Assert-Widget ($widgetXaml -match 'x:Name="CircleHost"\s+Width="82"\s+Height="82"') 'the circle host should be 82 by 82.'
     Assert-Widget ($widgetXaml -match 'x:Name="DetailPopup"') 'the detail popup should exist.'
     Assert-Widget ($widgetXaml -match 'x:Name="TokenDetailsPanel"') 'the token section should have one collapsible container.'
@@ -2340,15 +2417,15 @@ if ($SelfTest) {
         $widgetXaml -match 'x:Name="TaskCacheMissText"') 'the task list and aligned task cache rows should exist.'
     Assert-Widget ($widgetXaml -match 'x:Name="CachedText"' -and
         $widgetXaml -match 'x:Name="CachedMissText"' -and
-        $widgetXaml -match '本机累计缓存命中令牌' -and
-        $widgetXaml -match '本机累计缓存未命中令牌') 'the two aligned global cache rows should remain.'
+        $widgetXaml -match 'x:Name="GlobalCacheHitLabelText"' -and
+        $widgetXaml -match 'x:Name="GlobalCacheMissLabelText"') 'the two aligned global cache rows should remain.'
     Assert-Widget ($widgetXaml -notmatch ('x:Name="Close' + 'Button"')) 'the old close button should be absent.'
     Assert-Widget ($widgetXaml -match 'x:Name="FocusRing"') 'the circle should expose a keyboard focus ring.'
     foreach ($forbiddenText in ('Reading' + ' data'), ('NO' + ' DATA'), ('Reset' + ' '), ('Used' + ':'),
         ('Plan' + ':'), ('Credits' + ':'), ('Updated' + ':'), ('Reminder' + ':'), ('Codex Usage' + ' Widget')) {
         Assert-Widget ($widgetXaml -notmatch [regex]::Escape($forbiddenText)) ('the XAML should not contain old text: ' + $forbiddenText)
     }
-    Assert-Widget ($widgetXaml -match '最近观测' -and $widgetXaml -match '活动任务列表' -and
+    Assert-Widget ($widgetXaml -match 'x:Name="ObservedLabelText"' -and $widgetXaml -match 'x:Name="ActivityTitleText"' -and
         $widgetXaml -match 'x:Name="DetailStatusText"' -and
         $widgetXaml -match 'x:Name="UsageStatusText"') 'the selected quiet-editorial header and metadata should exist.'
     Assert-Widget ($widgetXaml -match 'x:Name="ObservedDiagnosticText"(?s:.*?)TextWrapping="Wrap"') 'diagnostics should wrap below the quiet metadata row.'
@@ -2362,19 +2439,19 @@ if ($SelfTest) {
     $activityHeadingMatch = [regex]::Match($widgetXaml, '(?s)<StackPanel x:Name="TokenDetailsPanel">\s*<Border Height="1"[^>]*/>\s*(?<HeadingGrid><Grid\b[^>]*>.*?</Grid>)')
     Assert-Widget $activityHeadingMatch.Success 'the activity heading should be an ordinary title line immediately after the divider.'
     $activityHeadingGrid = if ($activityHeadingMatch.Success) { $activityHeadingMatch.Groups['HeadingGrid'].Value } else { '' }
-    Assert-Widget ($activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bText="活动任务列表")(?=[^>]*\bFontSize="15")[^>]*>' -and
-        $activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bGrid.Column="1")(?=[^>]*\bText="最近 30 分钟")(?=[^>]*\bFontSize="11")(?=[^>]*\bHorizontalAlignment="Right")[^>]*>') 'the ordinary activity title line should retain its right-aligned 11-pixel time range.'
+    Assert-Widget ($activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bx:Name="ActivityTitleText")(?=[^>]*\bFontSize="15")[^>]*>' -and
+        $activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bx:Name="ActivityWindowText")(?=[^>]*\bGrid.Column="1")(?=[^>]*\bFontSize="11")(?=[^>]*\bHorizontalAlignment="Right")[^>]*>') 'the ordinary activity title line should retain its right-aligned 11-pixel time range.'
     $staticFontContracts = @(
-        @('活动任务列表', 15), @('最近 30 分钟', 11), @('剩余用量', 12),
-        @('最近观测', 11), @('状态', 11), @('累计令牌', 12), @('上下文', 12),
-        @('上下文占用', 11), @('输入 / 输出构成', 11), @('缓存命中令牌', 11),
-        @('缓存未命中令牌', 11), @('输出中推理占比', 11),
-        @('本机累计缓存命中令牌', 12), @('本机累计缓存未命中令牌', 12)
+        @('ActivityTitleText', 15), @('ActivityWindowText', 11), @('RemainingLabelText', 12),
+        @('ObservedLabelText', 11), @('StatusLabelText', 11), @('CumulativeLabelText', 12), @('ContextLabelText', 12),
+        @('ContextPercentLabelText', 11), @('CompositionLabelText', 11), @('TaskCacheHitLabelText', 11),
+        @('TaskCacheMissLabelText', 11), @('ReasoningLabelText', 11),
+        @('GlobalCacheHitLabelText', 12), @('GlobalCacheMissLabelText', 12)
     )
     foreach ($fontContract in $staticFontContracts) {
-        $label = [regex]::Escape($fontContract[0])
+        $controlName = [regex]::Escape($fontContract[0])
         $fontSize = $fontContract[1]
-        $openingTagPattern = '(?s)<TextBlock\b(?=[^>]*\bText="' + $label + '")(?=[^>]*\bFontSize="' + $fontSize + '")[^>]*>'
+        $openingTagPattern = '(?s)<TextBlock\b(?=[^>]*\bx:Name="' + $controlName + '")(?=[^>]*\bFontSize="' + $fontSize + '")[^>]*>'
         Assert-Widget ($widgetXaml -match $openingTagPattern) ($fontContract[0] + ' should use ' + $fontSize + '-pixel text in one opening tag.')
     }
     Assert-Widget ($widgetXaml -match 'x:Name="DetailAccentGlow"(?s:.*?)Width="36"(?s:.*?)Height="36"(?s:.*?)CornerRadius="18"') 'the accent glow should be compact instead of a full-width color block.'
@@ -2388,6 +2465,14 @@ if ($SelfTest) {
 
     $fatalText = Format-WidgetFatalError '无法启动用量小组件。' '当前启动环境不受支持。' '请双击启动文件运行。'
     Assert-Widget ($fatalText -ceq "无法启动用量小组件。`r`n`r`n原因：当前启动环境不受支持。`r`n处理：请双击启动文件运行。") 'fatal errors should use the exact safe Chinese template.'
+    $initializedLanguagePacks = $script:WidgetLanguagePacks
+    $script:WidgetLanguagePacks = $null
+    $fallbackFatalText = Format-WidgetFatalError 'Language pack missing or damaged. / 语言包缺失或损坏。' `
+        'The required English language pack could not be validated. / 必需的英语语言包未通过验证。' `
+        'Restore the complete locales folder and restart. / 请恢复完整的 locales 文件夹后重启。'
+    $script:WidgetLanguagePacks = $initializedLanguagePacks
+    Assert-Widget ($fallbackFatalText -ceq
+        "Problem / 问题：Language pack missing or damaged. / 语言包缺失或损坏。`r`n`r`nCause / 原因：The required English language pack could not be validated. / 必需的英语语言包未通过验证。`r`nFix / 解决办法：Restore the complete locales folder and restart. / 请恢复完整的 locales 文件夹后重启。") 'pre-localization fatal errors should use the one built-in bilingual template.'
     $visibilityProbe = [pscustomobject]@{ Visibility = $null }
     Set-DetailVisibility $visibilityProbe $true
     Assert-Widget ($visibilityProbe.Visibility -eq 'Visible') 'visible token details should use Visible.'
@@ -2404,21 +2489,31 @@ if ($SelfTest) {
     foreach ($controlName in 'DetailCard', 'RingValue', 'GlowRing', 'RemainingText', 'CircleHost', 'LimitWindowText',
         'ObservedText', 'ObservedDiagnosticText', 'DetailStatusText', 'UsageStatusText', 'RemainingDetailText',
         'RemainingDetailUnitText',
+        'DetailTitleText', 'RemainingLabelText', 'ObservedLabelText', 'StatusLabelText',
+        'ActivityTitleText', 'ActivityWindowText',
         'TokenDetailsPanel', 'ActiveTaskEmptyText', 'ActiveTaskList', 'TaskDetailsPanel', 'TaskTitleText',
         'TaskNoDataText', 'CumulativeRow', 'ContextRow', 'ContextPercentRow', 'CompositionRow',
+        'CumulativeLabelText', 'ContextLabelText', 'ContextPercentLabelText', 'CompositionLabelText',
         'TaskCacheHitRow', 'TaskCacheMissRow', 'ReasoningRow', 'TaskCachedText', 'TaskCacheMissText',
+        'TaskCacheHitLabelText', 'TaskCacheMissLabelText', 'ReasoningLabelText',
         'CumulativeText', 'ContextText', 'ContextPercentText', 'ContextBar', 'ContextFillColumn',
         'ContextRestColumn', 'CompositionText', 'CompositionBar', 'InputColumn', 'OutputColumn',
         'GlobalCacheDivider', 'GlobalCacheHitRow', 'GlobalCacheMissRow', 'CachedText', 'CachedMissText', 'ReasoningText',
+        'GlobalCacheHitLabelText', 'GlobalCacheMissLabelText',
         'CountdownText', 'DetailAccentGlow', 'DetailAccentDot', 'TaskDetailAccentLine', 'ContextAccentFill',
         'InputAccentFill', 'OutputAccentFill') {
         Set-Variable -Name $controlName -Scope Script -Value $rendererWindow.FindName($controlName)
         Assert-Widget ($null -ne (Get-Variable -Name $controlName -Scope Script -ValueOnly)) ('renderer control should bind: ' + $controlName)
     }
     $namedFontContracts = @(
+        @('DetailTitleText', 18), @('RemainingLabelText', 12), @('ObservedLabelText', 11), @('StatusLabelText', 11),
+        @('ActivityTitleText', 15), @('ActivityWindowText', 11),
         @('DetailStatusText', 11), @('LimitWindowText', 15), @('CountdownText', 12),
         @('ObservedText', 12), @('UsageStatusText', 12), @('ObservedDiagnosticText', 11),
         @('ActiveTaskEmptyText', 12), @('TaskTitleText', 13), @('TaskNoDataText', 12),
+        @('CumulativeLabelText', 12), @('ContextLabelText', 12), @('ContextPercentLabelText', 11),
+        @('CompositionLabelText', 11), @('TaskCacheHitLabelText', 11), @('TaskCacheMissLabelText', 11),
+        @('ReasoningLabelText', 11), @('GlobalCacheHitLabelText', 12), @('GlobalCacheMissLabelText', 12),
         @('CumulativeText', 12), @('ContextText', 12), @('ContextPercentText', 11),
         @('CompositionText', 11), @('TaskCachedText', 11), @('TaskCacheMissText', 11),
         @('ReasoningText', 11), @('CachedText', 12), @('CachedMissText', 12)
@@ -2438,7 +2533,15 @@ if ($SelfTest) {
     $script:RendererRingPercent = $null
     $script:ActiveTaskRow = $null
     $script:ActiveTaskId = $null
-    $script:WidgetPreferences = [pscustomobject]@{ Theme = 4 }
+    $script:WidgetPreferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 4; CodexDataDirectory = $null; Language = 'zh-CN' }
+    $script:DetailMenuItem = [System.Windows.Controls.MenuItem]::new()
+    $script:LanguageMenuItem = [System.Windows.Controls.MenuItem]::new()
+    $script:LanguageMenuItems = @(foreach ($code in Get-WidgetLanguageCodes) { [pscustomobject]@{ Tag = $code; Header = $null; IsChecked = $false } })
+    $script:ThemeMenuItems = @(for ($index = 0; $index -lt @(Get-WidgetThemes).Count; $index++) { [pscustomobject]@{ Tag = $index; Header = $null; IsChecked = $false } })
+    $script:NotifyIcon = [pscustomobject]@{ Text = $null }
+    $script:TrayShowItem = [pscustomobject]@{ Text = $null }
+    $script:TrayExitItem = [pscustomobject]@{ Text = $null }
+    $script:ExitMenuItem = [pscustomobject]@{ Header = $null }
     $script:DetailAccentBrush = $null
     $script:DetailAccentSoftBrush = $null
     $script:TaskDetailHideTimer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -2447,6 +2550,14 @@ if ($SelfTest) {
     function Start-ShimmerAnimation { }
     function Register-UsageReminderThreshold { param($State, $Threshold) return $false }
     function Show-UsageReminder { param($State) }
+    function Show-DetailPopup { }
+    Apply-WidgetLanguage
+    Assert-Widget ($script:DetailTitleText.Text -ceq '用量详情' -and
+        $script:RemainingLabelText.Text -ceq '剩余用量' -and
+        $script:TaskNoDataText.Text -ceq '该任务暂无令牌数据') 'the shared language application should populate named static labels.'
+    Assert-Widget ($script:NotifyIcon.Text -ceq '用量小组件' -and $script:TrayShowItem.Text -ceq '显示小组件' -and
+        $script:TrayExitItem.Text -ceq '退出小组件' -and $script:LanguageMenuItem.Header -ceq '语言' -and
+        $script:ThemeMenuItems[0].Header -ceq '冰川青' -and $script:LanguageMenuItems[2].Header -ceq '英语') 'the shared language application should populate tray and context menus.'
 
     $rendererObservedAt = [datetime]'2026-07-30T20:15:30'
     $rendererTokens = [pscustomobject]@{
@@ -2482,15 +2593,42 @@ if ($SelfTest) {
     Set-WidgetState $rendererState
     Assert-Widget ($script:RemainingText.Text -eq '39%' -and $script:RemainingDetailText.Text -eq '39' -and
         $script:RemainingDetailUnitText.Text -eq '%' -and $script:RemainingDetailUnitText.Visibility -eq 'Visible' -and
-        $script:LimitWindowText.Text -eq '5 小时限制' -and $script:CountdownText.Text -match '后重置$') 'the real renderer should match the selected quiet limit format.'
+        $script:LimitWindowText.Text -eq '5 小时' -and $script:CountdownText.Text -match '后重置$') 'the real renderer should match the selected quiet limit format.'
     Assert-Widget ($script:DetailStatusText.Text -eq '本机观测正常' -and
         $script:UsageStatusText.Text -eq '余量充足' -and
-        $script:ObservedText.Text -eq '2026-07-30 20:15' -and
+        $script:ObservedText.Text -eq '2026/7/30 20:15' -and
         $script:ObservedDiagnosticText.Visibility -eq 'Collapsed') 'the quiet metadata should separate status, observation, and diagnostics.'
     Assert-Widget ($script:TokenDetailsPanel.Visibility -eq 'Visible' -and
         $script:TaskDetailsPanel.Visibility -eq 'Collapsed') 'global cache data should show the outer panel without opening task details.'
     Assert-Widget ($script:CachedText.Text -ceq '1992 万（96.6%）' -and
         $script:CachedMissText.Text -ceq '70.9 万（3.4%）') 'the real renderer should align cumulative cache-hit and cache-miss values.'
+    $countdownNow = [datetime]'2026-07-30T10:00:00'
+    $countdownState = [pscustomobject]@{ LimitWindows = @(
+        [pscustomobject]@{ Name = 'primary'; RemainingPercent = 50; ResetAt = $countdownNow.AddDays(2).AddHours(3).AddMinutes(59) }
+    ) }
+    $script:DetailPopup = [pscustomobject]@{ IsOpen = $true }
+    Set-WidgetLanguage -Code 'en-US'
+    Assert-Widget ((Format-TokenCount 40860000) -ceq '40.9M') 'English token counts should use M.'
+    Assert-Widget ((Format-TokenCount 12300) -ceq '12.3K' -and
+        (Format-TokenCount 1250000000) -ceq '1.25B') 'English compact token counts should preserve the K and B rounding contracts.'
+    Assert-Widget ((Format-LimitWindow 300) -ceq '5 hours') 'English limit windows should use English units.'
+    Assert-Widget ((Format-ResetCountdown -State $countdownState -Now $countdownNow) -ceq 'Resets in 2 days 3 hours') 'English countdown should be localized.'
+    Assert-Widget ($script:DetailTitleText.Text -ceq 'Usage details') 'live language switching should update static labels.'
+    Assert-Widget ($script:DetailMenuItem.Header -ceq 'Hide details') 'live language switching should update menus.'
+    Assert-Widget ($script:NotifyIcon.Text -ceq 'Usage widget' -and $script:TrayShowItem.Text -ceq 'Show widget' -and
+        $script:TrayExitItem.Text -ceq 'Exit widget' -and $script:LanguageMenuItem.Header -ceq 'Language' -and
+        $script:ThemeMenuItems[0].Header -ceq 'Glacier' -and $script:LanguageMenuItems[0].Header -ceq 'Simplified Chinese') 'live language switching should update every menu surface.'
+    Assert-Widget ($script:CachedText.Text -notmatch '[\u4e00-\u9fff]') 'English rerendering should replace Chinese cache labels.'
+    Assert-Widget ((Format-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.workerCause') (Get-WidgetText 'fatal.restoreFix')) -ceq
+        "The usage widget could not start.`r`n`r`nCause: The background reader could not start.`r`nFix: Run the self-test; if it fails, restore the previous version.") 'English startup and worker errors should render through the localized fatal template.'
+    Assert-Widget ((Get-WidgetText 'reminder.title' @(20)) -ceq '20% usage remaining' -and
+        (Get-WidgetText 'reminder.body' @([datetime]'2026-07-30T20:15:30')) -ceq 'Resets at 7/30/2026 8:15 PM') 'English notification text and dates should use the active culture.'
+    Set-WidgetLanguage -Code 'zh-CN'
+    $script:DetailPopup = $null
+    $languageStateBeforeMissingPack = $script:CurrentLanguageCode + '|' + $script:CurrentLanguageCulture.Name + '|' + $script:WidgetPreferences.Language
+    Set-WidgetLanguage -Code 'zh-TW' -Persist
+    Assert-Widget (($script:CurrentLanguageCode + '|' + $script:CurrentLanguageCulture.Name + '|' + $script:WidgetPreferences.Language) -ceq
+        $languageStateBeforeMissingPack) 'a missing optional language pack should leave language state unchanged.'
     Assert-Widget ($script:ActiveTaskList.Children.Count -eq 2 -and
         $script:TaskDetailsPanel.Visibility -eq 'Collapsed') 'normal mode should show names without task details.'
     Assert-Widget ($script:ActiveTaskList.Children[0].Child.Text -ceq '任务甲') 'a task row should contain only the task name.'
@@ -2755,7 +2893,7 @@ if ($SelfTest) {
         $script:CachedText.Text -eq '1992 万（96.6%）' -and
         $script:CachedMissText.Text -eq '70.9 万（3.4%）' -and
         $script:TokenDetailsPanel.Visibility -eq 'Visible') 'a failed refresh should retain the real limit and global cache presentation.'
-    Assert-Widget ($script:ObservedText.Text -eq '2026-07-30 20:15' -and
+    Assert-Widget ($script:ObservedText.Text -eq '2026/7/30 20:15' -and
         $script:ObservedDiagnosticText.Text -eq '会话记录读取失败，请确认当前账户可以读取后重试。') 'a failed refresh should preserve observation time and show its safe diagnostic separately.'
     $script:TaskDetailHideTimer.Stop()
     $rendererWindow.Close()
@@ -2807,7 +2945,25 @@ if ($SelfTest) {
     $timerEnd = $runtimeSource.IndexOf('$script:WidgetTimer.Start()', $timerStart, [StringComparison]::Ordinal)
     $timerSource = if ($timerStart -ge 0 -and $timerEnd -gt $timerStart) { $runtimeSource.Substring($timerStart, $timerEnd - $timerStart) } else { '' }
     Assert-Widget (-not $timerSource.Contains($pickerFunctionName)) 'the refresh timer should never repeat the directory prompt.'
-    foreach ($runtimeBinding in '$script:RemainingDetailUnitText = $script:WidgetWindow.FindName(''RemainingDetailUnitText'')') {
+    foreach ($runtimeBinding in @(
+        '$script:RemainingDetailUnitText = $script:WidgetWindow.FindName(''RemainingDetailUnitText'')',
+        '$script:DetailTitleText = $script:WidgetWindow.FindName(''DetailTitleText'')',
+        '$script:RemainingLabelText = $script:WidgetWindow.FindName(''RemainingLabelText'')',
+        '$script:ObservedLabelText = $script:WidgetWindow.FindName(''ObservedLabelText'')',
+        '$script:StatusLabelText = $script:WidgetWindow.FindName(''StatusLabelText'')',
+        '$script:ActivityTitleText = $script:WidgetWindow.FindName(''ActivityTitleText'')',
+        '$script:ActivityWindowText = $script:WidgetWindow.FindName(''ActivityWindowText'')',
+        '$script:TaskNoDataText = $script:WidgetWindow.FindName(''TaskNoDataText'')',
+        '$script:CumulativeLabelText = $script:WidgetWindow.FindName(''CumulativeLabelText'')',
+        '$script:ContextLabelText = $script:WidgetWindow.FindName(''ContextLabelText'')',
+        '$script:ContextPercentLabelText = $script:WidgetWindow.FindName(''ContextPercentLabelText'')',
+        '$script:CompositionLabelText = $script:WidgetWindow.FindName(''CompositionLabelText'')',
+        '$script:TaskCacheHitLabelText = $script:WidgetWindow.FindName(''TaskCacheHitLabelText'')',
+        '$script:TaskCacheMissLabelText = $script:WidgetWindow.FindName(''TaskCacheMissLabelText'')',
+        '$script:ReasoningLabelText = $script:WidgetWindow.FindName(''ReasoningLabelText'')',
+        '$script:GlobalCacheHitLabelText = $script:WidgetWindow.FindName(''GlobalCacheHitLabelText'')',
+        '$script:GlobalCacheMissLabelText = $script:WidgetWindow.FindName(''GlobalCacheMissLabelText'')'
+    )) {
         Assert-Widget ($runtimeSource.Contains($runtimeBinding)) ('runtime control binding should exist: ' + $runtimeBinding)
     }
     Assert-Widget (-not $runtimeSource.Contains('$script:ActivityHeaderCapsule = $script:WidgetWindow.FindName(''ActivityHeaderCapsule'')')) 'runtime source should not bind the removed activity header capsule.'
@@ -2817,7 +2973,7 @@ if ($SelfTest) {
     $positionSource = $runtimeSource.Substring($positionStart, $positionEnd - $positionStart)
     Assert-Widget (-not $positionSource.Contains('Add_Completed')) 'position animation should not depend on an asynchronous completion callback.'
     foreach ($contract in ('Get-Detail' + 'PopupPosition'), ('Set-Widget' + 'Appearance'), ('Start-Shimmer' + 'Animation'),
-        ('SetProcessDpiAwareness' + 'Context'), ('Focus' + 'Ring'), '冰川青', '星云紫', '深海蓝', '樱雾粉',
+        ('SetProcessDpiAwareness' + 'Context'), ('Focus' + 'Ring'), 'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura',
         ('FromMilliseconds' + '(250)'), ('FromMilliseconds' + '(150)'),
         ('[System.Windows.Input.Key]' + '::System'), ('[System.Windows.Input.Keyboard]' + '::Modifiers')) {
         Assert-Widget ($sourceText.Contains($contract)) ('interaction contract should contain: ' + $contract)
@@ -2841,18 +2997,18 @@ if ($SelfTest) {
     Assert-Widget ($stateDefinition -match '\$observationKey' -and $stateDefinition -match '\$script:LastShimmerObservationKey') 'fresh usage shimmer should be gated by an observation key.'
     Assert-Widget ([regex]::Matches($stateDefinition, 'AutomationProperties\]::SetName').Count -ge 2 -and
         $stateDefinition -match '\$script:CircleHost' -and $stateDefinition -match '\$script:WidgetWindow') 'state rendering should update automation names on both the circle and window.'
-    foreach ($stateLabel in '状态正常', '状态注意', '状态紧急', '状态等待', '状态不可用', '观测口径为本机会话记录') {
+    foreach ($stateLabel in 'accessibility.normalState', 'accessibility.attentionState', 'accessibility.criticalState',
+        'accessibility.waitingState', 'accessibility.unavailableState', 'accessibility.usageSummary') {
         Assert-Widget ($stateDefinition.Contains($stateLabel)) ('automation state should include: ' + $stateLabel)
     }
     foreach ($startupContract in
-        '当前启动环境不受支持。', '当前线程模式不受支持。', '系统界面组件未能加载。',
-        '无法建立单实例保护。', '窗口创建失败。', '系统通知初始化失败。', '后台读取未能启动。',
-        '请双击启动文件运行。', '请确认系统界面组件完整后重试。', '请退出残留实例后重试。',
-        '请运行自检；若失败，请恢复上一版本。', '请重启系统通知后重试。') {
+        'fatal.unsupportedHost', 'fatal.unsupportedThread', 'fatal.uiLoadCause',
+        'fatal.mutexCause', 'fatal.windowCause', 'fatal.notificationCause', 'fatal.workerCause',
+        'fatal.useLauncherFix', 'fatal.uiRepairFix', 'fatal.exitOldFix', 'fatal.restoreFix', 'fatal.restartNotificationFix') {
         Assert-Widget ($runtimeSource.Contains($startupContract)) ('startup errors should include: ' + $startupContract)
     }
-    foreach ($runtimeContract in '用量小组件已经在运行。', '显示小组件', '退出小组件',
-        '剩余用量 {0:0}%', '将在 {0:yyyy-MM-dd HH:mm} 重置', 'ContextMenuStrip', 'TrayMenu') {
+    foreach ($runtimeContract in 'app.alreadyRunning', 'menu.showWidget', 'menu.exit', 'menu.language',
+        'reminder.title', 'reminder.body', 'ContextMenuStrip', 'TrayMenu', 'LanguageMenuItems') {
         Assert-Widget ($runtimeSource.Contains($runtimeContract)) ('runtime UI contract should include: ' + $runtimeContract)
     }
     Assert-Widget ($runtimeSource.Contains('foreach ($theme in @(Get-WidgetThemes))')) 'the theme menu should use the shared catalog.'
@@ -2863,28 +3019,28 @@ if ($SelfTest) {
     Assert-Widget (-not $sourceText.Contains(('Drag' + 'Region'))) 'the obsolete drag-only region should remain absent.'
 
     $themeAppearances = @(
-        [pscustomobject]@{ Name = '冰川青'; Start = '#7BFFE0'; End = '#55CFFF' },
-        [pscustomobject]@{ Name = '星云紫'; Start = '#D8A7FF'; End = '#7C8CFF' },
-        [pscustomobject]@{ Name = '深海蓝'; Start = '#82D9FF'; End = '#4478FF' },
-        [pscustomobject]@{ Name = '樱雾粉'; Start = '#FFB1D8'; End = '#FF719D' },
-        [pscustomobject]@{ Name = '极光绿'; Start = '#7CFFB2'; End = '#38D989' },
-        [pscustomobject]@{ Name = '云母银'; Start = '#F1F5FF'; End = '#9DAAC3' },
-        [pscustomobject]@{ Name = '日落橙'; Start = '#FFC28A'; End = '#FF806D' },
-        [pscustomobject]@{ Name = '青柠光'; Start = '#DCFF7C'; End = '#7DDB66' }
+        [pscustomobject]@{ NameKey = 'theme.glacier'; Start = '#7BFFE0'; End = '#55CFFF' },
+        [pscustomobject]@{ NameKey = 'theme.nebula'; Start = '#D8A7FF'; End = '#7C8CFF' },
+        [pscustomobject]@{ NameKey = 'theme.ocean'; Start = '#82D9FF'; End = '#4478FF' },
+        [pscustomobject]@{ NameKey = 'theme.sakura'; Start = '#FFB1D8'; End = '#FF719D' },
+        [pscustomobject]@{ NameKey = 'theme.aurora'; Start = '#7CFFB2'; End = '#38D989' },
+        [pscustomobject]@{ NameKey = 'theme.mica'; Start = '#F1F5FF'; End = '#9DAAC3' },
+        [pscustomobject]@{ NameKey = 'theme.sunset'; Start = '#FFC28A'; End = '#FF806D' },
+        [pscustomobject]@{ NameKey = 'theme.lime'; Start = '#DCFF7C'; End = '#7DDB66' }
     )
     $themes = @(Get-WidgetThemes)
     Assert-Widget ($themes.Count -eq 8) 'the theme catalog should expose eight themes.'
     foreach ($theme in 0..7) {
         $appearance = Get-WidgetAppearance -RemainingPercent 21 -Theme $theme
-        Assert-Widget ($appearance.Name -eq $themeAppearances[$theme].Name -and
+        Assert-Widget ($appearance.NameKey -ceq $themeAppearances[$theme].NameKey -and
             $appearance.Start -eq $themeAppearances[$theme].Start -and
             $appearance.End -eq $themeAppearances[$theme].End) 'each normal theme should match the approved catalog.'
     }
     $attentionAppearance = Get-WidgetAppearance -RemainingPercent 20 -Theme 7
     $urgentAppearance = Get-WidgetAppearance -RemainingPercent 10 -Theme 6
-    Assert-Widget ($attentionAppearance.Name -eq '注意' -and
+    Assert-Widget ($attentionAppearance.NameKey -ceq 'accessibility.attentionState' -and
         $attentionAppearance.Start -eq '#FFD166' -and $attentionAppearance.End -eq '#FFD166') 'attention should override every theme.'
-    Assert-Widget ($urgentAppearance.Name -eq '紧急' -and
+    Assert-Widget ($urgentAppearance.NameKey -ceq 'accessibility.criticalState' -and
         $urgentAppearance.Start -eq '#FF657D' -and $urgentAppearance.End -eq '#FF657D') 'urgent should override every theme.'
 
     Assert-Widget ((Format-TokenCount 40860000) -eq '4086 万') 'large token counts should use Chinese ten-thousand formatting.'
@@ -2900,10 +3056,6 @@ if ($SelfTest) {
     Assert-Widget ((Format-LimitWindow ([double]9007199254740991)) -eq '9007199254740991 分钟') 'the largest lossless double integer must retain its exact value.'
     Assert-Widget ((Format-LimitWindow ([single]16777215)) -eq '16777215 分钟') 'the largest lossless single integer must retain its exact value.'
 
-    $countdownNow = [datetime]'2026-07-30T10:00:00'
-    $countdownState = [pscustomobject]@{ LimitWindows = @(
-        [pscustomobject]@{ Name = 'primary'; RemainingPercent = 50; ResetAt = $countdownNow.AddDays(2).AddHours(3).AddMinutes(59) }
-    ) }
     Assert-Widget ((Format-ResetCountdown -State $countdownState -Now $countdownNow) -eq '2 天 3 小时后重置') 'day countdowns should use Chinese day and hour units.'
     $countdownState.LimitWindows[0].ResetAt = $countdownNow.AddHours(3).AddMinutes(4).AddSeconds(59)
     Assert-Widget ((Format-ResetCountdown -State $countdownState -Now $countdownNow) -eq '3 小时 4 分钟后重置') 'hour countdowns should use Chinese hour and minute units.'
@@ -2926,29 +3078,11 @@ if ($SelfTest) {
         Assert-Widget ((Format-UsageDiagnostic $code) -eq $diagnostics[$code]) 'diagnostics should map to safe Chinese text.'
     }
 
-    $requiredVisibleStrings = @(
-        '用量小组件', '显示小组件', '显示详情', '关闭详情', '退出小组件', '用量详情',
-        '冰川青', '星云紫', '深海蓝', '樱雾粉', '极光绿', '云母银', '日落橙', '青柠光', '最紧限制', '剩余用量',
-        '活动任务列表', '最近 30 分钟', '最近 30 分钟暂无活动任务', '任务名称暂不可用', '该任务暂无令牌数据',
-        '上下文占用', '输入 / 输出构成',
-        '本机累计缓存命中令牌', '本机累计缓存未命中令牌', '输出中推理占比', '距离重置', '本机最近观测',
-        '本机观测正常', '等待本机观测', '最近观测', '状态', '余量充足', '请留意用量', '请留意', '用量紧急',
-        '缓存命中令牌', '缓存未命中令牌',
-        '未知周期', '等待新周期', '暂无可用数据', '正常', '注意', '紧急',
-        '状态正常', '状态注意', '状态紧急', '状态等待', '状态不可用', '观测口径为本机会话记录',
-        '无法启动用量小组件。', '当前启动环境不受支持。', '当前线程模式不受支持。',
-        '系统界面组件未能加载。', '无法建立单实例保护。', '窗口创建失败。',
-        '系统通知初始化失败。', '后台读取未能启动。', '请双击启动文件运行。',
-        '请确认系统界面组件完整后重试。', '请退出残留实例后重试。',
-        '请运行自检；若失败，请恢复上一版本。', '请重启系统通知后重试。',
-        '用量小组件已经在运行。', '将在重置'
-    ) + @($diagnostics.Values | Select-Object -First 4)
     $visibleStrings = @(Get-WidgetVisibleStrings)
-    foreach ($required in $requiredVisibleStrings) {
-        Assert-Widget ($visibleStrings -ccontains $required) ('visible strings should include: ' + $required)
-    }
-    foreach ($visible in $visibleStrings) {
-        Assert-Widget ($visible -notmatch '[A-Za-z]') ('visible strings must not contain Latin letters: ' + $visible)
+    Assert-Widget ($visibleStrings.Count -eq $requiredLanguageKeys.Count) 'visible strings should cover the complete canonical language-key catalog.'
+    foreach ($key in $requiredLanguageKeys) {
+        $required = Get-WidgetText $key
+        Assert-Widget ($visibleStrings -ccontains $required -and -not [string]::IsNullOrWhiteSpace($required)) ('visible strings should include: ' + $key)
     }
 
     foreach ($invalidCase in @(
@@ -3532,17 +3666,21 @@ if ($SelfTest) {
         $env:LOCALAPPDATA = $testLocalAppData
         $preferenceCodexRoot = Join-Path $testLocalAppData 'chosen-codex'
         [System.IO.Directory]::CreateDirectory((Join-Path $preferenceCodexRoot 'sessions')) | Out-Null
-        Assert-Widget (Save-WidgetPreferences -Left (-640.5) -Top 120.25 -Monitor '\\.\DISPLAY2' -Theme 3 -CodexDataDirectory $preferenceCodexRoot) 'valid preferences should save.'
+        Assert-Widget (Save-WidgetPreferences -Left (-640.5) -Top 120.25 -Monitor '\\.\DISPLAY2' -Theme 3 -CodexDataDirectory $preferenceCodexRoot -Language 'ja-JP') 'valid preferences should save.'
         $preferences = Get-WidgetPreferences
         Assert-Widget ($preferences.Left -eq -640.5 -and $preferences.Top -eq 120.25 -and $preferences.Monitor -eq '\\.\DISPLAY2' -and
-            $preferences.Theme -eq 3 -and $preferences.CodexDataDirectory -eq $preferenceCodexRoot) 'saved preferences should round-trip, including the Codex data directory.'
+            $preferences.Theme -eq 3 -and $preferences.CodexDataDirectory -eq $preferenceCodexRoot -and
+            $preferences.Language -ceq 'ja-JP') 'saved preferences should round-trip, including the Codex data directory and language.'
         $preferencesPath = Join-Path $testLocalAppData 'CodexUsageWidget\preferences.json'
         $storedPreferences = [System.IO.File]::ReadAllText($preferencesPath) | ConvertFrom-Json
-        Assert-Widget ((@($storedPreferences.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'CodexDataDirectory,Left,Monitor,Theme,Top') 'preferences should persist only the five whitelisted properties.'
+        Assert-Widget ((@($storedPreferences.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'CodexDataDirectory,Language,Left,Monitor,Theme,Top') 'preferences should persist only the six whitelisted properties.'
         $validPreferencesJson = [System.IO.File]::ReadAllText($preferencesPath)
-        Assert-Widget (Save-WidgetPreferences -Left (-640.5) -Top 120.25 -Monitor '\\.\DISPLAY2' -Theme 7 -CodexDataDirectory $preferenceCodexRoot) 'theme seven should save.'
+        Assert-Widget (-not (Save-WidgetPreferences -Left 1 -Top 2 -Monitor 'x' -Theme 0 -Language 'fr-FR')) 'an unsupported language should be rejected.'
+        Assert-Widget ([System.IO.File]::ReadAllText($preferencesPath) -eq $validPreferencesJson) 'an invalid language should not replace preferences.'
+        Assert-Widget (Save-WidgetPreferences -Left (-640.5) -Top 120.25 -Monitor '\\.\DISPLAY2' -Theme 7 -CodexDataDirectory $preferenceCodexRoot -Language 'ja-JP') 'theme seven should save.'
         $preferences = Get-WidgetPreferences
-        Assert-Widget ($preferences.Theme -eq 7 -and $preferences.CodexDataDirectory -eq $preferenceCodexRoot) 'theme seven and the Codex directory should round-trip together.'
+        Assert-Widget ($preferences.Theme -eq 7 -and $preferences.CodexDataDirectory -eq $preferenceCodexRoot -and
+            $preferences.Language -ceq 'ja-JP') 'theme seven, the Codex directory, and language should round-trip together.'
         $themeSevenJson = [System.IO.File]::ReadAllText($preferencesPath)
         Assert-Widget (-not (Save-WidgetPreferences -Left 1 -Top 2 -Monitor 'x' -Theme 0 -CodexDataDirectory '.\relative')) 'a relative Codex directory should be rejected.'
         Assert-Widget ([System.IO.File]::ReadAllText($preferencesPath) -eq $themeSevenJson) 'an invalid Codex directory should not replace preferences.'
@@ -3558,14 +3696,14 @@ if ($SelfTest) {
         Assert-Widget (-not (Save-WidgetPreferences -Left 1 -Top 2 -Monitor 'x' -Theme 1.5)) 'non-integer themes should be rejected.'
         Assert-Widget ([System.IO.File]::ReadAllText($preferencesPath) -eq $validPreferencesJson) 'invalid preference inputs should not replace the old file.'
 
-        [System.IO.File]::WriteAllText($preferencesPath, '{"Left":true,"Top":"120","Monitor":" ","Theme":8,"CodexDataDirectory":"relative","Extra":1}')
+        [System.IO.File]::WriteAllText($preferencesPath, '{"Left":true,"Top":"120","Monitor":" ","Theme":8,"CodexDataDirectory":"relative","Language":"fr-FR","Extra":1}')
         $preferences = Get-WidgetPreferences
         Assert-Widget ($null -eq $preferences.Left -and $null -eq $preferences.Top -and $null -eq $preferences.Monitor -and
-            $preferences.Theme -eq 0 -and $null -eq $preferences.CodexDataDirectory) 'damaged preference types should fall back independently.'
+            $preferences.Theme -eq 0 -and $null -eq $preferences.CodexDataDirectory -and $null -eq $preferences.Language) 'damaged preference types should fall back independently.'
         [System.IO.File]::WriteAllText($preferencesPath, '{bad json')
         $preferences = Get-WidgetPreferences
         Assert-Widget ($null -eq $preferences.Left -and $null -eq $preferences.Top -and $null -eq $preferences.Monitor -and
-            $preferences.Theme -eq 0 -and $null -eq $preferences.CodexDataDirectory) 'invalid preference JSON should safely return defaults.'
+            $preferences.Theme -eq 0 -and $null -eq $preferences.CodexDataDirectory -and $null -eq $preferences.Language) 'invalid preference JSON should safely return defaults.'
         [System.IO.File]::WriteAllText($preferencesPath, '[]')
         $preferences = Get-WidgetPreferences
         Assert-Widget ($null -eq $preferences.Left -and $null -eq $preferences.Top -and $null -eq $preferences.Monitor -and $preferences.Theme -eq 0) 'an invalid preference structure should safely return defaults.'
@@ -3616,14 +3754,29 @@ if ($SelfTest) {
 
 if ($SelfTest) { return }
 
+$script:WidgetPreferences = Get-WidgetPreferences
+try {
+    Initialize-WidgetLocalization -Root $PSScriptRoot `
+        -SavedLanguage $script:WidgetPreferences.Language `
+        -UiCulture [cultureinfo]::CurrentUICulture
+}
+catch {
+    Show-WidgetFatalError `
+        "Language pack missing or damaged.`r`n语言包缺失或损坏。" `
+        "The required English language pack could not be validated.`r`n必需的英语语言包未通过验证。" `
+        "Restore the complete locales folder and restart.`r`n请恢复完整的 locales 文件夹后重启。"
+    return
+}
+$script:WidgetPreferences.Language = $script:CurrentLanguageCode
+
 $isWindowsPowerShell51 = $PSVersionTable.PSEdition -eq 'Desktop' -and
     $PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -ge 1
 if (-not $isWindowsPowerShell51) {
-    Show-WidgetFatalError '无法启动用量小组件。' '当前启动环境不受支持。' '请双击启动文件运行。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.unsupportedHost') (Get-WidgetText 'fatal.useLauncherFix')
     return
 }
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
-    Show-WidgetFatalError '无法启动用量小组件。' '当前线程模式不受支持。' '请双击启动文件运行。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.unsupportedThread') (Get-WidgetText 'fatal.useLauncherFix')
     return
 }
 
@@ -3651,7 +3804,7 @@ try {
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing -ErrorAction Stop
 }
 catch {
-    Show-WidgetFatalError '无法启动用量小组件。' '系统界面组件未能加载。' '请确认系统界面组件完整后重试。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.uiLoadCause') (Get-WidgetText 'fatal.uiRepairFix')
     return
 }
 
@@ -3662,14 +3815,14 @@ try {
 }
 catch {
     Stop-InstanceMutex
-    Show-WidgetFatalError '无法启动用量小组件。' '无法建立单实例保护。' '请退出残留实例后重试。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.mutexCause') (Get-WidgetText 'fatal.exitOldFix')
     return
 }
 if (-not $createdNew) {
     try {
         [void][System.Windows.MessageBox]::Show(
-            '用量小组件已经在运行。',
-            '用量小组件',
+            (Get-WidgetText 'app.alreadyRunning'),
+            (Get-WidgetText 'app.title'),
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Information
         )
@@ -3677,7 +3830,7 @@ if (-not $createdNew) {
     catch {
         try {
             $shell = New-Object -ComObject WScript.Shell
-            [void]$shell.Popup('用量小组件已经在运行。', 0, '用量小组件', 64)
+            [void]$shell.Popup((Get-WidgetText 'app.alreadyRunning'), 0, (Get-WidgetText 'app.title'), 64)
             [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
         }
         catch { }
@@ -3693,7 +3846,7 @@ try {
 }
 catch {
     Stop-InstanceMutex
-    Show-WidgetFatalError '无法启动用量小组件。' '窗口创建失败。' '请运行自检；若失败，请恢复上一版本。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.windowCause') (Get-WidgetText 'fatal.restoreFix')
     return
 }
 
@@ -3712,14 +3865,27 @@ $script:ObservedText = $script:WidgetWindow.FindName('ObservedText')
 $script:ObservedDiagnosticText = $script:WidgetWindow.FindName('ObservedDiagnosticText')
 $script:DetailStatusText = $script:WidgetWindow.FindName('DetailStatusText')
 $script:UsageStatusText = $script:WidgetWindow.FindName('UsageStatusText')
+$script:DetailTitleText = $script:WidgetWindow.FindName('DetailTitleText')
+$script:RemainingLabelText = $script:WidgetWindow.FindName('RemainingLabelText')
+$script:ObservedLabelText = $script:WidgetWindow.FindName('ObservedLabelText')
+$script:StatusLabelText = $script:WidgetWindow.FindName('StatusLabelText')
 $script:RemainingDetailText = $script:WidgetWindow.FindName('RemainingDetailText')
 $script:RemainingDetailUnitText = $script:WidgetWindow.FindName('RemainingDetailUnitText')
 $script:TokenDetailsPanel = $script:WidgetWindow.FindName('TokenDetailsPanel')
+$script:ActivityTitleText = $script:WidgetWindow.FindName('ActivityTitleText')
+$script:ActivityWindowText = $script:WidgetWindow.FindName('ActivityWindowText')
 $script:ActiveTaskEmptyText = $script:WidgetWindow.FindName('ActiveTaskEmptyText')
 $script:ActiveTaskList = $script:WidgetWindow.FindName('ActiveTaskList')
 $script:TaskDetailsPanel = $script:WidgetWindow.FindName('TaskDetailsPanel')
 $script:TaskTitleText = $script:WidgetWindow.FindName('TaskTitleText')
 $script:TaskNoDataText = $script:WidgetWindow.FindName('TaskNoDataText')
+$script:CumulativeLabelText = $script:WidgetWindow.FindName('CumulativeLabelText')
+$script:ContextLabelText = $script:WidgetWindow.FindName('ContextLabelText')
+$script:ContextPercentLabelText = $script:WidgetWindow.FindName('ContextPercentLabelText')
+$script:CompositionLabelText = $script:WidgetWindow.FindName('CompositionLabelText')
+$script:TaskCacheHitLabelText = $script:WidgetWindow.FindName('TaskCacheHitLabelText')
+$script:TaskCacheMissLabelText = $script:WidgetWindow.FindName('TaskCacheMissLabelText')
+$script:ReasoningLabelText = $script:WidgetWindow.FindName('ReasoningLabelText')
 $script:CumulativeRow = $script:WidgetWindow.FindName('CumulativeRow')
 $script:ContextRow = $script:WidgetWindow.FindName('ContextRow')
 $script:ContextPercentRow = $script:WidgetWindow.FindName('ContextPercentRow')
@@ -3742,6 +3908,8 @@ $script:OutputColumn = $script:WidgetWindow.FindName('OutputColumn')
 $script:GlobalCacheDivider = $script:WidgetWindow.FindName('GlobalCacheDivider')
 $script:GlobalCacheHitRow = $script:WidgetWindow.FindName('GlobalCacheHitRow')
 $script:GlobalCacheMissRow = $script:WidgetWindow.FindName('GlobalCacheMissRow')
+$script:GlobalCacheHitLabelText = $script:WidgetWindow.FindName('GlobalCacheHitLabelText')
+$script:GlobalCacheMissLabelText = $script:WidgetWindow.FindName('GlobalCacheMissLabelText')
 $script:CachedText = $script:WidgetWindow.FindName('CachedText')
 $script:CachedMissText = $script:WidgetWindow.FindName('CachedMissText')
 $script:ReasoningText = $script:WidgetWindow.FindName('ReasoningText')
@@ -3764,10 +3932,14 @@ $script:UsageAsyncResult = $null
 $script:PendingUsageState = $null
 $script:NotifyIcon = $null
 $script:TrayMenu = $null
-$script:WidgetPreferences = Get-WidgetPreferences
+$script:TrayShowItem = $null
+$script:TrayExitItem = $null
 $script:CodexDataDirectory = $null
 $script:ThemeMenuItems = @()
+$script:LanguageMenuItems = @()
 $script:DetailMenuItem = $null
+$script:LanguageMenuItem = $null
+$script:ExitMenuItem = $null
 $script:WidgetContextMenu = $null
 $script:PercentAnimationTimer = $null
 $script:DisplayedRingPercent = 0.0
@@ -3782,21 +3954,21 @@ $script:LastShimmerObservationKey = $null
 try {
     $script:NotifyIcon = [System.Windows.Forms.NotifyIcon]::new()
     $script:NotifyIcon.Icon = [System.Drawing.SystemIcons]::Information
-    $script:NotifyIcon.Text = '用量小组件'
+    $script:NotifyIcon.Text = Get-WidgetText 'app.title'
     $script:TrayMenu = [System.Windows.Forms.ContextMenuStrip]::new()
-    $trayShowItem = [System.Windows.Forms.ToolStripMenuItem]::new('显示小组件')
-    $trayShowItem.Add_Click({
+    $script:TrayShowItem = [System.Windows.Forms.ToolStripMenuItem]::new((Get-WidgetText 'menu.showWidget'))
+    $script:TrayShowItem.Add_Click({
         [void]$script:WidgetWindow.Dispatcher.BeginInvoke([System.Action]{
             if (-not $script:WidgetWindow.IsVisible) { $script:WidgetWindow.Show() }
             [void]$script:WidgetWindow.Activate()
         })
     })
-    $trayExitItem = [System.Windows.Forms.ToolStripMenuItem]::new('退出小组件')
-    $trayExitItem.Add_Click({
+    $script:TrayExitItem = [System.Windows.Forms.ToolStripMenuItem]::new((Get-WidgetText 'menu.exit'))
+    $script:TrayExitItem.Add_Click({
         [void]$script:WidgetWindow.Dispatcher.BeginInvoke([System.Action]{ $script:WidgetWindow.Close() })
     })
-    [void]$script:TrayMenu.Items.Add($trayShowItem)
-    [void]$script:TrayMenu.Items.Add($trayExitItem)
+    [void]$script:TrayMenu.Items.Add($script:TrayShowItem)
+    [void]$script:TrayMenu.Items.Add($script:TrayExitItem)
     $script:NotifyIcon.ContextMenuStrip = $script:TrayMenu
     $script:NotifyIcon.Visible = $true
 }
@@ -3810,7 +3982,7 @@ catch {
         $script:NotifyIcon = $null
     }
     Stop-InstanceMutex
-    Show-WidgetFatalError '无法启动用量小组件。' '系统通知初始化失败。' '请重启系统通知后重试。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.notificationCause') (Get-WidgetText 'fatal.restartNotificationFix')
     return
 }
 
@@ -3974,7 +4146,7 @@ function Complete-WidgetPositionRestore {
     $script:WidgetPreferences.Left = $left
     $script:WidgetPreferences.Top = $top
     $script:WidgetPreferences.Monitor = $screen.DeviceName
-    [void](Save-WidgetPreferences -Left $left -Top $top -Monitor $screen.DeviceName -Theme $script:WidgetPreferences.Theme -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory)
+    [void](Save-WidgetPreferences -Left $left -Top $top -Monitor $screen.DeviceName -Theme $script:WidgetPreferences.Theme -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory -Language $script:WidgetPreferences.Language)
 }
 
 function Restore-WidgetPosition {
@@ -4010,7 +4182,7 @@ function Snap-And-SaveWidgetPosition {
     $script:WidgetPreferences.Left = [double]$position.Left
     $script:WidgetPreferences.Top = [double]$position.Top
     $script:WidgetPreferences.Monitor = $screen.DeviceName
-    [void](Save-WidgetPreferences -Left $position.Left -Top $position.Top -Monitor $screen.DeviceName -Theme $script:WidgetPreferences.Theme -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory)
+    [void](Save-WidgetPreferences -Left $position.Left -Top $position.Top -Monitor $screen.DeviceName -Theme $script:WidgetPreferences.Theme -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory -Language $script:WidgetPreferences.Language)
 }
 
 function Set-WidgetTheme {
@@ -4026,7 +4198,7 @@ function Set-WidgetTheme {
         Start-ShimmerAnimation
     }
     if ($null -ne $script:WidgetPreferences.Left -and $null -ne $script:WidgetPreferences.Top) {
-        [void](Save-WidgetPreferences -Left $script:WidgetPreferences.Left -Top $script:WidgetPreferences.Top -Monitor $script:WidgetPreferences.Monitor -Theme $Theme -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory)
+        [void](Save-WidgetPreferences -Left $script:WidgetPreferences.Left -Top $script:WidgetPreferences.Top -Monitor $script:WidgetPreferences.Monitor -Theme $Theme -CodexDataDirectory $script:WidgetPreferences.CodexDataDirectory -Language $script:WidgetPreferences.Language)
     }
 }
 
@@ -4064,7 +4236,7 @@ function Show-DetailPopup {
         $script:DetailCard.Opacity = 1
         $script:DetailCardTranslate.X = 0
     }
-    if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = '关闭详情' }
+    if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = Get-WidgetText 'menu.hideDetails' }
     if ($FromHover -and -not $script:HasShownHoverShimmer) {
         $script:HasShownHoverShimmer = $true
         Start-ShimmerAnimation
@@ -4076,7 +4248,7 @@ function Cancel-DetailPopupHide {
     $script:DetailCard.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
     if ($script:DetailPopup.IsOpen) {
         $script:DetailCard.Opacity = 1
-        if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = '关闭详情' }
+        if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = Get-WidgetText 'menu.hideDetails' }
     }
 }
 
@@ -4090,7 +4262,7 @@ function Hide-DetailPopup {
     if ($Immediate -or -not (Test-WidgetAnimationEnabled)) {
         $script:DetailPopup.IsOpen = $false
         Hide-ActiveTaskDetails
-        if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = '显示详情' }
+        if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = Get-WidgetText 'menu.showDetails' }
     }
     else {
         $fade = [System.Windows.Media.Animation.DoubleAnimation]::new($script:DetailCard.Opacity, 0, [TimeSpan]::FromMilliseconds(120))
@@ -4102,7 +4274,7 @@ function Hide-DetailPopup {
                 $script:DetailPopup.IsOpen = $false
                 Hide-ActiveTaskDetails
                 $script:DetailCard.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
-                if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = '显示详情' }
+                if ($null -ne $script:DetailMenuItem) { $script:DetailMenuItem.Header = Get-WidgetText 'menu.showDetails' }
             }
         })
         $script:DetailCard.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $fade)
@@ -4122,8 +4294,8 @@ function Show-UsageReminder {
         $resetAt = [datetime]$State.ResetAt
         $script:NotifyIcon.ShowBalloonTip(
             5000,
-            ('剩余用量 {0:0}%' -f $remaining),
-            ('将在 {0:yyyy-MM-dd HH:mm} 重置' -f $resetAt),
+            (Get-WidgetText 'reminder.title' @($remaining)),
+            (Get-WidgetText 'reminder.body' @($resetAt)),
             [System.Windows.Forms.ToolTipIcon]::Warning
         )
     }
@@ -4136,15 +4308,15 @@ function Show-CodexDataDirectoryPicker {
         $selectedDirectory = $null
         try {
             $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
-            $dialog.Description = '请选择 Codex 数据目录（通常名为 .codex）。如果尚未使用 Codex，可以取消并先完成一次任务。'
+            $dialog.Description = Get-WidgetText 'picker.description'
             $dialog.ShowNewFolderButton = $false
             if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
             $selectedDirectory = Resolve-CodexDataDirectory $dialog.SelectedPath $null $null
         }
         catch {
             [void][System.Windows.Forms.MessageBox]::Show(
-                '目录选择器无法打开，请先运行一次 Codex 后重启小组件。',
-                '用量小组件',
+                (Get-WidgetText 'picker.openFailed'),
+                (Get-WidgetText 'app.title'),
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Warning)
             return $null
@@ -4154,8 +4326,8 @@ function Show-CodexDataDirectoryPicker {
         }
         if ($null -ne $selectedDirectory) { return $selectedDirectory }
         [void][System.Windows.Forms.MessageBox]::Show(
-            '所选目录中没有 sessions 文件夹，请选择 Codex 的 .codex 数据目录。',
-            '用量小组件',
+            (Get-WidgetText 'picker.invalidDirectory'),
+            (Get-WidgetText 'app.title'),
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning)
     }
@@ -4310,14 +4482,29 @@ $script:TaskDetailsPanel.Add_MouseLeave({
 
 $script:WidgetContextMenu = [System.Windows.Controls.ContextMenu]::new()
 $script:DetailMenuItem = [System.Windows.Controls.MenuItem]::new()
-$script:DetailMenuItem.Header = '显示详情'
+$script:DetailMenuItem.Header = Get-WidgetText 'menu.showDetails'
 $script:DetailMenuItem.Add_Click({ Toggle-DetailPopup })
 [void]$script:WidgetContextMenu.Items.Add($script:DetailMenuItem)
+$script:LanguageMenuItem = [System.Windows.Controls.MenuItem]::new()
+$script:LanguageMenuItem.Header = Get-WidgetText 'menu.language'
+foreach ($code in Get-WidgetLanguageCodes) {
+    $languageItem = [System.Windows.Controls.MenuItem]::new()
+    $languageItem.Header = Get-WidgetText ('language.' + $code)
+    $languageItem.Tag = $code
+    $languageItem.IsCheckable = $true
+    $languageItem.Add_Click({
+        param($sender, $eventArgs)
+        [void](Set-WidgetLanguage -Code ([string]$sender.Tag) -Persist)
+    })
+    $script:LanguageMenuItems += $languageItem
+    [void]$script:LanguageMenuItem.Items.Add($languageItem)
+}
+[void]$script:WidgetContextMenu.Items.Add($script:LanguageMenuItem)
 [void]$script:WidgetContextMenu.Items.Add([System.Windows.Controls.Separator]::new())
 $themeIndex = 0
 foreach ($theme in @(Get-WidgetThemes)) {
     $themeItem = [System.Windows.Controls.MenuItem]::new()
-    $themeItem.Header = $theme.Name
+    $themeItem.Header = Get-WidgetText $theme.NameKey
     $themeItem.Tag = $themeIndex
     $themeItem.IsCheckable = $true
     $themeItem.Add_Click({
@@ -4329,15 +4516,17 @@ foreach ($theme in @(Get-WidgetThemes)) {
     $themeIndex++
 }
 [void]$script:WidgetContextMenu.Items.Add([System.Windows.Controls.Separator]::new())
-$exitMenuItem = [System.Windows.Controls.MenuItem]::new()
-$exitMenuItem.Header = '退出小组件'
-$exitMenuItem.Add_Click({ $script:WidgetWindow.Close() })
-[void]$script:WidgetContextMenu.Items.Add($exitMenuItem)
+$script:ExitMenuItem = [System.Windows.Controls.MenuItem]::new()
+$script:ExitMenuItem.Header = Get-WidgetText 'menu.exit'
+$script:ExitMenuItem.Add_Click({ $script:WidgetWindow.Close() })
+[void]$script:WidgetContextMenu.Items.Add($script:ExitMenuItem)
 $script:WidgetContextMenu.Add_Opened({
-    $script:DetailMenuItem.Header = if ($script:DetailPopup.IsOpen) { '关闭详情' } else { '显示详情' }
+    $script:DetailMenuItem.Header = Get-WidgetText $(if ($script:DetailPopup.IsOpen) { 'menu.hideDetails' } else { 'menu.showDetails' })
+    foreach ($item in $script:LanguageMenuItems) { $item.IsChecked = ([string]$item.Tag -ceq $script:CurrentLanguageCode) }
     foreach ($item in $script:ThemeMenuItems) { $item.IsChecked = ([int]$item.Tag -eq $script:WidgetPreferences.Theme) }
 })
 $script:CircleHost.ContextMenu = $script:WidgetContextMenu
+Apply-WidgetLanguage
 
 $script:CircleHost.Add_MouseEnter({
     Cancel-DetailPopupHide
@@ -4417,7 +4606,7 @@ try {
 }
 catch {
     Stop-WidgetResources
-    Show-WidgetFatalError '无法启动用量小组件。' '后台读取未能启动。' '请运行自检；若失败，请恢复上一版本。'
+    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.workerCause') (Get-WidgetText 'fatal.restoreFix')
     return
 }
 $script:WidgetTimer = [System.Windows.Threading.DispatcherTimer]::new()
