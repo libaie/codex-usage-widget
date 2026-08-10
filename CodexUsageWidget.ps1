@@ -757,13 +757,15 @@ function Read-WidgetLanguagePack {
     foreach ($key in Get-WidgetRequiredLanguageKeys) { $required[$key] = $true }
     $strings = [Collections.Hashtable]::new([StringComparer]::Ordinal)
     foreach ($property in $stringsProperty.Value.PSObject.Properties) {
+        if (-not $required.ContainsKey($property.Name)) { continue }
         if ($property.Value -isnot [string] -or $property.Value.Length -gt 1000) {
             throw [System.IO.InvalidDataException]::new('Language-pack strings must be strings no longer than 1000 characters.')
         }
+        if ([string]::IsNullOrWhiteSpace($property.Value)) { continue }
         if ($property.Name -ceq 'app.title' -and $property.Value.Length -ge 64) {
             throw [System.IO.InvalidDataException]::new('Language-pack app.title must be shorter than 64 characters.')
         }
-        if ($required.ContainsKey($property.Name)) { $strings[$property.Name] = [string]$property.Value }
+        $strings[$property.Name] = [string]$property.Value
     }
     return [pscustomobject]@{
         Code = [string]$codeProperty.Value
@@ -2378,6 +2380,14 @@ if ($SelfTest) {
         try { [void](Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot) } catch { $rejected = $true }
         Assert-Widget $rejected 'app.title must fit the NotifyIcon 63-character limit.'
 
+        [System.IO.File]::WriteAllText($temporaryPackPath,
+            '{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":"Usage widget","extension":{"value":"ignored"}}}',
+            [System.Text.UTF8Encoding]::new($false))
+        $packWithUnknownExtension = $null
+        try { $packWithUnknownExtension = Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot } catch { }
+        Assert-Widget ($null -ne $packWithUnknownExtension -and
+            -not $packWithUnknownExtension.Strings.ContainsKey('extension')) 'unknown language-pack object keys should be ignored before value validation.'
+
         $invalidPacks = @(
             '{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":{"value":"bad"}}}',
             '{"code":"EN-us","nativeName":"English","culture":"en-US","strings":{"app.title":"Usage widget"}}',
@@ -2391,6 +2401,31 @@ if ($SelfTest) {
             try { [void](Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot) } catch { $rejected = $true }
             Assert-Widget $rejected 'invalid language-pack metadata or string values should be rejected.'
         }
+
+        $temporaryJapanesePackPath = Join-Path $temporaryLocales 'ja-JP.json'
+        [System.IO.File]::WriteAllText($temporaryPackPath,
+            [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\en-US.json')),
+            [System.Text.UTF8Encoding]::new($false))
+        $temporaryJapanesePack = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\ja-JP.json')) | ConvertFrom-Json -ErrorAction Stop
+        $temporaryJapanesePack.strings.'detail.title' = '   '
+        [System.IO.File]::WriteAllText($temporaryJapanesePackPath,
+            ($temporaryJapanesePack | ConvertTo-Json -Depth 5),
+            [System.Text.UTF8Encoding]::new($false))
+        $blankJapanesePack = Read-WidgetLanguagePack 'ja-JP' $temporaryLocaleRoot
+        Assert-Widget (-not $blankJapanesePack.Strings.ContainsKey('detail.title')) 'blank optional translations should be treated as missing.'
+        Initialize-WidgetLocalization $temporaryLocaleRoot 'ja-JP' ([cultureinfo]'en-US')
+        Assert-Widget ($script:CurrentLanguageCode -ceq 'ja-JP' -and
+            (Get-WidgetText 'detail.title') -ceq 'Usage details') 'blank optional translations should fall back to English.'
+
+        $temporaryEnglishPack = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\en-US.json')) | ConvertFrom-Json -ErrorAction Stop
+        $temporaryEnglishPack.strings.'detail.title' = '   '
+        [System.IO.File]::WriteAllText($temporaryPackPath,
+            ($temporaryEnglishPack | ConvertTo-Json -Depth 5),
+            [System.Text.UTF8Encoding]::new($false))
+        $blankEnglishRejected = $false
+        try { Initialize-WidgetLocalization $temporaryLocaleRoot $null ([cultureinfo]'en-US') } catch { $blankEnglishRejected = $true }
+        Assert-Widget $blankEnglishRejected 'blank required English translations should reject localization initialization.'
+
         [System.IO.File]::WriteAllText($temporaryPackPath, '{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":"Usage widget"}}', [System.Text.UTF8Encoding]::new($false))
         $safeEnglishFailure = $null
         try { Initialize-WidgetLocalization $temporaryLocaleRoot $null ([cultureinfo]'en-US') } catch { $safeEnglishFailure = $_.Exception.Message }
@@ -2415,6 +2450,7 @@ if ($SelfTest) {
         $keys = @($strings.PSObject.Properties.Name | Sort-Object)
         Assert-Widget ($keys.Count -eq 100 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 100 keys as English.')
         foreach ($key in $requiredLanguageKeys) {
+            Assert-Widget (-not [string]::IsNullOrWhiteSpace([string]$strings.$key)) ($code + ' raw JSON should contain nonblank text for ' + $key + '.')
             $englishPlaceholders = @([regex]::Matches($englishStrings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
             $packPlaceholders = @([regex]::Matches($strings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
             Assert-Widget (($englishPlaceholders -join "`n") -ceq ($packPlaceholders -join "`n")) ($code + ' should preserve the placeholder contract for ' + $key + '.')
@@ -2975,6 +3011,7 @@ if ($SelfTest) {
     $runtimeSource = if ($runtimeStart -ge 0) { $sourceText.Substring($runtimeStart) } else { '' }
     Assert-Widget ($runtimeSource.Length -gt 0) 'runtime source should follow the self-test return guard.'
     Assert-Widget ($runtimeSource.Contains('-UiCulture ([cultureinfo]::CurrentUICulture)')) 'startup localization should evaluate the current UI culture before argument binding.'
+    Assert-Widget ($runtimeSource.Contains('if ($null -eq $script:WidgetPreferences.Language) { $script:WidgetPreferences.Language = $script:CurrentLanguageCode }')) 'startup should default only a null language preference to the active fallback language.'
     $pickerFunctionName = 'Show-CodexDataDirectoryPicker'
     Assert-Widget ($runtimeSource.Contains(('function ' + $pickerFunctionName))) 'runtime should provide a Codex data directory picker.'
     $pickerCallMarker = '$selectedCodexDataDirectory = Show-CodexDataDirectoryPicker'
@@ -3718,6 +3755,21 @@ if ($SelfTest) {
         $preferencesPath = Join-Path $testLocalAppData 'CodexUsageWidget\preferences.json'
         $storedPreferences = [System.IO.File]::ReadAllText($preferencesPath) | ConvertFrom-Json
         Assert-Widget ((@($storedPreferences.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'CodexDataDirectory,Language,Left,Monitor,Theme,Top') 'preferences should persist only the six whitelisted properties.'
+
+        $fallbackLocaleRoot = Join-Path $testLocalAppData 'fallback-locale-root'
+        $fallbackLocales = Join-Path $fallbackLocaleRoot 'locales'
+        [void][System.IO.Directory]::CreateDirectory($fallbackLocales)
+        [System.IO.File]::Copy((Join-Path $PSScriptRoot 'locales\en-US.json'), (Join-Path $fallbackLocales 'en-US.json'))
+        $fallbackPreferences = Get-WidgetPreferences
+        Initialize-WidgetLocalization $fallbackLocaleRoot $fallbackPreferences.Language ([cultureinfo]'ja-JP')
+        Assert-Widget ($script:CurrentLanguageCode -ceq 'en-US' -and $fallbackPreferences.Language -ceq 'ja-JP') 'an unavailable saved optional language should activate English without changing the in-memory preference.'
+        if ($null -eq $fallbackPreferences.Language) { $fallbackPreferences.Language = $script:CurrentLanguageCode }
+        Assert-Widget (Save-WidgetPreferences -Left $fallbackPreferences.Left -Top $fallbackPreferences.Top -Monitor $fallbackPreferences.Monitor `
+            -Theme $fallbackPreferences.Theme -CodexDataDirectory $fallbackPreferences.CodexDataDirectory -Language $fallbackPreferences.Language) 'position-style persistence after localization fallback should succeed.'
+        $storedFallbackPreferences = [System.IO.File]::ReadAllText($preferencesPath) | ConvertFrom-Json
+        Assert-Widget ($storedFallbackPreferences.Language -ceq 'ja-JP') 'position-style persistence should preserve an unavailable but valid saved language.'
+        Initialize-WidgetLocalization $PSScriptRoot 'zh-CN' ([cultureinfo]'zh-CN')
+
         $validPreferencesJson = [System.IO.File]::ReadAllText($preferencesPath)
         Assert-Widget (-not (Save-WidgetPreferences -Left 1 -Top 2 -Monitor 'x' -Theme 0 -Language 'fr-FR')) 'an unsupported language should be rejected.'
         Assert-Widget ([System.IO.File]::ReadAllText($preferencesPath) -eq $validPreferencesJson) 'an invalid language should not replace preferences.'
@@ -3811,7 +3863,7 @@ catch {
         "Restore the complete locales folder and restart.`r`n请恢复完整的 locales 文件夹后重启。"
     return
 }
-$script:WidgetPreferences.Language = $script:CurrentLanguageCode
+if ($null -eq $script:WidgetPreferences.Language) { $script:WidgetPreferences.Language = $script:CurrentLanguageCode }
 
 $isWindowsPowerShell51 = $PSVersionTable.PSEdition -eq 'Desktop' -and
     $PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -ge 1
