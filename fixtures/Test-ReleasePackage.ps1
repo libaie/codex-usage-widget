@@ -58,7 +58,10 @@ if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage 'package root i
 
 $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
-    $requiredPaths += @('SECURITY.md', 'CONTRIBUTING.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md')
+    $requiredPaths += @(
+        'SECURITY.md', 'CONTRIBUTING.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md',
+        'assets\social-preview.png'
+    )
 }
 
 $trackedPaths = @()
@@ -87,6 +90,27 @@ $missingPaths = @($requiredPaths | Where-Object {
     $scanPaths -cnotcontains $_ -or -not [IO.File]::Exists((Join-Path $package $_))
 })
 if ($missingPaths.Count -gt 0) { Fail-ReleasePackage ('missing required file(s): ' + ($missingPaths -join ', ')) }
+
+if (-not $RuntimeArchive) {
+    $socialPreviewPath = 'assets\social-preview.png'
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $socialPreview = [Drawing.Image]::FromFile((Join-Path $package $socialPreviewPath))
+    }
+    catch { Fail-ReleasePackage "invalid image file: $socialPreviewPath" }
+    try {
+        $socialPreviewWidth = $socialPreview.Width
+        $socialPreviewHeight = $socialPreview.Height
+    }
+    finally { $socialPreview.Dispose() }
+    if ($socialPreviewWidth -lt 640 -or $socialPreviewHeight -lt 320 -or
+        $socialPreviewWidth -ne 2 * $socialPreviewHeight) {
+        Fail-ReleasePackage "invalid image dimensions: $socialPreviewPath"
+    }
+    if ([IO.FileInfo]::new((Join-Path $package $socialPreviewPath)).Length -ge 1048576) {
+        Fail-ReleasePackage "image file is too large: $socialPreviewPath"
+    }
+}
 
 $commonReadmeRequirements = @(
     'Start-CodexUsageWidget.vbs', 'zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR', 'LICENSE',
