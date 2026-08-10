@@ -760,6 +760,9 @@ function Read-WidgetLanguagePack {
         if ($property.Value -isnot [string] -or $property.Value.Length -gt 1000) {
             throw [System.IO.InvalidDataException]::new('Language-pack strings must be strings no longer than 1000 characters.')
         }
+        if ($property.Name -ceq 'app.title' -and $property.Value.Length -ge 64) {
+            throw [System.IO.InvalidDataException]::new('Language-pack app.title must be shorter than 64 characters.')
+        }
         if ($required.ContainsKey($property.Name)) { $strings[$property.Name] = [string]$property.Value }
     }
     return [pscustomobject]@{
@@ -2362,6 +2365,18 @@ if ($SelfTest) {
         $rejected = $false
         try { [void](Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot) } catch { $rejected = $true }
         Assert-Widget $rejected 'language packs larger than 256 KiB should be rejected.'
+
+        [System.IO.File]::WriteAllText($temporaryPackPath,
+            ('{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":"' + ('x' * 63) + '"}}'),
+            [System.Text.UTF8Encoding]::new($false))
+        Assert-Widget ((Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot).Strings['app.title'].Length -eq 63) 'app.title should allow the NotifyIcon maximum of 63 characters.'
+
+        [System.IO.File]::WriteAllText($temporaryPackPath,
+            ('{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":"' + ('x' * 64) + '"}}'),
+            [System.Text.UTF8Encoding]::new($false))
+        $rejected = $false
+        try { [void](Read-WidgetLanguagePack 'en-US' $temporaryLocaleRoot) } catch { $rejected = $true }
+        Assert-Widget $rejected 'app.title must fit the NotifyIcon 63-character limit.'
 
         $invalidPacks = @(
             '{"code":"en-US","nativeName":"English","culture":"en-US","strings":{"app.title":{"value":"bad"}}}',
