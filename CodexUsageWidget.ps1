@@ -2408,7 +2408,7 @@ if ($SelfTest) {
     Assert-Widget ((Get-WidgetText 'app.title') -ceq '用量小组件') 'the Simplified Chinese pack should expose approved UI text.'
     Assert-Widget ((Get-WidgetText 'countdown.daysHours' @(2, 3)) -ceq '2 天 3 小时后重置') 'localized placeholders should format with the active culture.'
     $englishPack = Read-WidgetLanguagePack 'en-US' $PSScriptRoot
-    foreach ($code in 'en-US', 'zh-CN') {
+    foreach ($code in $languageCodes) {
         $pack = Read-WidgetLanguagePack $code $PSScriptRoot
         Assert-Widget ((@($pack.Strings.Keys | Sort-Object) -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) ($code + ' should contain every canonical language key and no unknown keys.')
         foreach ($key in $requiredLanguageKeys) {
@@ -2638,12 +2638,23 @@ if ($SelfTest) {
         "The usage widget could not start.`r`n`r`nCause: The background reader could not start.`r`nFix: Run the self-test; if it fails, restore the previous version.") 'English startup and worker errors should render through the localized fatal template.'
     Assert-Widget ((Get-WidgetText 'reminder.title' @(20)) -ceq '20% usage remaining' -and
         (Get-WidgetText 'reminder.body' @([datetime]'2026-07-30T20:15:30')) -ceq 'Resets at 7/30/2026 8:15 PM') 'English notification text and dates should use the active culture.'
+    Set-WidgetLanguage -Code 'zh-TW'
+    Assert-Widget ((Get-WidgetText 'detail.title') -ceq '用量詳細資料') 'Traditional Chinese title should be translated.'
+    Set-WidgetLanguage -Code 'ja-JP'
+    Assert-Widget ((Get-WidgetText 'detail.title') -ceq '使用量の詳細') 'Japanese title should be translated.'
+    Assert-Widget ((Format-TokenCount 40860000) -ceq '4086万') 'Japanese token counts should use 万.'
+    Set-WidgetLanguage -Code 'ko-KR'
+    Assert-Widget ((Get-WidgetText 'detail.title') -ceq '사용량 세부 정보') 'Korean title should be translated.'
+    Assert-Widget ((Format-TokenCount 40860000) -ceq '4086만') 'Korean token counts should use 만.'
     Set-WidgetLanguage -Code 'zh-CN'
     $script:DetailPopup = $null
+    $traditionalChinesePack = $script:WidgetLanguagePacks['zh-TW']
+    [void]$script:WidgetLanguagePacks.Remove('zh-TW')
     $languageStateBeforeMissingPack = $script:CurrentLanguageCode + '|' + $script:CurrentLanguageCulture.Name + '|' + $script:WidgetPreferences.Language
     Set-WidgetLanguage -Code 'zh-TW' -Persist
     Assert-Widget (($script:CurrentLanguageCode + '|' + $script:CurrentLanguageCulture.Name + '|' + $script:WidgetPreferences.Language) -ceq
         $languageStateBeforeMissingPack) 'a missing optional language pack should leave language state unchanged.'
+    $script:WidgetLanguagePacks['zh-TW'] = $traditionalChinesePack
     Assert-Widget ($script:ActiveTaskList.Children.Count -eq 2 -and
         $script:TaskDetailsPanel.Visibility -eq 'Collapsed') 'normal mode should show names without task details.'
     Assert-Widget ($script:ActiveTaskList.Children[0].Child.Text -ceq '任务甲') 'a task row should contain only the task name.'
