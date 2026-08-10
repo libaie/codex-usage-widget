@@ -17,7 +17,10 @@ $commonRuntimePaths = @(
     'fixtures\rate-limits.jsonl', 'fixtures\Test-Launcher.ps1', 'fixtures\Test-ReleasePackage.ps1'
 )
 
-function Fail-ReleasePackage([string]$Message) { throw "Release package check failed: $Message" }
+function Fail-ReleasePackage([string]$Message) {
+    [Console]::Error.WriteLine("Release package check failed: $Message")
+    exit 1
+}
 
 $secretJsonKeys = @('password', 'token', 'api_key', 'secret')
 function Find-ForbiddenJsonContent([AllowNull()][object]$Value) {
@@ -51,22 +54,33 @@ function Find-ForbiddenJsonContent([AllowNull()][object]$Value) {
 }
 
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
-if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage "package root is not a directory: $package" }
+if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage 'package root is not a directory' }
 
 $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
     $requiredPaths += @('SECURITY.md', 'CONTRIBUTING.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md')
 }
 
+$trackedPaths = @()
 if ($RuntimeArchive) {
     $scanPaths = @([IO.Directory]::GetFiles($package, '*', [IO.SearchOption]::AllDirectories) | ForEach-Object {
         $_.Substring($package.TrimEnd('\').Length + 1)
     })
 }
 else {
-    $scanPaths = @(& git -C $package -c core.quotepath=false ls-files --cached --others --exclude-standard --)
-    if ($LASTEXITCODE -ne 0) { Fail-ReleasePackage "git could not enumerate repository candidates under $package" }
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $scanPaths = @(& git -C $package -c core.quotepath=false ls-files --cached --others --exclude-standard -- 2>$null)
+        $candidateExitCode = $LASTEXITCODE
+        $trackedPaths = @(& git -C $package -c core.quotepath=false ls-files --cached -- 2>$null)
+        $trackedExitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $savedErrorActionPreference }
+    if ($candidateExitCode -ne 0) { Fail-ReleasePackage 'git could not enumerate repository candidates' }
+    if ($trackedExitCode -ne 0) { Fail-ReleasePackage 'git could not enumerate tracked repository files' }
     $scanPaths = @($scanPaths | ForEach-Object { $_ -replace '/', '\' })
+    $trackedPaths = @($trackedPaths | ForEach-Object { $_ -replace '/', '\' })
 }
 
 $missingPaths = @($requiredPaths | Where-Object {
@@ -103,6 +117,9 @@ foreach ($readmePath in $readmeRequirements.Keys) {
             Fail-ReleasePackage "missing '$requiredText' in file: $readmePath"
         }
     }
+    if ([regex]::Matches($readmeContent, 'reminders\.json', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -lt 2) {
+        Fail-ReleasePackage "missing reminders.json documentation from data-location or privacy details in file: $readmePath"
+    }
 
     $relativeTargets = @([regex]::Matches($readmeContent, '!?\[[^\]]*\]\((?<target>[^)\s]+)\)') | ForEach-Object {
         $_.Groups['target'].Value.Trim([char[]]'<>')
@@ -113,9 +130,29 @@ foreach ($readmePath in $readmeRequirements.Keys) {
     foreach ($target in $relativeTargets) {
         if ($target -match '^(?:[A-Za-z][A-Za-z0-9+.-]*:|//|#)') { continue }
         $targetPath = [Uri]::UnescapeDataString(($target -split '[?#]', 2)[0])
-        if (-not [IO.File]::Exists((Join-Path (Split-Path $readmeFullPath) ($targetPath -replace '/', '\')))) {
+        try {
+            $targetFullPath = [IO.Path]::GetFullPath((Join-Path (Split-Path $readmeFullPath) ($targetPath -replace '/', '\')))
+        }
+        catch { Fail-ReleasePackage "invalid relative README target '$target' in file: $readmePath" }
+        $packagePrefix = $package.TrimEnd('\') + '\'
+        if (-not $targetFullPath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Fail-ReleasePackage "relative README target escapes package: '$target' in file: $readmePath"
+        }
+        $packageTarget = $targetFullPath.Substring($packagePrefix.Length)
+        if (-not [IO.File]::Exists($targetFullPath)) {
             Fail-ReleasePackage "missing relative README target '$target' in file: $readmePath"
         }
+        if (($RuntimeArchive -and $scanPaths -notcontains $packageTarget) -or
+            (-not $RuntimeArchive -and $trackedPaths -notcontains $packageTarget)) {
+            Fail-ReleasePackage "relative README target is not packaged: '$target' in file: $readmePath"
+        }
+    }
+}
+
+if (-not $RuntimeArchive) {
+    $releaseNotesContent = [IO.File]::ReadAllText((Join-Path $package 'docs\releases\v1.0.0.md'))
+    if ([regex]::Matches($releaseNotesContent, 'reminders\.json', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -lt 2) {
+        Fail-ReleasePackage 'missing English or Chinese reminders.json privacy details in file: docs\releases\v1.0.0.md'
     }
 }
 

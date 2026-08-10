@@ -9,7 +9,7 @@ A small draggable Windows ring that keeps locally observed Codex usage visible a
 </div>
 
 > [!IMPORTANT]
-> This is an independent community project, not an official OpenAI or Codex project, and it is not affiliated with or endorsed by OpenAI. The widget reads local Codex session files only, makes no network requests, and stores no account credentials. Displayed values come from local session observations, not official billing or account data.
+> This is an independent community project, not an official OpenAI or Codex project, and it is not affiliated with or endorsed by OpenAI. The widget is designed for local Codex sessions and reads a configured filesystem path; it does not call Web APIs, upload data, or synchronize it, and it stores no account credentials. Displayed values come from local session observations by default; a manually configured path becomes the source instead. They are not official billing or account data.
 
 ## Overview
 
@@ -21,7 +21,7 @@ Codex Usage Widget turns locally recorded Codex activity into a compact desktop 
 2. Double-click `Start-CodexUsageWidget.vbs`.
 3. After local session data is available, wait up to about 15 seconds for the ring to refresh.
 
-The VBS launcher starts the widget without a visible terminal window. `Start-CodexUsageWidget.cmd` remains available as a compatibility wrapper, and only one widget instance runs in the same Windows sign-in session. If startup fails, an error message explains the problem, likely cause, and suggested fix; language-pack failures use a built-in English-and-Chinese fallback.
+The VBS launcher starts the widget without a visible terminal window. `Start-CodexUsageWidget.cmd` remains available as a compatibility wrapper, and only one widget instance runs in the same Windows sign-in session. If the main script starts but initialization fails, an error message explains the problem, likely cause, and suggested fix; language-pack failures use a built-in English-and-Chinese fallback.
 
 If the normal Codex directories cannot be found, the widget asks you to choose the `.codex` directory that contains `sessions`. Cancelling the picker does not cause repeated pop-ups; default locations continue to be checked on later refreshes.
 
@@ -49,7 +49,7 @@ The interface includes Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW
 - Per-task cache-hit and cache-miss tokens, plus a separate cumulative local cache ledger that never falls when the active task changes.
 - Tasks updated within the last 30 minutes appear as lightweight capsules; hovering or focusing one reveals its own details.
 - Tray controls, keyboard access, low-usage notifications, single-instance protection, and a built-in self-test.
-- Local-only reading with no network requests and no credential storage.
+- Designed for local session files, with no Web API calls, uploads, data synchronization, or credential storage.
 
 ## Requirements
 
@@ -110,6 +110,7 @@ The Codex data directory is resolved in this order:
 | Task name index | Resolved `.codex\session_index.jsonl`, read only when present |
 | Widget position, theme, language, and manual data path | `%LOCALAPPDATA%\CodexUsageWidget\preferences.json` |
 | Cumulative cache-token ledger | `%LOCALAPPDATA%\CodexUsageWidget\cache-token-ledger.json` |
+| Reminder deduplication state | `%LOCALAPPDATA%\CodexUsageWidget\reminders.json` |
 
 ## How the numbers are calculated
 
@@ -139,7 +140,7 @@ These are token quantities, not request counts and not official account-level st
 
 ## Privacy
 
-The widget does not scan the whole disk, inspect other Windows users, call a remote service, or read/store account credentials. It only reads local session records needed for the display and writes its own preferences and cumulative cache ledger under the current user's `%LOCALAPPDATA%` directory.
+The widget does not scan the whole disk or read/store account credentials. It reads the filesystem path resolved from the saved selection, `CODEX_HOME`, or the current profile; a manually configured path can be a UNC path. The widget does not call Web APIs, upload data, or synchronize it. It writes its preferences, cumulative cache ledger, and reminder-deduplication state (`reminders.json`) under the current user's `%LOCALAPPDATA%\CodexUsageWidget` directory.
 
 Theme and language changes affect presentation only. They do not change statistics, cache accumulation, token calculations, or quota data. Screenshots included in this project use fictional demo tasks and contain no real session or account data.
 
@@ -179,4 +180,4 @@ Replace the files, run the self-test, and start the widget again. To roll back, 
 
 ## Disclaimer
 
-This project observes local Codex session files and may stop recognizing fields if their format changes. Displayed limits, reset times, task activity, and token statistics are best-effort local observations—not official OpenAI usage, billing, or entitlement data. Always use official account pages for authoritative information.
+This project observes configured Codex session files and may stop recognizing fields if their format changes. Displayed limits, reset times, task activity, and token statistics are best-effort observations of those files—not official OpenAI usage, billing, or entitlement data. Always use official account pages for authoritative information.
