@@ -84,7 +84,7 @@ else {
 }
 
 $missingPaths = @($requiredPaths | Where-Object {
-    $scanPaths -notcontains $_ -or -not [IO.File]::Exists((Join-Path $package $_))
+    $scanPaths -cnotcontains $_ -or -not [IO.File]::Exists((Join-Path $package $_))
 })
 if ($missingPaths.Count -gt 0) { Fail-ReleasePackage ('missing required file(s): ' + ($missingPaths -join ', ')) }
 
@@ -142,8 +142,8 @@ foreach ($readmePath in $readmeRequirements.Keys) {
         if (-not [IO.File]::Exists($targetFullPath)) {
             Fail-ReleasePackage "missing relative README target '$target' in file: $readmePath"
         }
-        if (($RuntimeArchive -and $scanPaths -notcontains $packageTarget) -or
-            (-not $RuntimeArchive -and $trackedPaths -notcontains $packageTarget)) {
+        if (($RuntimeArchive -and $scanPaths -cnotcontains $packageTarget) -or
+            (-not $RuntimeArchive -and $trackedPaths -cnotcontains $packageTarget)) {
             Fail-ReleasePackage "relative README target is not packaged: '$target' in file: $readmePath"
         }
     }
@@ -157,7 +157,7 @@ if (-not $RuntimeArchive) {
 }
 
 if ($RuntimeArchive) {
-    $unexpectedPaths = @($scanPaths | Where-Object { $commonRuntimePaths -notcontains $_ })
+    $unexpectedPaths = @($scanPaths | Where-Object { $commonRuntimePaths -cnotcontains $_ })
     if ($unexpectedPaths.Count -gt 0) { Fail-ReleasePackage ('unexpected runtime file(s): ' + ($unexpectedPaths -join ', ')) }
 }
 
