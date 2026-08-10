@@ -2,18 +2,32 @@
 
 # Codex 用量小组件
 
-一款可拖拽的 Windows 桌面悬浮小组件，用于展示本机观测到的 Codex 用量、令牌、缓存与上下文数据。
+一个可拖拽的 Windows 桌面悬浮圆环，平时显示本机观测到的 Codex 用量，悬停后查看详情。
 
-[English](README.md) · **简体中文**
+[Latest release / 最新版本](https://github.com/libaie/codex-usage-widget/releases/latest) · [MIT license / MIT 许可证](LICENSE) · [English](README.md) · **简体中文**
 
 </div>
 
 > [!IMPORTANT]
-> 这是社区项目，与 OpenAI 无隶属关系，也未获得 OpenAI 官方背书。小组件中的所有数值均来自本机 Codex 会话记录，不是官方账户余额或账单数据。
+> 这是独立社区项目，不是 OpenAI 或 Codex 官方项目，与 OpenAI 无隶属关系，也未获得其背书。小组件只读取本机 Codex 会话文件，不联网，也不保存账号凭据。显示数值来自本机会话观测，不是官方账单或账户数据。
 
 ## 产品简介
 
 Codex 用量小组件把本机记录到的 Codex 活动转换为桌面百分比圆环。鼠标悬浮后可查看当前语言的详情，平时只显示圆环。
+
+## 快速启动
+
+1. 从[最新版本](https://github.com/libaie/codex-usage-widget/releases/latest)下载 `CodexUsageWidget-v1.0.0.zip` 并解压。
+2. 双击 `Start-CodexUsageWidget.vbs`。
+3. 本机会话数据可用后，等待约 15 秒，圆环便会刷新。
+
+VBS 启动器不会显示终端窗口；`Start-CodexUsageWidget.cmd` 作为兼容入口保留。同一 Windows 登录会话只运行一个小组件实例。若启动失败，会弹出错误消息框，依次说明问题、可能原因和处理办法；语言包故障使用内置中英双语提示。
+
+如果常用 Codex 目录均无法找到，小组件会请你选择包含 `sessions` 的 `.codex` 目录。取消选择后不会反复弹窗，后续刷新仍会继续检测默认位置。
+
+## 语言说明
+
+界面提供简体中文（`zh-CN`）、繁体中文（`zh-TW`）、英语（`en-US`）、日语（`ja-JP`）和韩语（`ko-KR`）。首次启动按 Windows 界面语言自动选择。右键圆环并选择“语言”即可立即切换，选择结果会保存到下次启动；系统语言不受支持或可选语言包缺失时回退到英语。
 
 ## 产品截图
 
@@ -43,17 +57,7 @@ Codex 用量小组件把本机记录到的 Codex 活动转换为桌面百分比�
 - 本机已安装并至少运行过一次 Codex 任务，从而生成 `.codex\sessions` 目录。
 - 不需要安装额外运行时或第三方依赖。
 
-## 安装与启动
-
-1. 保持 `CodexUsageWidget` 目录中的文件结构不变。
-2. 双击 `Start-CodexUsageWidget.vbs`。
-3. 本机会话数据可用后，圆环会在约 15 秒内自动刷新。
-
-VBS 启动器不会显示终端窗口；`Start-CodexUsageWidget.cmd` 作为兼容入口保留。同一 Windows 登录会话只运行一个小组件实例。若启动失败，会弹出错误消息框，依次说明问题、可能原因和处理办法；语言包故障使用内置中英双语提示。
-
-如果常用 Codex 目录均无法找到，小组件会请你选择包含 `sessions` 的 `.codex` 目录。取消选择后不会反复弹窗，后续刷新仍会继续检测默认位置。
-
-### 目录内容
+## 目录内容
 
 ```text
 CodexUsageWidget/
@@ -88,8 +92,6 @@ CodexUsageWidget/
 | Esc | 关闭详情卡。 |
 | Shift+F10 | 通过键盘打开同一右键菜单。 |
 | 托盘菜单 | 显示或退出小组件。 |
-
-首次启动时，小组件按 Windows 界面语言选择显示语言。系统语言不受支持或可选语言包缺失时，会回退到英语。右键圆环并选择“语言”即可立即切换；选择结果会保存，供下次启动使用。
 
 位置和主题也会自动保存，并在下次启动时恢复。详情卡强调色与圆环主题同步；剩余用量到达 20% 和 10% 时，两处会分别切换为警告色和紧急色。
 

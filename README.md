@@ -2,18 +2,32 @@
 
 # Codex Usage Widget
 
-A polished, draggable Windows desktop widget for locally observed Codex usage, token, cache, and context data.
+A small draggable Windows ring that keeps locally observed Codex usage visible and reveals the details on hover.
 
-**English** · [简体中文](README.zh-CN.md)
+[Latest release](https://github.com/libaie/codex-usage-widget/releases/latest) · [MIT license](LICENSE) · **English** · [简体中文](README.zh-CN.md)
 
 </div>
 
 > [!IMPORTANT]
-> This is a community project and is not affiliated with or endorsed by OpenAI. Every value shown by the widget is derived from local Codex session records; it is not an official account balance or billing record.
+> This is an independent community project, not an official OpenAI or Codex project, and it is not affiliated with or endorsed by OpenAI. The widget reads local Codex session files only, makes no network requests, and stores no account credentials. Displayed values come from local session observations, not official billing or account data.
 
 ## Overview
 
 Codex Usage Widget turns locally recorded Codex activity into a compact desktop percentage ring. Hovering the ring opens a localized detail card, while the normal desktop state stays minimal and unobtrusive.
+
+## Quick start
+
+1. Download `CodexUsageWidget-v1.0.0.zip` from the [latest release](https://github.com/libaie/codex-usage-widget/releases/latest) and extract it.
+2. Double-click `Start-CodexUsageWidget.vbs`.
+3. After local session data is available, wait up to about 15 seconds for the ring to refresh.
+
+The VBS launcher starts the widget without a visible terminal window. `Start-CodexUsageWidget.cmd` remains available as a compatibility wrapper, and only one widget instance runs in the same Windows sign-in session. If startup fails, an error message explains the problem, likely cause, and suggested fix; language-pack failures use a built-in English-and-Chinese fallback.
+
+If the normal Codex directories cannot be found, the widget asks you to choose the `.codex` directory that contains `sessions`. Cancelling the picker does not cause repeated pop-ups; default locations continue to be checked on later refreshes.
+
+## Languages
+
+The interface includes Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW`), English (`en-US`), Japanese (`ja-JP`), and Korean (`ko-KR`). On first launch, the widget follows the Windows UI language. Right-click the ring and choose **Language** to switch immediately; the choice is saved for later launches. Unsupported system languages and missing optional language packs fall back to English.
 
 ## Screenshots
 
@@ -43,17 +57,7 @@ Codex Usage Widget turns locally recorded Codex activity into a compact desktop 
 - A local Codex installation that has completed at least one task, so a `.codex\sessions` directory exists.
 - No additional runtime or third-party package is required.
 
-## Installation
-
-1. Keep the files in the `CodexUsageWidget` directory together.
-2. Double-click `Start-CodexUsageWidget.vbs`.
-3. After local session data is available, the ring refreshes automatically within about 15 seconds.
-
-The VBS launcher starts the widget without a visible terminal window. `Start-CodexUsageWidget.cmd` remains available as a compatibility wrapper, and only one widget instance runs in the same Windows sign-in session. If startup fails, an error message explains the problem, likely cause, and suggested fix; language-pack failures use a built-in English-and-Chinese fallback.
-
-If the normal Codex directories cannot be found, the widget asks you to choose the `.codex` directory that contains `sessions`. Cancelling the picker does not cause repeated pop-ups; default locations continue to be checked on later refreshes.
-
-### Package contents
+## Package contents
 
 ```text
 CodexUsageWidget/
@@ -88,8 +92,6 @@ CodexUsageWidget/
 | Esc | Close the detail card. |
 | Shift+F10 | Open the same context menu from the keyboard. |
 | Tray menu | Show or exit the widget. |
-
-On first launch, the widget follows the Windows UI language. An unsupported Windows language or a missing optional language pack falls back to English. Right-click the ring and choose **Language** to switch immediately; the choice is saved for the next launch.
 
 The selected position and theme are also restored on the next launch. The detail accent color follows the ring theme; at 20% and 10% remaining, both views switch to warning and critical colors.
 

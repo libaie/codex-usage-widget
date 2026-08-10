@@ -54,7 +54,9 @@ $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage "package root is not a directory: $package" }
 
 $requiredPaths = @($commonRuntimePaths)
-if (-not $RuntimeArchive) { $requiredPaths += @('SECURITY.md', 'CONTRIBUTING.md') }
+if (-not $RuntimeArchive) {
+    $requiredPaths += @('SECURITY.md', 'CONTRIBUTING.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md')
+}
 
 if ($RuntimeArchive) {
     $scanPaths = @([IO.Directory]::GetFiles($package, '*', [IO.SearchOption]::AllDirectories) | ForEach-Object {
@@ -71,6 +73,51 @@ $missingPaths = @($requiredPaths | Where-Object {
     $scanPaths -notcontains $_ -or -not [IO.File]::Exists((Join-Path $package $_))
 })
 if ($missingPaths.Count -gt 0) { Fail-ReleasePackage ('missing required file(s): ' + ($missingPaths -join ', ')) }
+
+$commonReadmeRequirements = @(
+    'Start-CodexUsageWidget.vbs', 'zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR', 'LICENSE',
+    'assets/screenshots/widget-ring.png', 'assets/screenshots/widget-details.png'
+)
+$zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x793E, 0x533A, 0x9879, 0x76EE) -join '')
+$zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +
+    ([char[]](0x5B98, 0x65B9, 0x9879, 0x76EE) -join '')
+$zhLocalSessionObservations = ([char[]](0x672C, 0x673A, 0x4F1A, 0x8BDD, 0x89C2, 0x6D4B) -join '')
+$zhNotOfficialBillingOrAccountData = ([char[]](
+    0x4E0D, 0x662F, 0x5B98, 0x65B9, 0x8D26, 0x5355, 0x6216, 0x8D26, 0x6237, 0x6570, 0x636E
+) -join '')
+$readmeRequirements = @{
+    'README.md' = @(
+        'README.zh-CN.md', 'independent community project', 'not an official OpenAI or Codex project',
+        'local session observations', 'not official billing or account data'
+    )
+    'README.zh-CN.md' = @(
+        'README.md', $zhIndependentProject, $zhUnofficialProject,
+        $zhLocalSessionObservations, $zhNotOfficialBillingOrAccountData
+    )
+}
+foreach ($readmePath in $readmeRequirements.Keys) {
+    $readmeFullPath = Join-Path $package $readmePath
+    $readmeContent = [IO.File]::ReadAllText($readmeFullPath)
+    foreach ($requiredText in @($commonReadmeRequirements + $readmeRequirements[$readmePath])) {
+        if ($readmeContent.IndexOf($requiredText, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Fail-ReleasePackage "missing '$requiredText' in file: $readmePath"
+        }
+    }
+
+    $relativeTargets = @([regex]::Matches($readmeContent, '!?\[[^\]]*\]\((?<target>[^)\s]+)\)') | ForEach-Object {
+        $_.Groups['target'].Value.Trim([char[]]'<>')
+    })
+    $relativeTargets += @([regex]::Matches($readmeContent, '<img\b[^>]*\bsrc\s*=\s*"(?<target>[^"]+)"', [Text.RegularExpressions.RegexOptions]::IgnoreCase) | ForEach-Object {
+        $_.Groups['target'].Value
+    })
+    foreach ($target in $relativeTargets) {
+        if ($target -match '^(?:[A-Za-z][A-Za-z0-9+.-]*:|//|#)') { continue }
+        $targetPath = [Uri]::UnescapeDataString(($target -split '[?#]', 2)[0])
+        if (-not [IO.File]::Exists((Join-Path (Split-Path $readmeFullPath) ($targetPath -replace '/', '\')))) {
+            Fail-ReleasePackage "missing relative README target '$target' in file: $readmePath"
+        }
+    }
+}
 
 if ($RuntimeArchive) {
     $unexpectedPaths = @($scanPaths | Where-Object { $commonRuntimePaths -notcontains $_ })
