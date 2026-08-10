@@ -49,7 +49,7 @@ Codex Usage Widget turns locally recorded Codex activity into a compact desktop 
 2. Double-click `Start-CodexUsageWidget.vbs`.
 3. After local session data is available, the ring refreshes automatically within about 15 seconds.
 
-The VBS launcher starts the widget without a visible terminal window. `Start-CodexUsageWidget.cmd` remains available as a compatibility wrapper, and only one widget instance runs in the same Windows sign-in session. If startup fails, a Chinese message explains the problem, likely cause, and suggested fix.
+The VBS launcher starts the widget without a visible terminal window. `Start-CodexUsageWidget.cmd` remains available as a compatibility wrapper, and only one widget instance runs in the same Windows sign-in session. If startup fails, an error message explains the problem, likely cause, and suggested fix; language-pack failures use a built-in English-and-Chinese fallback.
 
 If the normal Codex directories cannot be found, the widget asks you to choose the `.codex` directory that contains `sessions`. Cancelling the picker does not cause repeated pop-ups; default locations continue to be checked on later refreshes.
 
