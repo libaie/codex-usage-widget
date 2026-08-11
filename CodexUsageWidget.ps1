@@ -1,5 +1,6 @@
 ﻿param(
     [switch]$SelfTest,
+    [switch]$Demo,
     [switch]$ScanWorker,
     [string]$ScanDataDirectory,
     [string]$ScanOutputPath,
@@ -17,6 +18,7 @@ $script:CurrentLanguageCulture = [cultureinfo]'en-US'
 $script:PreferenceStoreStatus = 'missing'
 $script:CodexUsageClassification = 'empty'
 $script:CodexUsageMetrics = $null
+$script:IsDemoMode = [bool]$Demo
 
 function Stop-InstanceMutex {
     if ($null -eq $script:InstanceMutex) { return }
@@ -800,6 +802,30 @@ function Get-CodexUsageSnapshot {
     }
 }
 
+function Get-DemoUsageSnapshot {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $fixture = [IO.FileInfo]::new((Join-Path $Root 'fixtures\contract\v1\inputs\demo.jsonl'))
+    if (-not $fixture.Exists -or $fixture.Length -lt 1 -or $fixture.Length -gt 262144 -or
+        ($fixture.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Invalid demo fixture.' }
+    $readFailed = $false
+    $metrics = $null
+    $events = @(Read-SessionEvents -Path $fixture.FullName -ReadFailed ([ref]$readFailed) -Metrics ([ref]$metrics))
+    $state = Get-NewestUsageState -Events $events -LimitId 'codex'
+    if ($readFailed -or $null -eq $state -or $events.Count -ne 1 -or
+        $metrics.MalformedLineCount -ne 0 -or $metrics.UnknownEventCount -ne 0 -or
+        $metrics.InvalidValueCount -ne 0) { throw 'Invalid demo fixture.' }
+    $state | Add-Member -NotePropertyName SessionTokenSnapshots -NotePropertyValue @()
+    $state | Add-Member -NotePropertyName ActiveTasks -NotePropertyValue @()
+    $state | Add-Member -NotePropertyName TaskNamesAvailable -NotePropertyValue $false
+    return [pscustomobject]@{
+        State = $state
+        Diagnostic = $null
+        Classification = 'complete'
+        Metrics = $metrics
+    }
+}
+
 function Resolve-UsageRefreshResult {
     param(
         [AllowNull()]$Snapshot,
@@ -1551,6 +1577,7 @@ function Save-WidgetPreferences {
         [AllowNull()][string]$Language = $null
     )
 
+    if ($script:IsDemoMode) { return $true }
     if ($script:PreferenceStoreStatus -ceq 'invalid') { return $false }
     if ($Left -is [bool] -or $Left -isnot [System.ValueType] -or
         $Top -is [bool] -or $Top -isnot [System.ValueType] -or
@@ -1917,7 +1944,7 @@ function Get-WidgetVisibleStrings {
 
 function Apply-WidgetLanguage {
     foreach ($binding in @(
-        @('DetailTitleText', 'detail.title'), @('RemainingLabelText', 'detail.remaining'),
+        @('DetailTitleText', 'detail.title'), @('DemoBadgeText', 'demo.badge'), @('RemainingLabelText', 'detail.remaining'),
         @('ObservedLabelText', 'detail.observed'), @('StatusLabelText', 'detail.status'),
         @('ActivityTitleText', 'activity.title'), @('ActivityWindowText', 'activity.window30m'),
         @('TaskNoDataText', 'task.noTokenData'), @('CumulativeLabelText', 'token.total'),
@@ -1936,6 +1963,9 @@ function Apply-WidgetLanguage {
     if ($null -ne $script:CircleHost) {
         [System.Windows.Automation.AutomationProperties]::SetName($script:CircleHost, (Get-WidgetText 'accessibility.ringName'))
         [System.Windows.Automation.AutomationProperties]::SetHelpText($script:CircleHost, (Get-WidgetText 'accessibility.ringHelp'))
+    }
+    if ($null -ne $script:DemoBadge) {
+        $script:DemoBadge.Visibility = if ($script:IsDemoMode) { 'Visible' } else { 'Collapsed' }
     }
     if ($null -ne $script:NotifyIcon) { $script:NotifyIcon.Text = Get-WidgetText 'app.title' }
     if ($null -ne $script:TrayShowItem) { $script:TrayShowItem.Text = Get-WidgetText 'menu.showWidget' }
@@ -2134,6 +2164,10 @@ function Set-WidgetAppearance {
     $script:OutputAccentFill.Background = $endBrush
     $script:DetailAccentGlow.Background = $gradientBrush
     $script:DetailStatusText.Foreground = $gradientBrush
+    if ($null -ne $script:DemoBadge) {
+        $script:DemoBadge.Background = $softBrush
+        $script:DemoBadgeText.Foreground = $gradientBrush
+    }
     Set-ActiveTaskRowAppearance -Row $script:ActiveTaskRow -Selected ($null -ne $script:ActiveTaskRow) -HighContrast $HighContrast
 }
 
@@ -2337,10 +2371,12 @@ function Set-WidgetState {
             $script:LastShimmerObservationKey = $observationKey
             Start-ShimmerAnimation
         }
-        $triggered20 = Register-UsageReminderThreshold -State $currentLimit -Threshold 20
-        if ($triggered20) { Show-UsageReminder -State $currentLimit }
-        $triggered10 = Register-UsageReminderThreshold -State $currentLimit -Threshold 10
-        if ($triggered10) { Show-UsageReminder -State $currentLimit }
+        if (-not $script:IsDemoMode) {
+            $triggered20 = Register-UsageReminderThreshold -State $currentLimit -Threshold 20
+            if ($triggered20) { Show-UsageReminder -State $currentLimit }
+            $triggered10 = Register-UsageReminderThreshold -State $currentLimit -Threshold 10
+            if ($triggered10) { Show-UsageReminder -State $currentLimit }
+        }
     }
     [System.Windows.Automation.AutomationProperties]::SetName(
         $script:CircleHost, $automationName)
@@ -2532,6 +2568,20 @@ function Get-WidgetXaml {
                                     Margin="14,0,0,0"
                                     Orientation="Horizontal"
                                     VerticalAlignment="Center">
+                                    <Border
+                                        x:Name="DemoBadge"
+                                        Margin="0,0,8,0"
+                                        Padding="7,3"
+                                        CornerRadius="8"
+                                        Background="#207BFFE0"
+                                        Visibility="Collapsed">
+                                        <TextBlock
+                                            x:Name="DemoBadgeText"
+                                            Text=""
+                                            FontSize="10"
+                                            FontWeight="SemiBold"
+                                            Foreground="#FF7BFFE0"/>
+                                    </Border>
                                     <Ellipse
                                         x:Name="DetailAccentDot"
                                         Width="6"
@@ -2826,6 +2876,17 @@ if ($SelfTest) {
     Assert-Widget ((Resolve-WidgetLanguageCode 'bad-code' ([cultureinfo]'en-US')) -ceq 'en-US') 'an invalid saved language should be ignored.'
     Assert-Widget ((Resolve-WidgetLanguageCode 'JA-jp' ([cultureinfo]'en-US')) -ceq 'en-US') 'saved language codes should be case-sensitive.'
 
+    $demoSnapshot = Get-DemoUsageSnapshot -Root $PSScriptRoot
+    $demoLimit = Get-CurrentLimitState -State $demoSnapshot.State -Now (Get-Date)
+    Assert-Widget ($demoSnapshot.Classification -ceq 'complete' -and $null -eq $demoSnapshot.Diagnostic -and
+        $null -ne $demoLimit -and [double]$demoLimit.RemainingPercent -eq 55) 'demo mode should parse the shared reviewed fixture through the production parser.'
+    Assert-Widget ($demoSnapshot.State.TokenDetails.CacheHitTokens -eq 800 -and
+        $demoSnapshot.State.TokenDetails.CacheMissTokens -eq 200 -and
+        @($demoSnapshot.State.ActiveTasks).Count -eq 0) 'demo mode should expose deterministic anonymous token data without real tasks.'
+    $demoDefinition = (Get-Command Get-DemoUsageSnapshot -CommandType Function -ErrorAction Stop).Definition
+    Assert-Widget (-not $demoDefinition.Contains('CODEX_HOME') -and -not $demoDefinition.Contains('USERPROFILE') -and
+        -not $demoDefinition.Contains('Get-CodexUsageState') -and -not $demoDefinition.Contains('Update-CumulativeCacheTokens')) 'demo mode should not read real Codex data or update the cumulative ledger.'
+
     $requiredLanguageKeys = @(Get-WidgetRequiredLanguageKeys)
     Assert-Widget ($requiredLanguageKeys.Count -eq 117 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 117) 'the required language-key catalog should contain exactly 117 unique keys.'
     $temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
@@ -2935,6 +2996,8 @@ if ($SelfTest) {
         $widgetXaml -match 'AutomationProperties.HelpText=""' -and $widgetXaml -notmatch '[\p{IsCJKUnifiedIdeographs}]') 'XAML should keep the exact multilingual font fallback and contain no localized text.'
     Assert-Widget ($widgetXaml -match 'x:Name="CircleHost"\s+Width="82"\s+Height="82"') 'the circle host should be 82 by 82.'
     Assert-Widget ($widgetXaml -match 'x:Name="DetailPopup"') 'the detail popup should exist.'
+    Assert-Widget ($widgetXaml -match 'x:Name="DemoBadge"(?s:.*?)Visibility="Collapsed"' -and
+        $widgetXaml -match 'x:Name="DemoBadgeText"') 'the localized demo badge should exist and remain hidden during normal use.'
     Assert-Widget ($widgetXaml -match 'x:Name="TokenDetailsPanel"') 'the token section should have one collapsible container.'
     Assert-Widget ($widgetXaml -match 'x:Name="ActiveTaskList"' -and
         $widgetXaml -match 'x:Name="TaskDetailsPanel"' -and
@@ -2967,7 +3030,7 @@ if ($SelfTest) {
     Assert-Widget ($activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bx:Name="ActivityTitleText")(?=[^>]*\bFontSize="15")[^>]*>' -and
         $activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bx:Name="ActivityWindowText")(?=[^>]*\bGrid.Column="1")(?=[^>]*\bFontSize="11")(?=[^>]*\bHorizontalAlignment="Right")[^>]*>') 'the ordinary activity title line should retain its right-aligned 11-pixel time range.'
     $staticFontContracts = @(
-        @('ActivityTitleText', 15), @('ActivityWindowText', 11), @('RemainingLabelText', 12),
+        @('ActivityTitleText', 15), @('ActivityWindowText', 11), @('DemoBadgeText', 10), @('RemainingLabelText', 12),
         @('ObservedLabelText', 11), @('StatusLabelText', 11), @('CumulativeLabelText', 12), @('ContextLabelText', 12),
         @('ContextPercentLabelText', 11), @('CompositionLabelText', 11), @('TaskCacheHitLabelText', 11),
         @('TaskCacheMissLabelText', 11), @('ReasoningLabelText', 11),
@@ -3014,7 +3077,7 @@ if ($SelfTest) {
     foreach ($controlName in 'DetailCard', 'RingValue', 'GlowRing', 'RemainingText', 'CircleHost', 'LimitWindowText',
         'ObservedText', 'ObservedDiagnosticText', 'DetailStatusText', 'UsageStatusText', 'RemainingDetailText',
         'RemainingDetailUnitText',
-        'DetailTitleText', 'RemainingLabelText', 'ObservedLabelText', 'StatusLabelText',
+        'DetailTitleText', 'DemoBadge', 'DemoBadgeText', 'RemainingLabelText', 'ObservedLabelText', 'StatusLabelText',
         'ActivityTitleText', 'ActivityWindowText',
         'TokenDetailsPanel', 'ActiveTaskEmptyText', 'ActiveTaskList', 'TaskDetailsPanel', 'TaskTitleText',
         'TaskNoDataText', 'CumulativeRow', 'ContextRow', 'ContextPercentRow', 'CompositionRow',
@@ -3031,7 +3094,7 @@ if ($SelfTest) {
         Assert-Widget ($null -ne (Get-Variable -Name $controlName -Scope Script -ValueOnly)) ('renderer control should bind: ' + $controlName)
     }
     $namedFontContracts = @(
-        @('DetailTitleText', 18), @('RemainingLabelText', 12), @('ObservedLabelText', 11), @('StatusLabelText', 11),
+        @('DetailTitleText', 18), @('DemoBadgeText', 10), @('RemainingLabelText', 12), @('ObservedLabelText', 11), @('StatusLabelText', 11),
         @('ActivityTitleText', 15), @('ActivityWindowText', 11),
         @('DetailStatusText', 11), @('LimitWindowText', 15), @('CountdownText', 12),
         @('ObservedText', 12), @('UsageStatusText', 12), @('ObservedDiagnosticText', 11),
@@ -3070,16 +3133,22 @@ if ($SelfTest) {
     $script:DetailAccentBrush = $null
     $script:DetailAccentSoftBrush = $null
     $script:TaskDetailHideTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:RendererReminderCalls = 0
     $rendererReminderDefinition = (Get-Command Register-UsageReminderThreshold -CommandType Function -ErrorAction Stop).Definition
     function Set-RingPercent { param([double]$Percent) $script:RendererRingPercent = $Percent }
     function Start-ShimmerAnimation { }
-    function Register-UsageReminderThreshold { param($State, $Threshold) return $false }
+    function Register-UsageReminderThreshold { param($State, $Threshold) $script:RendererReminderCalls++; return $false }
     function Show-UsageReminder { param($State) }
     function Show-DetailPopup { }
+    $script:IsDemoMode = $true
     Apply-WidgetLanguage
     Assert-Widget ($script:DetailTitleText.Text -ceq '用量详情' -and
+        $script:DemoBadgeText.Text -ceq '演示数据' -and $script:DemoBadge.Visibility -eq 'Visible' -and
         $script:RemainingLabelText.Text -ceq '剩余用量' -and
         $script:TaskNoDataText.Text -ceq '该任务暂无令牌数据') 'the shared language application should populate named static labels.'
+    $script:IsDemoMode = $false
+    Apply-WidgetLanguage
+    Assert-Widget ($script:DemoBadge.Visibility -eq 'Collapsed') 'normal mode should hide the demo badge.'
     Assert-Widget ($script:NotifyIcon.Text -ceq '用量小组件' -and $script:TrayShowItem.Text -ceq '显示小组件' -and
         $script:TrayExitItem.Text -ceq '退出小组件' -and $script:LanguageMenuItem.Header -ceq '语言' -and
         $script:ThemeMenuItems[0].Header -ceq '冰川青' -and $script:LanguageMenuItems[2].Header -ceq '英语') 'the shared language application should populate tray and context menus.'
@@ -3115,7 +3184,12 @@ if ($SelfTest) {
         )
         TaskNamesAvailable = $true
     }
+    $script:IsDemoMode = $true
     Set-WidgetState $rendererState
+    Assert-Widget ($script:RendererReminderCalls -eq 0) 'demo rendering should not register or send reminders.'
+    $script:IsDemoMode = $false
+    Set-WidgetState $rendererState
+    Assert-Widget ($script:RendererReminderCalls -eq 2) 'normal rendering should retain both reminder thresholds.'
     Assert-Widget ($script:RemainingText.Text -eq '39%' -and $script:RemainingDetailText.Text -eq '39' -and
         $script:RemainingDetailUnitText.Text -eq '%' -and $script:RemainingDetailUnitText.Visibility -eq 'Visible' -and
         $script:LimitWindowText.Text -eq '5 小时' -and $script:CountdownText.Text -match '后重置$') 'the real renderer should match the selected quiet limit format.'
@@ -3261,11 +3335,12 @@ if ($SelfTest) {
         $script:RemainingDetailUnitText.Foreground,
         $script:DetailAccentGlow.Background, $script:DetailAccentDot.Fill,
         $script:TaskDetailAccentLine.Background, $script:ContextAccentFill.Background,
-        $script:DetailStatusText.Foreground, $selectedRow.Child.Foreground) {
+        $script:DetailStatusText.Foreground, $script:DemoBadgeText.Foreground, $selectedRow.Child.Foreground) {
         Assert-Widget ([object]::ReferenceEquals($actualBrush, $themeBrush)) 'theme appearance should share one accent brush across real controls.'
     }
     Assert-Widget ($script:InputAccentFill.Background.Color.ToString() -eq '#FF7CFFB2' -and
         $script:OutputAccentFill.Background.Color.ToString() -eq '#FF38D989' -and
+        [object]::ReferenceEquals($script:DemoBadge.Background, $script:DetailAccentSoftBrush) -and
         [object]::ReferenceEquals($selectedRow.Background, $script:DetailAccentSoftBrush) -and
         [object]::ReferenceEquals($selectedRow.BorderBrush, $themeBrush) -and
         -not [object]::ReferenceEquals($script:TaskTitleText.Foreground, $themeBrush)) 'theme appearance should color bars and the selected task capsule without tinting the detail title.'
@@ -3310,11 +3385,12 @@ if ($SelfTest) {
         $script:DetailAccentGlow.Background,
         $script:DetailAccentDot.Fill, $script:TaskDetailAccentLine.Background,
         $script:ContextAccentFill.Background, $script:DetailStatusText.Foreground,
-        $selectedRow.Child.Foreground) {
+        $script:DemoBadgeText.Foreground, $selectedRow.Child.Foreground) {
         Assert-Widget ([object]::ReferenceEquals($actualBrush, $highlightBrush)) 'high contrast should share the system highlight brush across real controls.'
     }
     Assert-Widget ([object]::ReferenceEquals($script:InputAccentFill.Background, $highlightBrush) -and
         [object]::ReferenceEquals($script:OutputAccentFill.Background, $grayTextBrush) -and
+        [object]::ReferenceEquals($script:DemoBadge.Background, [System.Windows.Media.Brushes]::Transparent) -and
         [object]::ReferenceEquals($selectedRow.Background, [System.Windows.Media.Brushes]::Transparent) -and
         [object]::ReferenceEquals($selectedRow.BorderBrush, $highlightBrush)) 'high contrast should use system composition colors and a transparent selected row.'
 
@@ -3481,6 +3557,11 @@ if ($SelfTest) {
     $runtimeStart = $sourceText.LastIndexOf($runtimeMarker, [StringComparison]::Ordinal)
     $runtimeSource = if ($runtimeStart -ge 0) { $sourceText.Substring($runtimeStart) } else { '' }
     Assert-Widget ($runtimeSource.Length -gt 0) 'runtime source should follow the self-test return guard.'
+    Assert-Widget ($sourceText -match '(?m)^\s*\[switch\]\$Demo[,\r\n]') 'the public PowerShell entry point should expose -Demo.'
+    Assert-Widget ($runtimeSource.Contains("'Local\CodexUsageWidget.Demo.SingleInstance'") -and
+        $runtimeSource.Contains('if ($Demo -and $ScanWorker) { exit 2 }')) 'demo mode should use an independent instance identity and reject worker combinations.'
+    Assert-Widget ($runtimeSource.Contains('if (-not $script:IsDemoMode) {') -and
+        $runtimeSource.Contains('if ($Demo) {')) 'demo runtime should isolate persistence, reminders, and refresh workers.'
     Assert-Widget ($runtimeSource.Contains('-UiCulture ([cultureinfo]::CurrentUICulture)')) 'startup localization should evaluate the current UI culture before argument binding.'
     Assert-Widget ($runtimeSource.Contains('if ($null -eq $script:WidgetPreferences.Language) { $script:WidgetPreferences.Language = $script:CurrentLanguageCode }')) 'startup should default only a null language preference to the active fallback language.'
     $pickerFunctionName = 'Show-CodexDataDirectoryPicker'
@@ -3501,6 +3582,8 @@ if ($SelfTest) {
     foreach ($runtimeBinding in @(
         '$script:RemainingDetailUnitText = $script:WidgetWindow.FindName(''RemainingDetailUnitText'')',
         '$script:DetailTitleText = $script:WidgetWindow.FindName(''DetailTitleText'')',
+        '$script:DemoBadge = $script:WidgetWindow.FindName(''DemoBadge'')',
+        '$script:DemoBadgeText = $script:WidgetWindow.FindName(''DemoBadgeText'')',
         '$script:RemainingLabelText = $script:WidgetWindow.FindName(''RemainingLabelText'')',
         '$script:ObservedLabelText = $script:WidgetWindow.FindName(''ObservedLabelText'')',
         '$script:StatusLabelText = $script:WidgetWindow.FindName(''StatusLabelText'')',
@@ -3527,10 +3610,12 @@ if ($SelfTest) {
     Assert-Widget (-not $positionSource.Contains('Add_Completed')) 'position animation should not depend on an asynchronous completion callback.'
     foreach ($contract in ('Get-Detail' + 'PopupPosition'), ('Set-Widget' + 'Appearance'), ('Start-Shimmer' + 'Animation'),
         ('SetProcessDpiAwareness' + 'Context'), ('Focus' + 'Ring'), 'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura',
-        ('FromMilliseconds' + '(250)'), ('FromMilliseconds' + '(150)'),
+        ('FromMilliseconds' + '(180)'), ('FromMilliseconds' + '(250)'),
         ('[System.Windows.Input.Key]' + '::System'), ('[System.Windows.Input.Keyboard]' + '::Modifiers')) {
         Assert-Widget ($sourceText.Contains($contract)) ('interaction contract should contain: ' + $contract)
     }
+    Assert-Widget ($runtimeSource.Contains('$script:HoverShowTimer.Interval = [TimeSpan]::FromMilliseconds(180)')) 'hover details should open after 180 ms.'
+    Assert-Widget ($runtimeSource.Contains('$script:HoverHideTimer.Interval = [TimeSpan]::FromMilliseconds(250)')) 'detail hover leave should keep a 250 ms pointer bridge.'
     $cancelHideName = 'Cancel-DetailPopup' + 'Hide'
     Assert-Widget ($sourceText.Contains(('function ' + $cancelHideName))) 'popup hover entry should share one fade-cancellation function.'
     $circleEnterSource = [regex]::Match($sourceText, '(?s)\$script:CircleHost\.Add_MouseEnter\(\{(.*?)\}\)').Groups[1].Value
@@ -4154,6 +4239,12 @@ if ($SelfTest) {
         $preferencesPath = Join-Path $testLocalAppData 'CodexUsageWidget\preferences.json'
         $storedPreferences = [System.IO.File]::ReadAllText($preferencesPath) | ConvertFrom-Json
         Assert-Widget ((@($storedPreferences.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'CodexDataDirectory,Language,Left,Monitor,Theme,Top') 'preferences should persist only the six whitelisted properties.'
+        $preferencesBeforeDemo = [System.IO.File]::ReadAllBytes($preferencesPath)
+        $script:IsDemoMode = $true
+        Assert-Widget (Save-WidgetPreferences -Left 1 -Top 2 -Monitor 'demo' -Theme 0 -Language 'en-US') 'demo preference changes should remain in memory.'
+        $script:IsDemoMode = $false
+        Assert-Widget ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($preferencesPath)) -ceq
+            [Convert]::ToBase64String($preferencesBeforeDemo)) 'demo mode should not change the preference file.'
 
         $fallbackLocaleRoot = Join-Path $testLocalAppData 'fallback-locale-root'
         $fallbackLocales = Join-Path $fallbackLocaleRoot 'locales'
@@ -4248,6 +4339,7 @@ if ($SelfTest) {
 }
 
 if ($SelfTest) { return }
+if ($Demo -and $ScanWorker) { exit 2 }
 
 if ($ScanWorker) {
     $ErrorActionPreference = 'Stop'
@@ -4276,7 +4368,18 @@ if ($ScanWorker) {
     catch { exit 2 }
 }
 
-$script:WidgetPreferences = Get-WidgetPreferences
+$script:WidgetPreferences = if ($Demo) {
+    [pscustomobject]@{
+        Left = $null
+        Top = $null
+        Monitor = $null
+        Theme = 7
+        CodexDataDirectory = $null
+        Language = $null
+        StoreStatus = 'missing'
+    }
+}
+else { Get-WidgetPreferences }
 try {
     Initialize-WidgetLocalization -Root $PSScriptRoot `
         -SavedLanguage $script:WidgetPreferences.Language `
@@ -4331,8 +4434,9 @@ catch {
 }
 
 $createdNew = $false
+$instanceName = if ($Demo) { 'Local\CodexUsageWidget.Demo.SingleInstance' } else { 'Local\CodexUsageWidget.SingleInstance' }
 try {
-    $script:InstanceMutex = [System.Threading.Mutex]::new($true, 'Local\CodexUsageWidget.SingleInstance', [ref]$createdNew)
+    $script:InstanceMutex = [System.Threading.Mutex]::new($true, $instanceName, [ref]$createdNew)
     $script:OwnsInstanceMutex = $createdNew
 }
 catch {
@@ -4388,6 +4492,8 @@ $script:ObservedDiagnosticText = $script:WidgetWindow.FindName('ObservedDiagnost
 $script:DetailStatusText = $script:WidgetWindow.FindName('DetailStatusText')
 $script:UsageStatusText = $script:WidgetWindow.FindName('UsageStatusText')
 $script:DetailTitleText = $script:WidgetWindow.FindName('DetailTitleText')
+$script:DemoBadge = $script:WidgetWindow.FindName('DemoBadge')
+$script:DemoBadgeText = $script:WidgetWindow.FindName('DemoBadgeText')
 $script:RemainingLabelText = $script:WidgetWindow.FindName('RemainingLabelText')
 $script:ObservedLabelText = $script:WidgetWindow.FindName('ObservedLabelText')
 $script:StatusLabelText = $script:WidgetWindow.FindName('StatusLabelText')
@@ -4984,13 +5090,13 @@ function Stop-WidgetResources {
 }
 
 $script:HoverShowTimer = [System.Windows.Threading.DispatcherTimer]::new()
-$script:HoverShowTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:HoverShowTimer.Interval = [TimeSpan]::FromMilliseconds(180)
 $script:HoverShowTimer.Add_Tick({
     $script:HoverShowTimer.Stop()
     if ($script:CircleHost.IsMouseOver -or $script:DetailCard.IsMouseOver) { Show-DetailPopup -FromHover }
 })
 $script:HoverHideTimer = [System.Windows.Threading.DispatcherTimer]::new()
-$script:HoverHideTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$script:HoverHideTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $script:HoverHideTimer.Add_Tick({
     $script:HoverHideTimer.Stop()
     if (-not $script:CircleHost.IsMouseOver -and -not $script:DetailCard.IsMouseOver) { Hide-DetailPopup }
@@ -5120,35 +5226,53 @@ $script:WidgetWindow.Add_Closed({
     Stop-WidgetResources
 })
 
-$script:CodexDataDirectory = Resolve-CodexDataDirectory `
-    $script:WidgetPreferences.CodexDataDirectory $env:CODEX_HOME $env:USERPROFILE
-if ($null -eq $script:CodexDataDirectory) {
-    $selectedCodexDataDirectory = Show-CodexDataDirectoryPicker
-    if ($null -ne $selectedCodexDataDirectory) {
-        $script:CodexDataDirectory = $selectedCodexDataDirectory
-        $script:WidgetPreferences.CodexDataDirectory = $selectedCodexDataDirectory
+$script:CodexDataDirectory = $null
+if ($Demo) {
+    try {
+        $demoSnapshot = Get-DemoUsageSnapshot -Root $PSScriptRoot
+        $script:LastUsageClassification = $demoSnapshot.Classification
+        $script:LastUsageDiagnostic = $demoSnapshot.Diagnostic
+        Set-WidgetState -State $demoSnapshot.State
+    }
+    catch {
+        Stop-WidgetResources
+        Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'diagnostic.noValidEvent') (Get-WidgetText 'fatal.restoreFix')
+        return
     }
 }
+else {
+    $script:CodexDataDirectory = Resolve-CodexDataDirectory `
+        $script:WidgetPreferences.CodexDataDirectory $env:CODEX_HOME $env:USERPROFILE
+    if ($null -eq $script:CodexDataDirectory) {
+        $selectedCodexDataDirectory = Show-CodexDataDirectoryPicker
+        if ($null -ne $selectedCodexDataDirectory) {
+            $script:CodexDataDirectory = $selectedCodexDataDirectory
+            $script:WidgetPreferences.CodexDataDirectory = $selectedCodexDataDirectory
+        }
+    }
 
-Set-WidgetState -State $null
-try {
-    Initialize-UsageWorker
-    if (-not (Start-UsageRefresh)) { throw 'The usage worker did not start.' }
-}
-catch {
-    Stop-WidgetResources
-    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.workerCause') (Get-WidgetText 'fatal.restoreFix')
-    return
+    Set-WidgetState -State $null
+    try {
+        Initialize-UsageWorker
+        if (-not (Start-UsageRefresh)) { throw 'The usage worker did not start.' }
+    }
+    catch {
+        Stop-WidgetResources
+        Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.workerCause') (Get-WidgetText 'fatal.restoreFix')
+        return
+    }
 }
 $script:WidgetTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:WidgetTimer.Interval = [TimeSpan]::FromSeconds(1)
 $script:WidgetTimer.Add_Tick({
-    Complete-UsageRefresh
-    Update-WidgetCountdown
-    $script:RefreshTicks++
-    if ($script:RefreshTicks -ge 15) {
-        if (Start-UsageRefresh) { $script:RefreshTicks = 0 }
+    if (-not $script:IsDemoMode) {
+        Complete-UsageRefresh
+        $script:RefreshTicks++
+        if ($script:RefreshTicks -ge 15) {
+            if (Start-UsageRefresh) { $script:RefreshTicks = 0 }
+        }
     }
+    Update-WidgetCountdown
 })
 $script:WidgetTimer.Start()
 try {
