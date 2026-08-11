@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import CodexUsageWidget
 
@@ -15,6 +16,17 @@ final class CoreTests: XCTestCase {
             .appendingPathComponent("CodexUsageWidget-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func fixture(_ name: String) throws -> Data {
+        try Data(contentsOf: contractRoot.appendingPathComponent("inputs/\(name).jsonl"))
+    }
+
+    private func writeSession(_ data: Data, named name: String, to sessions: URL, modified: Date) throws -> URL {
+        let url = sessions.appendingPathComponent(name)
+        try data.write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
         return url
     }
 
@@ -84,13 +96,14 @@ final class CoreTests: XCTestCase {
             at: saved.appendingPathComponent("sessions/link"),
             withDestinationURL: outside
         )
-        let demo = try Data(contentsOf: contractRoot.appendingPathComponent("inputs/demo.jsonl"))
+        let demo = try fixture("demo")
         try demo.write(to: saved.appendingPathComponent("sessions/demo.jsonl"))
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let state = try SessionScanner.scan(dataDirectory: saved, now: formatter.date(from: "2026-08-11T00:00:01.000Z")!)
-        XCTAssertEqual(state.remainingPercent, "55.0")
-        XCTAssertEqual(state.metrics.candidateFileCount, 1)
+        let result = try SessionScanner.scan(dataDirectory: saved, now: formatter.date(from: "2026-08-11T00:00:01.000Z")!)
+        XCTAssertEqual(result.state.remainingPercent, "55.0")
+        XCTAssertEqual(result.state.metrics.candidateFileCount, 1)
+        XCTAssertEqual(result.sessions.count, 1)
     }
 
     func testWriterLockAndResultSizeBoundary() throws {
@@ -110,5 +123,164 @@ final class CoreTests: XCTestCase {
         let output = channel.appendingPathComponent("result.json")
         XCTAssertThrowsError(try ScanWorker.writePayload(Data(repeating: 0x20, count: 256 * 1024 + 1), to: output))
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
+    func testSessionSnapshotsTasksAndLedgerRemainMonotonic() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date(timeIntervalSince1970: 1_786_406_400)
+        let firstID = "11111111-1111-1111-1111-111111111111"
+        let secondID = "22222222-2222-2222-2222-222222222222"
+        try writeSession(try fixture("precision-and-tightest-window"), named: "rollout-\(firstID).jsonl", to: sessions, modified: now.addingTimeInterval(-120))
+        try writeSession(try fixture("cache-order"), named: "rollout-\(secondID).jsonl", to: sessions, modified: now.addingTimeInterval(-60))
+        let index = "{\"id\":\"\(firstID)\",\"thread_name\":\"First task\"}\n{\"id\":\"\(secondID)\",\"thread_name\":\"Second task\"}\n"
+        try Data(index.utf8).write(to: root.appendingPathComponent("session_index.jsonl"))
+
+        let result = try SessionScanner.scan(dataDirectory: root, now: now)
+        XCTAssertEqual(result.sessions.count, 2)
+        XCTAssertEqual(result.state.tasks.map(\.name), ["Second task", "First task"])
+        XCTAssertTrue(result.state.taskNamesAvailable)
+
+        var ledger = CacheLedger.defaultValue
+        let firstTotals = try XCTUnwrap(ledger.merge(result.sessions))
+        XCTAssertEqual(firstTotals.hitTokens, 9_007_199_254_741_000)
+        XCTAssertEqual(firstTotals.missTokens, 1_093)
+        let regressed = result.sessions.map {
+            SessionTokenSnapshot(id: $0.id, cacheHitTokens: "1", cacheMissTokens: "1")
+        }
+        let secondTotals = try XCTUnwrap(ledger.merge(regressed))
+        XCTAssertEqual(secondTotals.hitTokens, firstTotals.hitTokens)
+        XCTAssertEqual(secondTotals.missTokens, firstTotals.missTokens)
+
+        let overflow = CacheLedger(
+            schemaVersion: 1,
+            sessions: [
+                "a": CacheRecord(hitTokens: String(Int64.max), missTokens: "0"),
+                "b": CacheRecord(hitTokens: "1", missTokens: "0")
+            ]
+        )
+        XCTAssertNil(overflow.totals())
+    }
+
+    func testReminderLedgerDeduplicatesEachResetCycle() {
+        var ledger = ReminderLedger.defaultValue
+        let now: Int64 = 1_786_406_400_000
+        let reset = now + 3_600_000
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset, remainingPercent: 21, threshold: 20, now: now))
+        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset, remainingPercent: 20, threshold: 20, now: now))
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset, remainingPercent: 19, threshold: 20, now: now))
+        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset, remainingPercent: 10, threshold: 10, now: now))
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: now, remainingPercent: 10, threshold: 10, now: now))
+        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset + 1, remainingPercent: 20, threshold: 20, now: now))
+    }
+
+    func testWorkerEnvelopeIsStrictAndSizeBounded() throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let state = UsageContract.evaluate(data: try fixture("demo"), now: formatter.date(from: "2026-08-11T00:00:01.000Z")!)
+        let generation = "0123456789abcdef0123456789abcdef"
+        let result = UsageScanResult(state: state, sessions: [])
+        let payload = try ScanWorker.encodePayload(result, generation: generation)
+        XCTAssertLessThanOrEqual(payload.count, ScanWorker.maximumResultBytes)
+        XCTAssertEqual(try ScanSupervisor.decodeEnvelope(payload, generation: generation).state.remainingPercent, "55.0")
+
+        var envelope = try JSONSerialization.jsonObject(with: payload) as! [String: Any]
+        var stateObject = envelope["state"] as! [String: Any]
+        stateObject["unexpected"] = true
+        envelope["state"] = stateObject
+        XCTAssertThrowsError(try ScanSupervisor.decodeEnvelope(JSONSerialization.data(withJSONObject: envelope), generation: generation))
+        XCTAssertThrowsError(try ScanSupervisor.decodeEnvelope(Data(repeating: 0x20, count: ScanWorker.maximumResultBytes + 1), generation: generation))
+
+        var oversizedState = state
+        oversizedState.tasks = (0..<30).map { index in
+            UsageTaskSnapshot(
+                id: String(format: "00000000-0000-0000-0000-%012d", index),
+                name: String(repeating: "🧪", count: 500),
+                observedAt: Int64(index)
+            )
+        }
+        XCTAssertThrowsError(try ScanWorker.encodePayload(UsageScanResult(state: oversizedState, sessions: []), generation: generation))
+    }
+
+    func testScannerCapsCandidatesAndRetriesOnlyTheNewestTail() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date(timeIntervalSince1970: 1_786_406_400)
+        for index in 0..<40 {
+            try writeSession(try fixture("demo"), named: String(format: "session-%02d.jsonl", index), to: sessions, modified: now.addingTimeInterval(TimeInterval(index)))
+        }
+        let bounded = try SessionScanner.scan(dataDirectory: root, now: now.addingTimeInterval(60))
+        XCTAssertEqual(bounded.sessions.count, 30)
+        XCTAssertEqual(bounded.state.metrics.candidateFileCount, 30)
+        let truncated = try SessionScanner.scan(dataDirectory: root, now: now.addingTimeInterval(60), maximumEntries: 2)
+        XCTAssertLessThanOrEqual(truncated.sessions.count, 2)
+        XCTAssertGreaterThan(truncated.state.metrics.readFailureCount, 0)
+
+        let retryRoot = try temporaryDirectory()
+        let retrySessions = retryRoot.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: retrySessions, withIntermediateDirectories: false)
+        var oldEvent = try fixture("demo")
+        oldEvent.append(Data(repeating: 0x78, count: 300_000))
+        oldEvent.append(0x0a)
+        try writeSession(oldEvent, named: "retry.jsonl", to: retrySessions, modified: now)
+        let retried = try SessionScanner.scan(dataDirectory: retryRoot, now: now)
+        XCTAssertEqual(retried.state.remainingPercent, "55.0")
+    }
+
+    func testWorkerModeIsSilentReadOnlyAndSupervisorRecovers() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let source = try writeSession(try fixture("demo"), named: "demo.jsonl", to: sessions, modified: Date())
+        let sourceBytes = try Data(contentsOf: source)
+        let generation = "abcdef0123456789abcdef0123456789"
+        let channel = FileManager.default.temporaryDirectory.appendingPathComponent("CodexUsageWidget-scan-\(generation)", isDirectory: true)
+        try FileManager.default.createDirectory(at: channel, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: channel) }
+        let output = channel.appendingPathComponent("result.json")
+        let executable = try XCTUnwrap(Bundle.main.executableURL)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--scan-worker"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_WIDGET_DATA_DIRECTORY"] = root.path
+        environment["CODEX_WIDGET_RESULT_PATH"] = output.path
+        environment["CODEX_WIDGET_GENERATION"] = generation
+        process.environment = environment
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(standardOutput.fileHandleForReading.readDataToEndOfFile().count, 0)
+        XCTAssertEqual(standardError.fileHandleForReading.readDataToEndOfFile().count, 0)
+        XCTAssertEqual(try Data(contentsOf: source), sourceBytes)
+        XCTAssertEqual(try ScanSupervisor.decodeEnvelope(Data(contentsOf: output), generation: generation).state.remainingPercent, "55.0")
+
+        let blocker = root.appendingPathComponent("blocker.sh")
+        try Data("#!/bin/sh\nwhile :; do :; done\n".utf8).write(to: blocker)
+        chmod(blocker.path, 0o700)
+        XCTAssertThrowsError(try ScanSupervisor.scan(executableURL: blocker, dataDirectory: root, timeout: 0.05))
+        XCTAssertEqual(try ScanSupervisor.scan(executableURL: executable, dataDirectory: root).state.remainingPercent, "55.0")
+    }
+
+    func testOrphanCleanupOnlyRemovesOwnedExpiredScanDirectories() throws {
+        let root = try temporaryDirectory()
+        let old = root.appendingPathComponent("CodexUsageWidget-scan-11111111111111111111111111111111", isDirectory: true)
+        let fresh = root.appendingPathComponent("CodexUsageWidget-scan-22222222222222222222222222222222", isDirectory: true)
+        let unrelated = root.appendingPathComponent("CodexUsageWidget-scan-not-ours", isDirectory: true)
+        for url in [old, fresh, unrelated] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        }
+        let now = Date()
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-90_000)], ofItemAtPath: old.path)
+        ScanSupervisor.cleanupOrphans(in: root, now: now)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
     }
 }
