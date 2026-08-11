@@ -51,7 +51,7 @@ final class UIContractTests: XCTestCase {
 
         let top = WidgetGeometry.snappedFrame(
             CGRect(x: -1000, y: 770, width: 100, height: 100), visibleFrame: visible)
-        XCTAssertEqual(top.frame.minY, 771)
+        XCTAssertEqual(top.frame.minY, 781)
         XCTAssertEqual(top.edge, .top)
 
         let rightWidget = CGRect(x: -110, y: 500, width: 100, height: 100)

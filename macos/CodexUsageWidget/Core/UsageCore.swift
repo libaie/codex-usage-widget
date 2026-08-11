@@ -47,6 +47,22 @@ struct SessionTokenSnapshot: Equatable {
     }
 }
 
+struct UsageLimitSnapshot: Equatable {
+    var name: String
+    var remainingPercent: String
+    var resetAt: Int64
+    var windowMinutes: Int64?
+
+    func jsonObject() -> [String: Any] {
+        [
+            "name": name,
+            "remainingPercent": remainingPercent,
+            "resetAt": resetAt,
+            "windowMinutes": jsonValue(windowMinutes)
+        ]
+    }
+}
+
 struct UsageTaskSnapshot: Equatable {
     var id: String
     var name: String
@@ -96,6 +112,8 @@ struct NormalizedUsageState {
     var outputPercent: String?
     var reasoningOutputPercent: String?
     var observedAt: Int64?
+    var selectedResetAt: Int64? = nil
+    var selectedWindowMinutes: Int64? = nil
     var tasks: [UsageTaskSnapshot] = []
     var taskNamesAvailable = false
     var metrics: ScanMetrics
@@ -128,6 +146,25 @@ struct NormalizedUsageState {
 struct UsageScanResult {
     var state: NormalizedUsageState
     var sessions: [SessionTokenSnapshot]
+    var selectedLimit: UsageLimitSnapshot?
+
+    init(state: NormalizedUsageState, sessions: [SessionTokenSnapshot], selectedLimit: UsageLimitSnapshot? = nil) {
+        self.state = state
+        self.sessions = sessions
+        self.selectedLimit = selectedLimit ?? state.selectedLimitSnapshot
+    }
+}
+
+private extension NormalizedUsageState {
+    var selectedLimitSnapshot: UsageLimitSnapshot? {
+        guard let name = selectedWindow, let remainingPercent, let resetAt = selectedResetAt else { return nil }
+        return UsageLimitSnapshot(
+            name: name,
+            remainingPercent: remainingPercent,
+            resetAt: resetAt,
+            windowMinutes: selectedWindowMinutes
+        )
+    }
 }
 
 private struct ParsedWindow {
@@ -136,6 +173,7 @@ private struct ParsedWindow {
     let used: Decimal
     let remaining: Decimal
     let resetAt: Int64
+    let windowMinutes: Int64?
     let observedAt: Int64
 }
 
@@ -196,12 +234,18 @@ enum UsageContract {
                     }
                     let reset = resetSeconds.multipliedReportingOverflow(by: 1000)
                     guard !reset.overflow else { dataIssue = true; continue }
+                    var windowMinutes: Int64?
+                    if let rawMinutes = window["window_minutes"] {
+                        guard let minutes = integer(rawMinutes) else { dataIssue = true; continue }
+                        windowMinutes = minutes
+                    }
                     let parsed = ParsedWindow(
                         name: name,
                         primary: primary,
                         used: used,
                         remaining: 100 - used,
                         resetAt: reset.partialValue,
+                        windowMinutes: windowMinutes,
                         observedAt: observed
                     )
                     if let previous = windows[name] {
@@ -297,6 +341,8 @@ enum UsageContract {
             outputPercent: outputPercent,
             reasoningOutputPercent: reasoningOutputPercent,
             observedAt: observedAt,
+            selectedResetAt: selected?.resetAt,
+            selectedWindowMinutes: selected?.windowMinutes,
             metrics: metrics
         )
     }
@@ -813,6 +859,15 @@ private extension UsageScanResult {
                       state.inputPercent, state.outputPercent, state.reasoningOutputPercent] {
             try add(value, maximumUTF8Bytes: 64)
         }
+        guard selectedLimit == state.selectedLimitSnapshot else { throw CoreError.invalidData }
+        if let selectedLimit {
+            guard (selectedLimit.name == "primary" || selectedLimit.name == "secondary"),
+                  validPercentage(selectedLimit.remainingPercent), selectedLimit.resetAt >= 0,
+                  selectedLimit.windowMinutes == nil || selectedLimit.windowMinutes! >= 0
+            else { throw CoreError.invalidData }
+            try add(selectedLimit.name, maximumUTF8Bytes: 16)
+            try add(selectedLimit.remainingPercent, maximumUTF8Bytes: 64)
+        }
         guard sessions == sessions.sorted(by: { $0.id < $1.id }) else { throw CoreError.invalidData }
         for session in sessions {
             guard validSessionIdentifier(session.id),
@@ -883,7 +938,8 @@ enum ScanWorker {
             "schemaVersion": 1,
             "generation": generation,
             "state": result.state.jsonObject(),
-            "sessions": result.sessions.map { $0.jsonObject() }
+            "sessions": result.sessions.map { $0.jsonObject() },
+            "selectedLimit": result.selectedLimit?.jsonObject() ?? NSNull()
         ]
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         guard data.count <= maximumResultBytes else { throw CoreError.outputTooLarge }
@@ -984,15 +1040,32 @@ enum ScanSupervisor {
         guard
             data.count <= ScanWorker.maximumResultBytes,
             let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            Set(object.keys) == Set(["schemaVersion", "generation", "state", "sessions"]),
+            Set(object.keys) == Set(["schemaVersion", "generation", "state", "sessions", "selectedLimit"]),
             jsonInt64(object["schemaVersion"]) == 1,
             object["generation"] as? String == generation,
             let stateObject = object["state"] as? [String: Any],
             let sessionObjects = object["sessions"] as? [[String: Any]], sessionObjects.count <= 30
         else { throw CoreError.invalidData }
-        let state = try normalizedState(from: stateObject)
+        var state = try normalizedState(from: stateObject)
         let sessions = try sessionObjects.map { try sessionSnapshot(from: $0) }
-        let result = UsageScanResult(state: state, sessions: sessions)
+        let selectedLimit: UsageLimitSnapshot?
+        if object["selectedLimit"] is NSNull {
+            selectedLimit = nil
+        } else if let limitObject = object["selectedLimit"] as? [String: Any] {
+            selectedLimit = try limitSnapshot(from: limitObject)
+        } else {
+            throw CoreError.invalidData
+        }
+        guard (selectedLimit == nil) == (state.selectedWindow == nil && state.remainingPercent == nil) else {
+            throw CoreError.invalidData
+        }
+        if let selectedLimit {
+            guard state.selectedWindow == selectedLimit.name,
+                  state.remainingPercent == selectedLimit.remainingPercent else { throw CoreError.invalidData }
+            state.selectedResetAt = selectedLimit.resetAt
+            state.selectedWindowMinutes = selectedLimit.windowMinutes
+        }
+        let result = UsageScanResult(state: state, sessions: sessions, selectedLimit: selectedLimit)
         guard try result.conservativeJSONByteUpperBound() <= ScanWorker.maximumResultBytes else {
             throw CoreError.outputTooLarge
         }
@@ -1010,6 +1083,19 @@ enum ScanSupervisor {
             return text
         }
         return SessionTokenSnapshot(id: id, cacheHitTokens: try token("cacheHitTokens"), cacheMissTokens: try token("cacheMissTokens"))
+    }
+
+    private static func limitSnapshot(from object: [String: Any]) throws -> UsageLimitSnapshot {
+        guard Set(object.keys) == Set(["name", "remainingPercent", "resetAt", "windowMinutes"]),
+              let name = object["name"] as? String, name == "primary" || name == "secondary",
+              let remaining = object["remainingPercent"] as? String, validPercentage(remaining),
+              let resetAt = jsonInt64(object["resetAt"]), resetAt >= 0
+        else { throw CoreError.invalidData }
+        let windowMinutes: Int64?
+        if object["windowMinutes"] is NSNull { windowMinutes = nil }
+        else if let value = jsonInt64(object["windowMinutes"]), value >= 0 { windowMinutes = value }
+        else { throw CoreError.invalidData }
+        return UsageLimitSnapshot(name: name, remainingPercent: remaining, resetAt: resetAt, windowMinutes: windowMinutes)
     }
 
     private static func normalizedState(from object: [String: Any]) throws -> NormalizedUsageState {
