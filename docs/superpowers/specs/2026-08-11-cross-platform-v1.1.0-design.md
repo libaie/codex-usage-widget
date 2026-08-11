@@ -139,7 +139,7 @@ Windows 自检和 macOS 测试必须对同一批样本生成相同的规范化�
 
 ## 隐私与安全
 
-- 两个平台均无网络请求、遥测、账号登录和数据上传。
+- 两个平台均不调用 Web API、不做遥测、不要求账号登录，也不上传数据；若用户手动选择网络文件系统，操作系统仍会执行对应文件 I/O。
 - 数据读取限定在解析出的 Codex 数据目录；手动目录必须包含预期的 `sessions` 结构。
 - Windows EXE 对内嵌 ZIP 执行严格路径与文件清单验证，并使用版本化、先临时后落位的释放流程。
 - macOS 直接分发版本启用 Hardened Runtime，使用 Developer ID Application 签名并提交 Apple 公证。
@@ -343,9 +343,9 @@ v1.1.0 只有在以下条件同时满足时完成：
                          v                   v
 Windows 发布包 -> C# 引导 -> PowerShell 核心 -> WPF
 
-macOS DMG -------------> Swift UsageCore -> SwiftUI/AppKit
-                         |                |
-                         +-- 本地偏好/账本 +-- 圆环/详情/菜单栏
+macOS DMG -------------> 单一 Swift 应用目标
+                         | Core/          | UI/
+                         +-- 本地解析/状态 +-- SwiftUI/AppKit 圆环/详情/菜单栏
 
 GitHub CI：两端分别对 expected-state.json 验证 -> 候选资产
 Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
@@ -402,7 +402,7 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
 | 发布包泄露真实路径、会话或证书 | 中 | 高 | 扩展现有发布检查器，扫描完整候选清单并仅放行精确二进制资产。 |
 | 伪造陈旧数据误导用户 | 中 | 中 | `observedAt`、`freshness`、`completeness` 为强制字段；未知格式不得显示成成功。 |
 
-运行时无网络、账号、远程端点或数据写回 Codex 目录，因此没有授权或远程对象访问面。Apple 要求 Developer ID、Hardened Runtime 和公证的正式流程保持不变；GitHub 签名 job 不使用 `pull_request_target` 执行外部代码。
+运行时不调用 Web API、不做遥测、不上传数据，也不写回 Codex 目录，因此没有远程对象授权面。用户手动选择 UNC 或其他网络文件系统时仍会产生操作系统级文件 I/O，文档不得把它描述成“绝不联网”。Apple 要求 Developer ID、Hardened Runtime 和公证的正式流程保持不变；GitHub 签名 job 不使用 `pull_request_target` 执行外部代码。
 
 ### Section 4：数据流与交互边界
 
@@ -438,7 +438,7 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
 **结论：OK，拒绝共享运行时抽象。** 最少新结构为：
 
 - Windows：一个 C# 引导源文件、一个构建入口、一个自检入口；不建立通用安装框架。
-- macOS：`UsageCore`（解析、快照、账本、偏好）与 `WidgetApp`（SwiftUI/AppKit）两个目标；不为单一实现增加接口工厂或插件系统。
+- macOS：一个原生 Xcode 应用目标 `CodexUsageWidget`，源码仅按 `Core/` 与 `UI/` 文件夹分组；另设一个单元测试目标和一个 UI 测试目标。没有第二个 framework/library 目标，也不为单一实现增加接口工厂或插件系统。
 - 共同：`fixtures/contract/v1` 作为唯一跨平台语义源。
 
 固定 bundle identifier 为 `io.github.libaie.codexusagewidget`。业务函数以结果命名，不以 UI 技术命名。任何含五个以上条件分支的 Swift 解析函数拆成现有语义对应的小函数，但不复制一套新的领域层。平台格式化必须在规范化结果之后，避免统计与显示耦合。
@@ -590,11 +590,11 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
   - 验证：首次/重复/损坏/中断/无终端/单实例测试与下载后 SHA 回归。
 - [ ] **CEO-T3（P1，人工约 5 天 / AI 约 4 小时）— macOS 核心 — 实现解析、偏好和单调账本**
   - 来源：数据流、错误、安全 — 在 UI 前通过共同契约和原子持久化。
-  - 文件：`macos/Sources/UsageCore/*`、`macos/Tests/UsageCoreTests/*`。
-  - 验证：`swift test`，包含损坏、未知格式、乱序、下降、写失败和固定时间。
+  - 文件：`macos/CodexUsageWidget/Core/*`、`macos/CodexUsageWidgetTests/*`。
+  - 验证：`xcodebuild test`，包含损坏、未知格式、乱序、下降、写失败和固定时间。
 - [ ] **CEO-T4（P1，人工约 5 天 / AI 约 4 小时）— macOS UI — 复现圆环、详情、任务和多屏吸附**
   - 来源：交互边界、设计 — 保持行为一致并使用原生平台能力。
-  - 文件：`macos/Sources/WidgetApp/*`、UI/几何测试、五语言资源。
+  - 文件：`macos/CodexUsageWidget/UI/*`、`macos/CodexUsageWidgetUITests/*`、几何测试、五语言资源。
   - 验证：键盘/辅助功能、五语言截图、Reduce Motion、屏幕热插拔和真实双显示器 QA。
 - [ ] **CEO-T5（P1，人工约 2 天 / AI 约 2 小时）— 发布 — 建立无密钥 CI 与受保护签名发布链**
   - 来源：安全、部署 — PR 不接触密钥，任一平台失败都不能公开发布。
@@ -616,7 +616,7 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
 | 错误 | 12 条错误路径，0 个未救援关键缺口 |
 | 安全 | 7 类威胁，0 个未缓解高风险 |
 | 数据/交互 | 10 类边界，全部指定处理 |
-| 质量 | 采用两个 Mac 目标 + 一个共同契约，拒绝额外框架 |
+| 质量 | 采用一个 Mac 应用目标 + 单元/UI 测试目标 + 一个共同契约，拒绝额外框架 |
 | 测试 | 单元/集成/UI/发布四层，含敌对与混沌测试 |
 | 性能 | 有界扫描与尾读；不引入数据库 |
 | 可观测性 | 本地状态 + CI 清单，无遥测 |
@@ -730,7 +730,7 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
 
 | 步骤 | 用户行为 | 应有感受 | 设计支持 |
 |---|---|---|---|
-| 1 | 首次启动 | 安心，不担心凭据上传 | 自动发现前说明“只读取本机会话，不联网”放在首次详情中。 |
+| 1 | 首次启动 | 安心，不担心凭据上传 | 自动发现前说明“只读取本机会话，不调用 Web API、不上传数据”放在首次详情中。 |
 | 2 | 自动发现成功 | 即刻有价值 | 直接出现圆环；5 秒内能读到剩余百分比。 |
 | 3 | 自动发现失败 | 知道应用没坏 | 仅首次自动展开一次非模态详情，唯一主按钮“选择 Codex 数据目录”。 |
 | 4 | 取消选择 | 不被打扰 | 收起详情，不循环弹窗；圆环保持 `—`，菜单仍可恢复。 |
@@ -904,3 +904,327 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
 | 视觉基线 | 提取现有样式，不重新设计 | 复用已批准资产，最小差异。 |
 
 **Phase 2 complete.** 独立设计审查提出 12 项问题；Codex CLI 不可用。14 项实现歧义已按推荐方案全部解决，交给阶段 3 工程审查。
+
+## AUTOPLAN 阶段 3：工程审查
+
+审查状态：**CLEAR（已把全部 P1 修正折入计划）**
+
+审查模式：**FULL_REVIEW**。本阶段只冻结架构、信任边界、数据契约、测试和发布顺序，不实现产品代码。
+
+### 工程独立声音
+
+**独立工程审查代理：** 未发现 P0，提出 9 项高置信 P1：损坏持久化文件可能被默认值覆盖；解析器静默丢弃坏行；“30 文件/10 秒”尚非真实硬边界；绝对“无网络”承诺与网络文件系统冲突；递归扫描缺少链接越界保护；跨语言快照缺少整数/时间/舍入规范；Mac target 拆分过度；任务所有权重叠；tag 与发布顺序矛盾。
+
+**Codex CLI：** `[codex-unavailable: access denied]`，不声称跨模型共识。
+
+| # | 严重度 / 置信度 | 当前证据 | 工程决策 |
+|---:|---|---|---|
+| 1 | P1 / 高 | `Update-CumulativeCacheTokens` 在加载异常时执行 `catch { $knownSessions = @{} }`，之后可能写回新账本；`Get-WidgetPreferences` 以 `catch { }` 返回默认值，而 `Complete-WidgetPositionRestore` 无条件调用 `Save-WidgetPreferences`。 | 所有持久化读取统一返回 `missing / valid / invalid`；`invalid` 只使用内存安全值，原文件只读保留，必须由用户明确重置后才能覆盖。偏好、缓存账本、提醒去重状态都遵循该规则。 |
+| 2 | P1 / 高 | `Read-SessionEvents` 使用 `try { ... ConvertFrom-Json ... } catch { }`，`Get-NewestUsageState` 也静默忽略异常；当前诊断只覆盖目录缺失、读取失败、空和无有效用量。 | 扫描结果必须携带候选行、有效、损坏、未知、读取失败计数，并由一个分类函数得出 `complete / partial / unsupported / error / empty`，不能把“全坏”显示为空。 |
+| 3 | P1 / 高 | `Get-ChildItem ... -Recurse | Sort-Object` 先枚举并排序全部文件，再 `Select-Object -First 30`；`Read-TaskNameIndex` 顺序读取完整索引；活动文件可额外无限加入；`Complete-UsageRefresh` 只等待 `IsCompleted`，没有超时恢复。 | 候选枚举、索引尾读、活动任务、单文件读取和整次刷新全部有界；10 秒到达即显示陈旧/错误并停止当前 worker，下一周期使用重建 worker，不积压。 |
+| 4 | P1 / 高 | 已有目录解析接受任何合法 rooted path，包含用户主动选择的 UNC/网络卷。 | 保留兼容性，不删除网络盘支持；承诺统一改为“不调用 Web API、不遥测、不上传”。网络卷可能产生系统级文件 I/O，并可能更容易触发 10 秒预算。 |
+| 5 | P1 / 高 | `Resolve-CodexDataDirectory` 只检查 `sessions` 存在，递归候选没有验证重解析点/符号链接后的文件仍在根内。 | Windows 拒绝 `sessions` 路径及其后代中的 reparse point；macOS 对根和候选调用标准库 canonical URL，并做路径组件边界比较。任何越界只计为拒绝，不读取内容。 |
+| 6 | P1 / 高 | 计划只有字段名，没有规定超过 JavaScript 安全整数的令牌、溢出、UTC、舍入、null 和排序。 | 冻结 `schemaVersion=1` 的规范 JSON：令牌计数用十进制字符串表达 Int64；checked 加法；时间为 UTC Unix epoch ms；百分比为银行家舍入后一位小数字符串；缺失数值为 `null`、集合为 `[]`、数组稳定排序。 |
+| 7 | P1 / 高 | 早期计划把 `UsageCore` 与 `WidgetApp` 写成两个产品 target，但没有第二消费者。 | 采用一个 Xcode app target `CodexUsageWidget`，只以 `Core/`、`UI/` 文件夹分组；另设单元测试和 UI 测试 target。需要真实第二消费者时才抽 framework。 |
+| 8 | P1 / 高 | CEO/Design 任务分别触碰共同契约、主脚本、语言包、预期快照和 workflow，若平行实施会产生双 owner。 | 下面的工程 DAG 是唯一实施顺序；每个共享文件集只有一个 owner。前两阶段任务保留为来源，不再作为可并行执行清单。 |
+| 9 | P1 / 高 | 早期发布图一处像是先创建 tag 再完成所有验证，另一处又要求可信 release commit；公开后的回滚措辞也不够精确。 | 从精确 commit 构建、签名和真机 QA；全部通过后才在同 SHA 创建不可变 tag；再建草稿、上传、重下校验、公开。公开后不移动 tag，以 v1.1.1 修复。 |
+
+以上 9 项均已在本阶段转成明确契约、任务或发布 gate；没有未处置的关键工程问题。
+
+### 当前实现调用流与根因
+
+```text
+启动
+  -> Get-WidgetPreferences
+       invalid JSON -> 当前静默返回默认值
+  -> Restore-WidgetPosition
+       -> Complete-WidgetPositionRestore
+            -> 当前无条件 Save-WidgetPreferences（可能覆盖损坏原文件）
+
+15 秒 tick
+  -> Start-UsageRefresh -> persistent PowerShell runspace
+  -> Get-CodexUsageSnapshot
+       -> Get-CodexUsageState
+            -> 递归枚举/全排序
+            -> 完整读取 session_index.jsonl
+            -> Read-SessionEvents（坏行静默丢弃）
+            -> Update-CumulativeCacheTokens
+                 invalid ledger -> 当前空账本 -> 可能写回
+  -> Complete-UsageRefresh
+       只有 IsCompleted 才结束；当前无 deadline/recovery
+```
+
+根因不是某一个 UI 状态，而是三个共享边界没有表达失败信息：持久化加载只有“值”、扫描只有“快照或 null”、worker 只有“完成或未完成”。最小根因修复是让这三个边界各自返回一个小而明确的结果，不在每个调用方补例外分支。
+
+### 冻结的规范化快照契约 v1
+
+规范文件：`fixtures/contract/v1/schema.md`。测试样本使用匿名路径和固定时钟；两端都读同一输入并与人工审过的 `expected-state.json` 比较。
+
+| 规则 | 冻结值 |
+|---|---|
+| 版本 | 顶层 `schemaVersion` 必须是整数 `1`。未知大版本返回 `unsupported`，不得猜测。 |
+| 来源 | `sourceKind` 固定为 `local-session-observation`。 |
+| 令牌 | 内部为 signed Int64；JSON 中以十进制字符串输出，避免 `2^53` 以上跨语言歧义。负数、非整数和超出 Int64 均无效。 |
+| 加法 | 使用 checked addition；溢出使本次对应字段无效并进入 `partial/error`，绝不环绕或截断。 |
+| 百分比 | 使用十进制运算，Midpoint-to-even（银行家舍入）到一位；JSON 为如 `"71.3"` 的字符串或 `null`。UI 再本地化百分号。 |
+| 时间 | 所有输入规范化为 UTC；JSON 使用 signed Int64 Unix epoch milliseconds。倒计时只由当前时钟与绝对时间计算。 |
+| 边界 | `resetAt <= now` 视为过期；系统时钟回拨或睡眠唤醒后立即从绝对时间重算。 |
+| 缺失 | 每个定义字段始终存在；未知数字为 `null`，未知文本为 `null`，集合为 `[]`，不因平台省略键。 |
+| 稳定排序 | 限制窗口按 `remainingPercent`、`primary` 优先、`resetAt`、稳定 id；任务按 `observedAt` 降序后 id ordinal；账本按 session id ordinal。 |
+| 精度 | UI 可缩写 `1.2 万`，但规范快照和持久化永远保留原始整数，不用显示值回算。 |
+
+最低共同样本必须包含：恰好 `2^53`、`2^53+1`、Int64 最大值、checked overflow、DST 跳变、`resetAt == now`、相同时间戳、主/次窗口并列、乱序事件、单条损坏、全部损坏、未知整体格式、读取失败、缓存值下降与空目录。
+
+预期快照不得由任一平台实现自动覆盖。契约 owner 编写样本，独立 reviewer 审核预期值；Windows/Mac owner 只让实现满足已审快照。
+
+### 扫描分类与持久化状态
+
+扫描内部结果至少包含：
+
+```text
+validEventCount
+malformedLineCount
+unknownEventCount
+readFailureCount
+candidateFileCount
+limitWindowCount
+```
+
+唯一分类表：
+
+| 条件 | 结果 | 展示/提醒 |
+|---|---|---|
+| 目录有效，无候选记录 | `empty` | `—`；不提醒。 |
+| 至少一个完整有效窗口，所有计数为 0 | `complete` | 正常展示；满足新鲜度时可提醒。 |
+| 至少一个完整有效窗口，同时有坏行/未知/读取失败 | `partial` | 只显示完整字段和忽略计数；不提醒。 |
+| 没有有效窗口，存在未知 schema/event | `unsupported` | `!`；建议更新应用；不沿用为“实时”。 |
+| 没有有效窗口，只有损坏或读取失败 | `error` | 有旧可信快照则陈旧显示，否则 `!`；不提醒。 |
+| 扫描超过预算 | `stale` 或 `error` | 有旧可信快照用陈旧环，否则可重试错误。 |
+
+偏好、缓存账本与 `reminders.json` 使用同一加载枚举：
+
+| 加载状态 | 内存行为 | 磁盘行为 |
+|---|---|---|
+| `missing` | 使用默认值 | 第一次真实用户变更时可创建。 |
+| `valid` | 使用已验证值 | 只通过现有原子写入更新。 |
+| `invalid` | 使用安全内存值并显示恢复入口 | 原字节保持不变；自动刷新、位置恢复、主题/语言初始化均不得写回。只有用户明确“重置本地状态”后才替换。 |
+
+### 目标架构与依赖图
+
+```text
+fixtures/contract/v1/schema.md + anonymized inputs + reviewed expected-state.json
+               |                              |
+               v                              v
+Windows PowerShell core                 macOS CodexUsageWidget app target
+  parser/state/persistence                Core/ parser/state/persistence
+               |                              |
+               v                              v
+Windows WPF UI                         UI/ SwiftUI + AppKit window controller
+               ^                              ^
+               |                              |
+C# single-file bootstrap                Xcode build -> Universal .app -> DMG
+  embedded verified runtime                    | sign/notarize/staple
+               \                              /
+                +---- secret-free CI --------+
+                       exact commit SHA
+                              |
+                       protected release job
+                              |
+                 immutable v1.1.0 + draft assets
+```
+
+Mac 工程保持最小：
+
+```text
+macos/
+  CodexUsageWidget.xcodeproj
+  CodexUsageWidget/
+    App/
+    Core/
+    UI/
+    Resources/
+  CodexUsageWidgetTests/
+  CodexUsageWidgetUITests/
+```
+
+不创建 Swift Package、framework target、repository layer、DI container 或跨平台运行时。测试通过 `@testable import CodexUsageWidget` 访问 app module 内部类型。
+
+### 信任边界与性能硬上限
+
+| 边界 | v1.1.0 上限/动作 |
+|---|---|
+| 目录遍历 | 每次至多检查 10,000 个目录项并保持固定 30 个最新候选；达到上限记 `partial`。不构造完整文件数组后全排序。 |
+| 活动任务 | 最近 30 分钟且至多额外 30 个文件；总读取文件数不超过 60。 |
+| 单会话读取 | 尾部 256 KiB；只有最新候选在未找到有效限制事件时允许一次 1 MiB 重试。 |
+| 任务索引 | 只读最后 1 MiB；最多接受 10,000 行、任务名 500 字符。 |
+| 单次刷新 | 使用单调时钟预算 10 秒；逐步检查取消。到期立即把 UI 转为 stale/error，停止并重建 worker，下一 tick 不排队。 |
+| UI 线程 | 不做目录/文件/JSON I/O；整份不可变 view state 一次提交，自动性能夹具目标小于一帧（16 ms）。 |
+| 正常夹具 | 30 个最大尾读文件的本地刷新 p95 < 2 秒；CI 记录耗时但不上传用户数据。 |
+| 链接 | Windows 拒绝会话根及后代 reparse point；macOS canonicalize 后要求候选仍在 canonical root 的路径组件边界内。 |
+| EXE 载荷 | 精确 allowlist、逐文件 SHA-256、总解压上限、拒绝绝对/父跳转/重复/大小写碰撞/链接；临时目录成功后原子落位。 |
+
+10 秒是用户可见刷新预算，不是假设所有内核 I/O 都可瞬间取消。实现必须在慢/锁定文件和网络路径夹具中证明：超时后 UI 可操作、旧快照仍在、下一周期能用新 worker 成功刷新，且不产生无界 worker 或句柄。
+
+### 并发、生命周期与恢复
+
+| 场景 | 规则 |
+|---|---|
+| 刷新 tick 重入 | 同一平台同一时刻只有一个 active scan；tick 合并，不排队。 |
+| Windows EXE 同时首次启动 | 引导使用版本级命名锁；只有锁 owner 释放/校验，其他实例等待有界时间后复用完整版本。主程序继续使用现有应用 mutex。 |
+| EXE 释放中终止 | 只留下本次临时目录；下次清理同版本孤儿临时目录，旧完整版本不变。 |
+| 偏好写与退出竞争 | 复用原子写；退出只等待当前小文件写入，不等待新扫描。 |
+| Mac 第二次启动 | 由单应用激活现有实例，不创建第二份账本 writer。 |
+| 睡眠/唤醒 | 取消陈旧 timer 计算，唤醒后立即刷新并从绝对 UTC 时间重算。 |
+| 显示器断开 | 下一主线程帧把圆环和详情夹紧到仍存在的 `visibleFrame`，随后才保存有效位置。 |
+| 任务在焦点中消失 | 关闭任务详情，焦点回到圆环或任务列表标题，不指向已释放对象。 |
+
+### 完整测试覆盖图
+
+`U=纯单元/自检`，`I=文件系统或进程集成`，`UI=平台 UI 自动化/辅助功能`，`E2E=候选资产真实运行`。
+
+| 能力/失败路径 | U | I | UI | E2E |
+|---|:---:|:---:|:---:|:---:|
+| 共同解析、Int64、舍入、时间、排序 | ✓ | 两端同夹具快照 |  | 候选内复跑快照 |
+| 完整/部分/未知/全坏/空分类 | ✓ | 损坏 JSONL 与锁定文件 | 六状态摘要 | 两端首次真实扫描 |
+| invalid 持久化保字节、显式重置 | ✓ | 三文件 byte-identical + 原子替换 | 恢复入口 | 重启后状态保持 |
+| 链接/路径越界 | ✓ | Windows junction / macOS symlink | 错误动作 | 候选包手选目录 |
+| 10 秒预算与 worker 恢复 | 固定时钟 | 大目录、1 MiB 索引、60 文件、慢/锁定文件 | 陈旧环且 UI 可操作 | 17 秒后下一刷新成功 |
+| 圆环窗口选择与状态样式 | ✓ | 共同 snapshot -> view state | 截图 + a11y 值 | Windows/Mac 实机 |
+| hover/click/drag/focus/吸附 | 几何/状态机 | 虚拟屏幕矩形 | 180/250 ms、4 点、Esc、热插拔 | 双显示器手工签核 |
+| 五语言/八主题/最长文案 | key/placeholder/font width | 资源加载回退 | 五语言截图、VoiceOver | 两平台候选 |
+| 提醒权限/去重/点击 | 固定时钟/周期 | restart + `reminders.json` | 拒绝、启用、点击、过期 | 真机通知 |
+| Windows EXE 校验/并发/中断 | 清单自检 | 双进程首次启动、损坏载荷 | 无 cmd、可见错误 | 下载 EXE 启动 |
+| Mac Universal/签名/公证 | 架构检查 | codesign/notary/staple | Gatekeeper 首启 | Apple Silicon + Rosetta |
+| 发布 tag/草稿/重下/回滚 | workflow lint | SHA/ref mismatch、上传中断 | Release 页面资产 | 三资产下载哈希 |
+| 最小启动错误 | 内置资源测试 | 损坏 bootstrap/英语包缺失 | 不依赖外部包的双语错误 | 候选破坏测试 |
+
+所有新增非平凡分支至少落一个能在错误选择时失败的最小检查。业务数值由纯测试承担；真实 UI 自动化只验证平台集成、视觉和辅助功能，避免脆弱重复断言。
+
+### Failure Modes Registry（工程增补）
+
+| 路径 | 失败 | 救援 | 必须失败的检查 |
+|---|---|---|---|
+| 偏好/账本/提醒加载 | JSON 损坏或字段越界 | 内存安全值 + 原文件写保护 + 显式重置 | 自动刷新/位置恢复后原文件逐字节相同。 |
+| 会话解析 | 单条坏、全坏、未知 schema | partial / error / unsupported 分开 | 三类输入不得都落到 empty。 |
+| 目录枚举 | 10,000 项或超过预算 | partial/stale，不扩大读取 | 大目录在预算后仍可操作且下次恢复。 |
+| 文件读取 | 锁定、慢网络卷、权限丢失 | 保留上次可信快照 | worker 可重建，无无界后台任务。 |
+| 路径 | junction/symlink 越根 | 拒绝文件，绝不打开 | 越界目标访问计数保持 0。 |
+| 数字 | `2^53+1`、Int64 overflow | 字符串保真 / invalid | Windows 与 Swift 输出逐字节一致；overflow 不环绕。 |
+| 时间 | DST、回拨、`resetAt==now` | UTC 重算、过期过滤 | 固定时钟两端一致。 |
+| 引导 | 两进程、载荷坏、落位中断 | 单 owner、旧完整版本、可重试 | 并发首次 EXE 只产生一个完整 runtime。 |
+| 本地化 | 可选包坏 / 英语包坏 | 英语回退 / 内置最小错误 | 错误不依赖待加载语言包。 |
+| 通知 | 未授权、重启、过期点击 | 不重复请求/去重/打开当前状态 | 不完整或陈旧状态永不通知。 |
+| 签名发布 | secret 缺失、tag 错、上传断 | workflow fail closed、保留草稿 | 任一资产失败都不存在公开 v1.1.0。 |
+| 公开后严重问题 | 资产已被下载 | 下线受影响资产，v1.0.0 恢复推荐，发布 v1.1.1 | 原 v1.1.0 tag 永不移动。 |
+
+### 权威实施 DAG 与文件所有权
+
+下面清单取代 CEO/Design 阶段的并行执行含义；那些任务仍保留作来源映射。
+
+```text
+ENG-T1 契约/预期快照（串行冻结）
+  |----> ENG-T2 Windows 数据边界 ----> ENG-T6 Windows 状态与交互 --\
+  |----> ENG-T3 Windows EXE ----------------------------------------+--> ENG-T8 候选/签名/真机 gate
+  |----> ENG-T4 macOS Core --------> ENG-T7 macOS 原生 UI ----------+          |
+  +----> ENG-T5 无密钥 CI -----------------------------------------/          v
+                                                                       ENG-T9 文档/最终 Release
+```
+
+| 文件集 | 唯一 owner | 其他 lane 规则 |
+|---|---|---|
+| `fixtures/contract/v1/*` 与 `expected-state.json` | ENG-T1 契约 lane | 平台 lane 只能提审变更，不能自行重生成 expected。 |
+| `CodexUsageWidget.ps1` 与现有 locales | ENG-T2，之后移交 ENG-T6 | 同一检查点内不并行编辑。 |
+| Windows C# 引导与打包清单 | ENG-T3 | 不把业务解析搬入引导。 |
+| `macos/CodexUsageWidget/**` 与两个测试 target | ENG-T4，之后移交 ENG-T7 | Core/UI 是文件夹边界，不是新 framework。 |
+| `.github/workflows/*`、签名/公证脚本 | ENG-T5，之后移交 ENG-T8 | PR job 永远无发布 secret。 |
+| README、CHANGELOG、发布说明、截图 | ENG-T9 | 只在候选行为冻结后更新。 |
+
+### Engineering Implementation Tasks
+
+- [ ] **ENG-T1（P1，人工约 1 天 / AI 约 1 小时）— 契约 — 冻结 schema、匿名输入与人工审阅快照**
+  - 来源：发现 2/6/8。
+  - 文件：`fixtures/contract/v1/schema.md`、匿名 JSONL、`expected-state.json`、两端 contract runner。
+  - 验证：`2^53+1`、overflow、DST、并列、全坏、unknown 等样本两端逐字节一致；独立 reviewer 签核 expected。
+- [ ] **ENG-T2（P1，人工约 2 天 / AI 约 2 小时）— Windows 数据边界 — 修复分类、持久化、路径与预算根因**
+  - 来源：发现 1/2/3/5。
+  - 文件：`CodexUsageWidget.ps1`、`-SelfTest` 内最小断言。
+  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；大目录/锁定文件超时后 worker 恢复；junction 越界访问为 0。
+- [ ] **ENG-T3（P1，人工约 2 天 / AI 约 2 小时）— Windows 分发 — 最小单文件 EXE 引导**
+  - 来源：CEO-T2、并发/信任边界。
+  - 文件：单一 C# 引导源码、一个构建入口、现有 release checker/launcher fixture。
+  - 验证：首次、重复、并发、损坏、终止、无 cmd、固定清单/SHA/大小和旧版保留。
+- [ ] **ENG-T4（P1，人工约 4 天 / AI 约 4 小时）— macOS Core — 建立一个 app target 的解析与本地状态**
+  - 来源：发现 5/6/7、CEO-T3。
+  - 文件：`macos/CodexUsageWidget/Core/*`、`macos/CodexUsageWidgetTests/*`。
+  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、超时与单调账本。
+- [ ] **ENG-T5（P1，人工约 1 天 / AI 约 1 小时）— CI — 建立无密钥双平台构建**
+  - 来源：发现 8/9、CEO-T5。
+  - 文件：`.github/workflows/*`、版本/资产清单验证。
+  - 验证：普通 PR 构建 Windows ZIP/EXE 与 macOS unsigned Universal app，验证契约、架构、隐私和精确资产；没有 signing secrets。
+- [ ] **ENG-T6（P1，人工约 2 天 / AI 约 2 小时）— Windows UX — 落地六状态与统一交互**
+  - 来源：DESIGN-T2/T3/T4。
+  - 文件：`CodexUsageWidget.ps1`、五语言包、UI/launcher regression。
+  - 验证：180/250 ms、4 点拖拽、固定/Esc、partial/stale 外环、详情首行元信息、键盘和五语言真实截图。
+- [ ] **ENG-T7（P1，人工约 4 天 / AI 约 4 小时）— macOS UX — 原生圆环、详情、菜单栏和提醒**
+  - 来源：CEO-T4、DESIGN-T1..T4。
+  - 文件：`macos/CodexUsageWidget/UI/*`、Resources、`macos/CodexUsageWidgetUITests/*`、最小 `DESIGN.md`。
+  - 验证：SwiftUI/AppKit UI 测试、VoiceOver、Reduce Motion、通知授权/拒绝/点击、五语言八主题、屏幕热插拔和真实双显示器。
+- [ ] **ENG-T8（P1，人工约 2 天 + 外部等待 / AI 约 1 小时）— 候选 — 签名、公证与真实设备 gate**
+  - 来源：发现 9、CEO-T5。
+  - 文件：受保护 release workflow、codesign/notary/staple 脚本、候选清单。
+  - 验证：精确 commit 上 Windows/Universal Mac 候选全绿；Developer ID、notary、Gatekeeper、Apple Silicon、Rosetta、双显示器通过。账号/证书缺失时保持 BLOCKED，不创建 tag。
+- [ ] **ENG-T9（P1，人工约 1 天 / AI 约 1 小时）— 发布 — 文档、资产与不可变 v1.1.0**
+  - 来源：CEO-T6、发现 4/9。
+  - 文件：双语 README、`CHANGELOG.md`、release notes、截图和 GitHub Release 元数据。
+  - 验证：从已验证 SHA 创建 tag；核对 tag target；创建草稿；上传 Windows EXE/ZIP、macOS DMG 及 hashes；重下验证后公开。源码由同一 tag 的 GitHub source archives 提供。
+
+### 精确发布与回滚顺序
+
+1. 在干净工作树锁定候选 commit SHA 和 `v1.1.0` 功能版本。
+2. 从该 SHA 构建无密钥候选，运行共同契约、平台测试、隐私与架构检查。
+3. 受保护环境从同一 SHA 重建/签名；Mac 完成 notarize、staple、Gatekeeper；真实 Apple Silicon、Rosetta 和双显示器签核。
+4. 所有 gate 通过后才创建不可变 annotated tag `v1.1.0`，并验证 tag peeled target 等于候选 SHA。
+5. 从该 tag 创建 GitHub **draft** release，上传 EXE、ZIP、DMG 与校验文件。
+6. 从 GitHub 重下全部资产，验证文件名、大小、SHA、Windows 启动、Mac 签名/票据和版本一致。
+7. 只有重下验证成功才公开；源码使用同一 tag 的自动 source archives，不另造不同版本源码包。
+8. 草稿阶段失败：删除失败候选并从新 commit 重走，不移动既有 tag。若 tag 已建但 release 未公开且代码需改，使用新版本号，不强推/移动 tag。
+9. 公开后严重缺陷：下线受影响二进制，把 v1.0.0 恢复为 README 推荐下载，保留 v1.1.0 tag 与审计记录，修复发布 v1.1.1。
+
+### NOT in scope（工程）
+
+- 不引入共享跨平台 runtime、数据库、后台服务、遥测或账号层。
+- 不建立 Swift framework/Package、插件系统、通用 installer framework 或自动更新器。
+- 不为网络文件系统承诺内核级即时取消；只承诺 UI 预算、可信陈旧状态和 worker 可恢复。
+- 不在 v1.1.0 加 Homebrew Cask 或 Windows Authenticode；已分别由稳定发布和证书可用性约束，保留在 `TODOS.md`。
+- 不把 Apple Developer 账号、身份验证或购买证书当作可由代码自动完成的事项。
+
+### 工程审查完成摘要
+
+| 项目 | 结果 |
+|---|---|
+| 模式 | FULL_REVIEW |
+| 独立声音 | 工程代理完成；Codex CLI 因访问受限不可用 |
+| 发现 | 9 个 P1、0 个 P0；全部折入计划 |
+| 关键根因 | 持久化、扫描、worker 三个共享边界缺少失败状态 |
+| 数据契约 | Int64/UTC/舍入/null/排序/schema v1 已冻结 |
+| Mac 拓扑 | 1 app target + 1 unit test target + 1 UI test target |
+| 性能 | 10,000 项/60 文件/1 MiB/10 秒硬边界与恢复测试 |
+| 测试 | 13 类能力覆盖 U/I/UI/E2E，无关键静默路径 |
+| 实施 | 9 个权威任务、4 条 lane、共享文件单 owner |
+| 发布 | 精确 SHA -> 全 gate -> immutable tag -> draft -> redownload -> public |
+| 新 TODO | 0；证书和 Homebrew 已在现有 `TODOS.md` |
+| 未解决决策 | 0 |
+
+### Engineering Decision Audit Trail
+
+| 决策 | 自动选择 | 未选项 | 原则 |
+|---|---|---|---|
+| 损坏本地状态 | 原字节只读 + 显式重置 | 静默覆盖、自动修复原文件 | 防数据丢失不能偷懒。 |
+| 解析结果 | 带计数的统一分类 | 每个 UI 调用方猜测 null | 一个根因位置比多处分支更小。 |
+| 刷新范围 | 固定候选/尾读/时间预算 | 全历史排序、SQLite 索引 | 先用标准文件 API 的有界扫描。 |
+| 网络盘 | 保留并准确披露 | 移除 UNC、继续承诺绝不联网 | 兼容既有路径，纠正承诺而非删功能。 |
+| Mac 组织 | 单 app target + 测试 targets | 独立 core framework、共享 runtime | YAGNI；没有第二消费者。 |
+| 跨平台数值 | 十进制字符串 Int64 + reviewed fixture | JSON 浮点、平台各自格式 | 消除 `2^53` 与舍入漂移。 |
+| 发布 tag | 所有 gate 后创建且不可变 | 先打 tag 再修、移动 tag | 可审计和可回滚。 |
+
+**Phase 3 complete.** 独立工程审查提出 9 个 P1；Codex CLI 不可用。所有问题已转成冻结契约、硬边界、测试或发布 gate，下一阶段只审查贡献者与维护者的开发体验。
