@@ -1109,15 +1109,78 @@ macos/
 | 完整/部分/未知/全坏/空分类 | ✓ | 损坏 JSONL 与锁定文件 | 六状态摘要 | 两端首次真实扫描 |
 | invalid 持久化保字节、显式重置 | ✓ | 三文件 byte-identical + 原子替换 | 恢复入口 | 重启后状态保持 |
 | 链接/路径越界 | ✓ | Windows junction / macOS symlink | 错误动作 | 候选包手选目录 |
-| 10 秒预算与 worker 恢复 | 固定时钟 | 大目录、1 MiB 索引、60 文件、慢/锁定文件、超限/截断结果 | 陈旧环且 UI 可操作 | 精确子 PID 被回收；三状态文件不变；17 秒后下一刷新成功 |
+| 10 秒预算与 worker 恢复 | 固定时钟 | 大目录、1 MiB 索引、60 文件、慢/锁定文件、超限/截断结果、退出与 deadline 同刻竞态 | 陈旧环且 UI 可操作 | 只通过原始进程句柄结束一次；无误杀；三状态文件不变；17 秒后下一刷新成功 |
 | 圆环窗口选择与状态样式 | ✓ | 共同 snapshot -> view state | 截图 + a11y 值 | Windows/Mac 实机 |
 | hover/click/drag/focus/吸附 | 几何/状态机 | 虚拟屏幕矩形 | 180/250 ms、4 点、Esc、热插拔 | 双显示器手工签核 |
 | 五语言/八主题/最长文案 | key/placeholder/font width | 资源加载回退 | 五语言截图、VoiceOver | 两平台候选 |
 | 提醒权限/去重/点击 | 固定时钟/周期 | restart + `reminders.json` | 拒绝、启用、点击、过期 | 真机通知 |
-| Windows EXE 校验/并发/中断 | 清单自检 | 双进程首次启动、损坏载荷 | 无 cmd、可见错误 | 下载 EXE 启动 |
+| Windows EXE 校验/并发/中断 | 清单自检 | 双进程首次启动、损坏载荷、落位时终止 | 无 cmd、可见错误 | 下载 EXE 启动；内嵌 ZIP SHA 等于公开 ZIP SHA |
 | Mac Universal/签名/公证 | 架构检查 | codesign/notary/staple | Gatekeeper 首启 | Apple Silicon + Rosetta |
 | 发布 tag/草稿/重下/回滚 | workflow lint | SHA/ref mismatch、上传中断 | Release 页面资产 | 三资产下载哈希 |
 | 最小启动错误 | 内置资源测试 | 损坏 bootstrap/英语包缺失 | 不依赖外部包的双语错误 | 候选破坏测试 |
+
+### 测试覆盖执行图
+
+```text
+CODE PATHS / OWNERS                                  USER + RELEASE FLOWS
+[+] P0 VERSION / contract / resources                [+] Fresh clone + deterministic demo
+  ├── [GAP][★★★ REQUIRED] version/ref/assets一致       ├── [GAP][→E2E] Windows demo 不碰真实状态
+  ├── [GAP][★★★ REQUIRED] Int64/UTC/rounding/schema    └── [GAP][→E2E] Mac demo 不碰真实状态
+  ├── [★★★ EXISTING→EXTEND] 五语言 trust boundary
+  └── [★★★ EXISTING→EXTEND] 八主题 -> theme contract
+
+[+] P1 CodexUsageWidget.ps1                          [+] Windows 日常刷新
+  ├── [★★★ EXISTING→EXTEND] parser/token/window        ├── [GAP][→E2E] 首次自动发现 -> 圆环 -> 详情
+  ├── [GAP][★★★ REQUIRED] complete/partial/...六分类   ├── [GAP][→E2E] 10s stale -> 下一轮恢复
+  ├── [GAP][★★★ REQUIRED] -ScanWorker 静默且只读       └── [GAP][→E2E] 手选目录 -> 重启仍有效
+  ├── [GAP][★★★ REQUIRED] 截断/超限/坏 schema 全拒绝
+  ├── [GAP][★★★ REQUIRED] deadline/自然退出竞态只收口一次
+  ├── [★★★ EXISTING→REGRESSION] invalid 三文件保字节
+  └── [GAP][★★★ REQUIRED] junction 越根零访问
+
+[+] P2 Windows bootstrap                             [+] Windows 分发切换
+  ├── [GAP][★★★ REQUIRED] allowlist/hash/path/case      ├── [GAP][→E2E] EXE 首启/复用/修复
+  ├── [GAP][★★★ REQUIRED] 并发锁 + 中止保留旧版         ├── [★★★ EXISTING→REGRESSION] ZIP 隐藏启动
+  ├── [GAP][★★★ REQUIRED] embedded ZIP == public ZIP    └── [GAP][→E2E] ZIP <-> EXE 共用用户状态
+  ├── [★★★ EXISTING→EXTEND] 无 cmd/conhost
+  └── [GAP][★★★ REQUIRED] launcher/CIM fixture 总预算
+
+[+] P3 macOS Core                                    [+] Mac 首次与恢复
+  ├── [GAP][★★★ REQUIRED] same contract snapshots      ├── [GAP][→E2E] DMG -> Gatekeeper -> 自动发现
+  ├── [GAP][★★★ REQUIRED] non-sandbox/TCC states        ├── [GAP][→E2E] 手选目录/拒绝/再次选择
+  ├── [GAP][★★★ REQUIRED] --scan-worker 静默且只读      └── [GAP][→E2E] timeout -> stale -> recovery
+  ├── [GAP][★★★ REQUIRED] timeout/exit race
+  ├── [GAP][★★★ REQUIRED] persistence monotonic/invalid
+  └── [GAP][★★★ REQUIRED] symlink containment
+
+[+] P5/P6 native UI                                  [+] 跨平台一致体验
+  ├── [★★★ EXISTING WIN→EXTEND MAC] 六状态/详情          ├── [GAP][→E2E] hover/click/drag/Esc/focus
+  ├── [★★★ EXISTING WIN→EXTEND MAC] 五语言八主题          ├── [GAP][→E2E] VoiceOver/Reduce Motion
+  ├── [GAP][★★★ REQUIRED] notification permission      └── [GAP][→E2E] 双屏/热插拔/吸附
+  └── [GAP][★★★ REQUIRED] longest-font screenshots
+
+[+] P8-P10 candidate + release                       [+] 不可变发布
+  ├── [★★★ EXISTING→EXTEND] privacy/exact inventory     ├── [GAP][→E2E] sign/notary/staple/download
+  ├── [GAP][★★★ REQUIRED] no-secret fork PR            ├── [GAP][→E2E] tag peeled SHA + 6 assets
+  └── [GAP][★★★ REQUIRED] signed entitlements          └── [GAP][→E2E] rollback keeps user data
+
+CURRENT: v1.1.0 新路径 0/25 已实现；7 个现有 Windows 回归锚点已定位。
+RELEASE GATE: 上述 32/32 分组路径必须有自动证据或明确标注的真实 E2E 签核。
+QUALITY: 所有 REQUIRED 为 ★★★（正常 + 边界 + 错误）；无 LLM 变更，无 [→EVAL]。
+```
+
+图例：`★★★` 行为、边界和错误路径；`EXISTING→EXTEND` 保留现有回归并扩展；`→E2E` 需要真实平台/候选集成，不能只用 mock 替代。
+
+QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-test-plan.md`](../plans/2026-08-11-cross-platform-v1.1.0-test-plan.md)。它只描述用户表面、交互、边界和关键旅程；实现细节仍由本设计的任务与契约负责。
+
+### 强制回归要求
+
+1. **CRITICAL — Windows 行为不因 worker 隔离退化。** 删除旧 Runspace 业务函数复制后，现有解析、累计缓存、五语言八主题、详情渲染和 VBS/CMD 无终端断言必须继续通过；旧断言只在语义已由新契约明确替代时更新。
+2. **CRITICAL — 超时竞态不得误杀。** 测试用可控子进程让自然退出与 10 秒 deadline 同刻发生；父进程只基于启动时持有的 `Process`/进程句柄完成一次 terminal transition，不按裸 PID 重新查找，不影响旁路哨兵进程。
+3. **CRITICAL — worker 模式无副作用。** 两端直接运行 scan-worker 的成功、空、错误和超时路径，均不得创建窗口、托盘/菜单栏、通知、偏好、账本或提醒文件；结果之外 stdout/stderr 不泄露路径或会话内容。
+4. **CRITICAL — 账本提交与展示一致。** 子进程成功但父进程结果校验或账本原子替换失败时，磁盘旧值不降、UI 明确显示持久化失败/陈旧，重启不得把未落盘内存值伪装成已保存累计值。
+5. **CRITICAL — 两种 Windows 资产同源。** 构建后提取或查询 EXE 的内嵌载荷摘要，必须逐字节等于同一候选公开 ZIP；两者解出的运行清单和文件 SHA 完全一致。
+6. **CRITICAL — 测试夹具本身有界。** `Test-Launcher.ps1` 的进程启动、probe 等待、CIM/WMI 查询和清理共享一个固定总预算；查询不可用或超时时必须给稳定环境阶段码、非零退出，并只终止/删除本轮精确 probe 与临时目录。CI 外层保留更大的兜底 timeout，但不能代替夹具内部边界。
 
 所有新增非平凡分支至少落一个能在错误选择时失败的最小检查。业务数值由纯测试承担；真实 UI 自动化只验证平台集成、视觉和辅助功能，避免脆弱重复断言。
 
@@ -1170,15 +1233,15 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T2（P1，人工约 2 天 / AI 约 2 小时）— Windows 数据边界 — 修复分类、持久化、路径与预算根因**
   - 来源：发现 1/2/3/5。
   - 文件：`CodexUsageWidget.ps1`、`-SelfTest` 内最小断言。
-  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 的结果上限/协议校验；大目录/锁定文件超时后精确子 PID 回收、三状态文件不变且下一 tick 恢复；junction 越界访问为 0。
+  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 的结果上限、静默/无副作用和协议校验；大目录/锁定文件超时及自然退出竞态只经原始进程句柄收口一次、无误杀、三状态文件不变且下一 tick 恢复；junction 越界访问为 0。
 - [ ] **ENG-T3（P1，人工约 2 天 / AI 约 2 小时）— Windows 分发 — 最小单文件 EXE 引导**
   - 来源：CEO-T2、并发/信任边界。
   - 文件：单一 C# 引导源码、一个构建入口、现有 release checker/launcher fixture。
-  - 验证：首次、重复、并发、损坏、终止、无 cmd、固定清单/SHA/大小和旧版保留。
+  - 验证：首次、重复、并发、损坏、终止、无 cmd、固定清单/SHA/大小和旧版保留；EXE 内嵌 ZIP 与公开 ZIP 字节及解压文件 SHA 完全一致；launcher 的 probe/CIM/WMI/cleanup 使用内部固定总预算，环境失败在预算内非零退出。
 - [ ] **ENG-T4（P1，人工约 4 天 / AI 约 4 小时）— macOS Core — 建立一个 app target 的解析与本地状态**
   - 来源：发现 5/6/7、CEO-T3。
   - 文件：`macos/CodexUsageWidget/Core/*`、`macos/CodexUsageWidgetTests/*`。
-  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 的只读/超时回收与单调账本；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
+  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 的静默/只读/无副作用、输出拒绝、超时与自然退出竞态回收和单调账本；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
 - [ ] **ENG-T5（P1，人工约 1 天 / AI 约 1 小时）— CI — 建立无密钥双平台构建**
   - 来源：发现 8/9、CEO-T5。
   - 文件：`.github/workflows/*`、版本/资产清单验证。
@@ -1592,14 +1655,14 @@ P0 VERSION + schema v1 + 匿名 fixtures + expected ----------------------------
 | 阶段 | 前置 | 唯一 owner 与文件 | 交付结果 | 完成门槛 |
 |---|---|---|---|---|
 | **P0 契约、版本与语言资源** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、`theme-catalog.json`、`locales/*.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义；八主题目录；五语言键与占位符固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端原生主题目录逐项匹配；五包键集/格式/长度全绿；两端 runner 后续逐字节相等 |
-| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；只读隔离扫描进程；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；invalid 三文件原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；10 秒后精确子 PID 回收且下一 tick 恢复 |
-| **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
-| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、精确子进程超时回收和单调账本全绿；没有第三方依赖或 helper target |
+| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；只读隔离扫描进程；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；worker 静默且无副作用；invalid 三文件原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；deadline/自然退出竞态无误杀且下一 tick 恢复 |
+| **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；内嵌 ZIP 与公开 ZIP 字节/解压 SHA 一致；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
+| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、worker 静默无副作用、deadline/自然退出竞态无误杀和单调账本全绿；没有第三方依赖或 helper target |
 | **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret；Mac bundle 直接打包根语言文件；平台使用原生验证入口 | Windows 自检/PowerShell 检查器/EXE 与 Mac xcodebuild/lipo/bundle tests 全绿；Mac job 不依赖 PowerShell；包内五语言 SHA 与根文件一致；日志无私有路径、session 或密钥 |
 | **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、Windows UI 回归；根语言包与主题契约只读 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | Windows 原生主题目录逐项匹配 P0；五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
 | **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Mac 专属 Resources、根语言包只读引用、UI-test target、`DESIGN.md`；主题契约只读 | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | Mac 原生主题目录逐项匹配 P0；App bundle 五语言 SHA 与根文件一致；VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
 | **P7 文档、本地化与截图** | P5、P6 | Docs owner：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README、CHANGELOG、`docs/releases/v1.1.0.md`、发布截图 | 单一贡献入口、源码地图、平台资产表、升级/回滚、脱敏反馈格式、维护者 runbook | Windows-only、Mac-only、无证书维护者分别按文档完成允许路径；链接/命令/五语言键和字体宽度检查通过 |
-| **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单 | 同一 commit 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 共同契约、架构、隐私、哈希、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
+| **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单、QA 测试计划 | 同一 commit 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 测试覆盖图 32/32 有自动证据或明确 E2E gate；共同契约、内嵌/公开 ZIP 同源、架构、隐私、哈希、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
 | **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | `codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；自动发现、拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
 | **P10 不可变发布** | P9 | Release maintainer + docs owner | annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | tag peeled SHA 等于候选；上传后全部重下验证；最后才公开；工作树、Release 与 README 指向一致 |
 
