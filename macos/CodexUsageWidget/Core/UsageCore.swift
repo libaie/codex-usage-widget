@@ -177,6 +177,22 @@ private struct ParsedWindow {
     var observedAt: Int64
 }
 
+private struct ParsedTokenDetails {
+    let cumulativeTokens: Int64?
+    let cacheHitTokens: Int64?
+    let cacheMissTokens: Int64?
+    let contextTokens: Int64?
+    let contextLimit: Int64?
+    let inputTokens: Int64?
+    let outputTokens: Int64?
+    let reasoningTokens: Int64?
+
+    var rank: Int64 {
+        if let cacheHitTokens, let cacheMissTokens { return cacheHitTokens + cacheMissTokens }
+        return cumulativeTokens ?? -1
+    }
+}
+
 enum UsageContract {
     static func evaluate(fileURL: URL, now: Date) throws -> NormalizedUsageState {
         var metrics = ScanMetrics()
@@ -190,7 +206,8 @@ enum UsageContract {
         var cumulativeTokens: Int64?
         var cacheHitTokens: Int64?
         var cacheMissTokens: Int64?
-        var detailsTimestamp = Int64.min
+        var tokenTimestamp = Int64.min
+        var tokenRank: Int64?
         var contextTokens: Int64?
         var contextLimit: Int64?
         var lastInput: Int64?
@@ -225,17 +242,15 @@ enum UsageContract {
         let hasCodexLimit = candidates.contains {
             ($0.limits["limit_id"] as? String) == "codex" && !$0.windows.isEmpty
         }
-        for candidate in candidates {
+        let selectedCandidates = candidates.filter { candidate in
             let rawLimitID = candidate.limits["limit_id"]
             if hasCodexLimit {
-                guard (rawLimitID as? String) == "codex" else { continue }
+                return (rawLimitID as? String) == "codex" && !candidate.windows.isEmpty
             } else {
-                guard rawLimitID == nil || rawLimitID is NSNull else { continue }
+                return (rawLimitID == nil || rawLimitID is NSNull) && !candidate.windows.isEmpty
             }
-            guard !candidate.windows.isEmpty else { continue }
-            let payload = candidate.payload
-            let timestamp = candidate.windows[0].observedAt
-
+        }
+        for candidate in selectedCandidates {
             for parsed in candidate.windows {
                 let name = parsed.name
                 if let previous = windows[name] {
@@ -250,43 +265,31 @@ enum UsageContract {
                     windows[name] = parsed
                 }
             }
+        }
 
-            guard let info = payload["info"] as? [String: Any] else { continue }
-            if let total = info["total_token_usage"] as? [String: Any] {
-                let totalTokens = token(total, "total_tokens")
-                if totalTokens.present {
-                    guard let value = totalTokens.value else { dataIssue = true; continue }
-                    cumulativeTokens = max(cumulativeTokens ?? value, value)
-                }
-                let input = token(total, "input_tokens")
-                let cached = token(total, "cached_input_tokens")
-                if input.present && input.value == nil { dataIssue = true }
-                if cached.present && cached.value == nil { dataIssue = true }
-                if let value = cached.value { cacheHitTokens = max(cacheHitTokens ?? value, value) }
-                if let inputValue = input.value, let cacheValue = cached.value {
-                    if inputValue >= cacheValue {
-                        let miss = inputValue - cacheValue
-                        cacheMissTokens = max(cacheMissTokens ?? miss, miss)
-                    } else {
-                        dataIssue = true
-                    }
-                }
-            }
+        var currentCandidateIndices = Set<Int>()
+        for (index, candidate) in selectedCandidates.enumerated() where candidate.windows.contains(where: {
+            windows[$0.name]?.resetAt == $0.resetAt
+        }) {
+            currentCandidateIndices.insert(index)
+        }
 
-            if let last = info["last_token_usage"] as? [String: Any], timestamp >= detailsTimestamp {
-                detailsTimestamp = timestamp
-                let total = token(last, "total_tokens")
-                let input = token(last, "input_tokens")
-                let output = token(last, "output_tokens")
-                let reasoning = token(last, "reasoning_output_tokens")
-                for value in [total, input, output, reasoning] where value.present && value.value == nil { dataIssue = true }
-                contextTokens = total.value
-                lastInput = input.value
-                lastOutput = output.value
-                lastReasoning = reasoning.value
-                let limit = token(info, "model_context_window")
-                if limit.present && limit.value == nil { dataIssue = true }
-                contextLimit = limit.value
+        for (index, candidate) in selectedCandidates.enumerated() {
+            let parsed = parsedTokenDetails(candidate.payload)
+            if parsed.invalid { dataIssue = true }
+            guard currentCandidateIndices.contains(index), let details = parsed.details else { continue }
+            let timestamp = candidate.windows[0].observedAt
+            if tokenRank == nil || details.rank > tokenRank! || (details.rank == tokenRank! && timestamp > tokenTimestamp) {
+                tokenRank = details.rank
+                tokenTimestamp = timestamp
+                cumulativeTokens = details.cumulativeTokens
+                cacheHitTokens = details.cacheHitTokens
+                cacheMissTokens = details.cacheMissTokens
+                contextTokens = details.contextTokens
+                contextLimit = details.contextLimit
+                lastInput = details.inputTokens
+                lastOutput = details.outputTokens
+                lastReasoning = details.reasoningTokens
             }
         }
 
@@ -345,6 +348,48 @@ enum UsageContract {
     private static func token(_ object: [String: Any], _ key: String) -> (present: Bool, value: Int64?) {
         guard let raw = object[key] else { return (false, nil) }
         return (true, integer(raw))
+    }
+
+    private static func parsedTokenDetails(_ payload: [String: Any]) -> (details: ParsedTokenDetails?, invalid: Bool) {
+        guard let info = payload["info"] as? [String: Any] else { return (nil, false) }
+        var invalid = false
+        func read(_ object: [String: Any], _ key: String) -> Int64? {
+            let parsed = token(object, key)
+            if parsed.present && parsed.value == nil { invalid = true }
+            return parsed.value
+        }
+
+        let total = info["total_token_usage"] as? [String: Any]
+        let cumulative = total.flatMap { read($0, "total_tokens") }
+        let input = total.flatMap { read($0, "input_tokens") }
+        let cached = total.flatMap { read($0, "cached_input_tokens") }
+        var cacheHit: Int64?
+        var cacheMiss: Int64?
+        if let input, let cached {
+            if input >= cached {
+                cacheHit = cached
+                cacheMiss = input - cached
+            } else { invalid = true }
+        }
+
+        let last = info["last_token_usage"] as? [String: Any]
+        let context = last.flatMap { read($0, "total_tokens") }
+        let lastInput = last.flatMap { read($0, "input_tokens") }
+        let lastOutput = last.flatMap { read($0, "output_tokens") }
+        let reasoning = last.flatMap { read($0, "reasoning_output_tokens") }
+        let contextLimit = last == nil ? nil : read(info, "model_context_window")
+        let details = ParsedTokenDetails(
+            cumulativeTokens: cumulative,
+            cacheHitTokens: cacheHit,
+            cacheMissTokens: cacheMiss,
+            contextTokens: context,
+            contextLimit: contextLimit,
+            inputTokens: lastInput,
+            outputTokens: lastOutput,
+            reasoningTokens: reasoning
+        )
+        let hasValue = [cumulative, cacheHit, cacheMiss, context, contextLimit, lastInput, lastOutput, reasoning].contains { $0 != nil }
+        return (hasValue ? details : nil, invalid)
     }
 
     private static func parsedWindow(

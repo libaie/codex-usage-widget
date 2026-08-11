@@ -170,7 +170,7 @@ final class CoreTests: XCTestCase {
         var ledger = CacheLedger.defaultValue
         let firstTotals = try XCTUnwrap(ledger.merge(result.sessions))
         XCTAssertEqual(firstTotals.hitTokens, 9_007_199_254_741_000)
-        XCTAssertEqual(firstTotals.missTokens, 1_093)
+        XCTAssertEqual(firstTotals.missTokens, 993)
         let regressed = result.sessions.map {
             SessionTokenSnapshot(id: $0.id, cacheHitTokens: "1", cacheMissTokens: "1")
         }
