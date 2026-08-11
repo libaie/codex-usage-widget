@@ -218,7 +218,13 @@ enum UsageContract {
             candidates.append((event, payload, limits))
         }
 
-        let hasCodexLimit = candidates.contains { ($0.limits["limit_id"] as? String) == "codex" }
+        let hasCodexLimit = candidates.contains { candidate in
+            guard (candidate.limits["limit_id"] as? String) == "codex" else { return false }
+            let timestamp = (candidate.event["timestamp"] as? String).flatMap(timestampMilliseconds)
+            return [("primary", true), ("secondary", false)].contains {
+                parsedWindow(candidate.limits[$0.0], name: $0.0, primary: $0.1, timestamp: timestamp).window != nil
+            }
+        }
         for candidate in candidates {
             let rawLimitID = candidate.limits["limit_id"]
             if hasCodexLimit {
@@ -233,33 +239,9 @@ enum UsageContract {
             if timestamp == nil { dataIssue = true }
 
             for (name, primary) in [("primary", true), ("secondary", false)] {
-                guard let raw = limits[name], !(raw is NSNull) else { continue }
-                guard
-                    let window = raw as? [String: Any],
-                    let used = decimal(window["used_percent"]),
-                    used >= 0, used <= 100,
-                    let resetSeconds = integer(window["resets_at"]),
-                    let observed = timestamp
-                else {
-                    dataIssue = true
-                    continue
-                }
-                let reset = resetSeconds.multipliedReportingOverflow(by: 1000)
-                guard !reset.overflow else { dataIssue = true; continue }
-                var windowMinutes: Int64?
-                if let rawMinutes = window["window_minutes"] {
-                    guard let minutes = integer(rawMinutes) else { dataIssue = true; continue }
-                    windowMinutes = minutes
-                }
-                let parsed = ParsedWindow(
-                    name: name,
-                    primary: primary,
-                    used: used,
-                    remaining: 100 - used,
-                    resetAt: reset.partialValue,
-                    windowMinutes: windowMinutes,
-                    observedAt: observed
-                )
+                let result = parsedWindow(limits[name], name: name, primary: primary, timestamp: timestamp)
+                if result.invalid { dataIssue = true }
+                guard let parsed = result.window else { continue }
                 if let previous = windows[name] {
                     if parsed.resetAt == previous.resetAt {
                         var retained = parsed.used > previous.used ? parsed : previous
@@ -332,9 +314,13 @@ enum UsageContract {
         let selected = active.first
         let classification: UsageClassification
         let hasIssue = dataIssue || metrics.malformedLineCount > 0 || metrics.unknownEventCount > 0 || metrics.readFailureCount > 0
-        if metrics.validEventCount == 0 {
-            if metrics.unknownEventCount > 0 { classification = .unsupported }
-            else if metrics.malformedLineCount > 0 || metrics.readFailureCount > 0 { classification = .error }
+        if windows.isEmpty {
+            if metrics.unknownEventCount > 0 && metrics.malformedLineCount == 0 && metrics.readFailureCount == 0 {
+                classification = .unsupported
+            }
+            else if metrics.validEventCount > 0 || metrics.malformedLineCount > 0 || metrics.readFailureCount > 0 || dataIssue {
+                classification = .error
+            }
             else { classification = .empty }
         } else {
             classification = hasIssue ? .partial : .complete
@@ -363,6 +349,37 @@ enum UsageContract {
     private static func token(_ object: [String: Any], _ key: String) -> (present: Bool, value: Int64?) {
         guard let raw = object[key] else { return (false, nil) }
         return (true, integer(raw))
+    }
+
+    private static func parsedWindow(
+        _ raw: Any?,
+        name: String,
+        primary: Bool,
+        timestamp: Int64?
+    ) -> (window: ParsedWindow?, invalid: Bool) {
+        guard let raw, !(raw is NSNull) else { return (nil, false) }
+        guard
+            let value = raw as? [String: Any],
+            let used = decimal(value["used_percent"]), used >= 0, used <= 100,
+            let resetSeconds = integer(value["resets_at"]),
+            let observed = timestamp
+        else { return (nil, true) }
+        let reset = resetSeconds.multipliedReportingOverflow(by: 1000)
+        guard !reset.overflow else { return (nil, true) }
+        var windowMinutes: Int64?
+        if let rawMinutes = value["window_minutes"] {
+            guard let minutes = integer(rawMinutes) else { return (nil, true) }
+            windowMinutes = minutes
+        }
+        return (ParsedWindow(
+            name: name,
+            primary: primary,
+            used: used,
+            remaining: 100 - used,
+            resetAt: reset.partialValue,
+            windowMinutes: windowMinutes,
+            observedAt: observed
+        ), false)
     }
 
     private static func rateLimits(in event: [String: Any]) -> [String: Any]? {
