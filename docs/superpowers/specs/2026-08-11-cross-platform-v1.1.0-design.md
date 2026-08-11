@@ -68,7 +68,7 @@ EXE 只管理 `app` 子目录下的程序文件，不修改现有的 `preference
 
 ### 技术选型
 
-macOS 使用 Swift、SwiftUI 与少量 AppKit 原生实现，不依赖 PowerShell 或第三方 UI 框架。部署目标为 macOS 13，正式构建同时包含 `arm64` 和 `x86_64`。
+macOS 使用 Swift、SwiftUI 与少量 AppKit 原生实现，不依赖 PowerShell 或第三方 UI 框架。部署目标为 macOS 13，正式构建同时包含 `arm64` 和 `x86_64`。发行渠道是 Developer ID 直接下载，不是 Mac App Store；构建固定 `ENABLE_APP_SANDBOX=NO`、`ENABLE_HARDENED_RUNTIME=YES`，不得继承 Xcode 新项目默认的 App Sandbox entitlement。
 
 SwiftUI 负责圆环、详情卡、主题与常规视图；AppKit 负责无边框悬浮窗口、屏幕坐标、多显示器吸附、菜单栏项目、鼠标悬停与必要的窗口层级控制。
 
@@ -96,7 +96,7 @@ macOS 的 Codex 数据目录按以下顺序解析：
 3. 当前用户的 `~/.codex`；
 4. 前三项均不可用时，由用户手动选择包含 `sessions` 的目录。
 
-取消选择不会触发循环弹窗，后续刷新仍会检查默认位置。
+取消选择不会触发循环弹窗，后续刷新仍会检查默认位置。非沙盒仅表示允许按当前用户的文件权限读取，不绕过 POSIX/ACL/TCC；任何拒绝都进入明确的无权限状态并提供重新选择。
 
 应用自身文件存放在 `~/Library/Application Support/CodexUsageWidget`：
 
@@ -142,7 +142,7 @@ Windows 自检和 macOS 测试必须对同一批样本生成相同的规范化�
 - 两个平台均不调用 Web API、不做遥测、不要求账号登录，也不上传数据；若用户手动选择网络文件系统，操作系统仍会执行对应文件 I/O。
 - 数据读取限定在解析出的 Codex 数据目录；手动目录必须包含预期的 `sessions` 结构。
 - Windows EXE 对内嵌 ZIP 执行严格路径与文件清单验证，并使用版本化、先临时后落位的释放流程。
-- macOS 直接分发版本启用 Hardened Runtime，使用 Developer ID Application 签名并提交 Apple 公证。
+- macOS 直接分发版本明确禁用 App Sandbox、启用 Hardened Runtime，使用 Developer ID Application 签名并提交 Apple 公证；自动检查签名 entitlements 中不存在 `com.apple.security.app-sandbox=true`。
 - 证书私钥只允许存在于开发者的 macOS 钥匙串或 GitHub 加密密钥中，不写入仓库、日志、构建产物或聊天内容。
 - GitHub Actions 不向来自不受信任分支或外部拉取请求暴露签名密钥。
 
@@ -191,6 +191,7 @@ Apple Developer Program 的实名、双重认证、协议和付款必须由账�
 
 - Swift 单元测试和共同样本对比通过。
 - Intel 与 Apple 芯片架构均存在于应用二进制中。
+- 构建设置和最终签名均证明 Hardened Runtime 已启用且 App Sandbox 未启用；自动发现 `~/.codex` 与手选目录均通过。
 - 多显示器拖拽吸附、悬停详情、菜单栏、主题、语言和键盘辅助功能通过实际 macOS 界面回归。
 - 五种语言截图无裁切、乱码或空标签。
 - `codesign --verify`、`spctl --assess`、公证日志和票据验证全部通过。
@@ -1016,7 +1017,12 @@ fixtures/contract/v1/schema.md + anonymized inputs + reviewed expected-state.jso
                |                              |
                v                              v
 Windows PowerShell core                 macOS CodexUsageWidget app target
-  parser/state/persistence                Core/ parser/state/persistence
+  host state/persistence                  Core/ host state/persistence
+               |                              |
+               v                              v
+ hidden read-only scan process          same executable --scan-worker
+               |                              |
+               +---- bounded schema v1 result+
                |                              |
                v                              v
 Windows WPF UI                         UI/ SwiftUI + AppKit window controller
@@ -1033,6 +1039,10 @@ C# single-file bootstrap                Xcode build -> Universal .app -> DMG
                  immutable v1.1.0 + draft assets
 ```
 
+刷新使用进程隔离而不是尝试强制取消进程内文件 I/O。Windows 每次刷新启动隐藏的 Windows PowerShell `-ScanWorker` 子进程；macOS 由同一个应用可执行文件在 `--scan-worker` 模式运行，不新增 helper target。主进程保留现有平台 UI 与生命周期控制，只有子进程访问 Codex 数据目录。
+
+扫描子进程严格只读，不得写偏好、累计账本或 `reminders.json`。它只输出 schema v1 的规范化快照与逐会话令牌计数；主进程在校验退出码、结果大小（最大 256 KiB）、schema 和字段边界后，才更新内存状态并作为唯一 writer 原子保存累计账本与提醒。数据目录与结果通道通过子进程环境/私有临时目录传递，不进入命令行或日志；每轮只创建一个精确临时目录，成功、失败和超时都只清理本轮目录。
+
 Mac 工程保持最小：
 
 ```text
@@ -1047,7 +1057,7 @@ macos/
   CodexUsageWidgetUITests/
 ```
 
-不创建 Swift Package、framework target、repository layer、DI container 或跨平台运行时。测试通过 `@testable import CodexUsageWidget` 访问 app module 内部类型。
+不创建 Swift Package、framework target、repository layer、DI container 或跨平台运行时。测试通过 `@testable import CodexUsageWidget` 访问 app module 内部类型。工程显式锁定非沙盒 Developer ID 构建；不创建安全作用域书签层或 App Store 变体。
 
 ### 信任边界与性能硬上限
 
@@ -1057,19 +1067,21 @@ macos/
 | 活动任务 | 最近 30 分钟且至多额外 30 个文件；总读取文件数不超过 60。 |
 | 单会话读取 | 尾部 256 KiB；只有最新候选在未找到有效限制事件时允许一次 1 MiB 重试。 |
 | 任务索引 | 只读最后 1 MiB；最多接受 10,000 行、任务名 500 字符。 |
-| 单次刷新 | 使用单调时钟预算 10 秒；逐步检查取消。到期立即把 UI 转为 stale/error，停止并重建 worker，下一 tick 不排队。 |
+| 单次刷新 | 使用单调时钟预算 10 秒；同一时刻只有一个只读扫描子进程。到期立即把 UI 转为 stale/error，精确终止并回收该 PID，下一 tick 创建新子进程且不排队。 |
+| 扫描结果 | 子进程结果最大 256 KiB；主进程校验退出码、schema、Int64 字符串、集合上限和稳定排序后才一次提交。无效、截断或超限结果按 `error`，不得更新账本或提醒。 |
 | UI 线程 | 不做目录/文件/JSON I/O；整份不可变 view state 一次提交，自动性能夹具目标小于一帧（16 ms）。 |
 | 正常夹具 | 30 个最大尾读文件的本地刷新 p95 < 2 秒；CI 记录耗时但不上传用户数据。 |
 | 链接 | Windows 拒绝会话根及后代 reparse point；macOS canonicalize 后要求候选仍在 canonical root 的路径组件边界内。 |
 | EXE 载荷 | 精确 allowlist、逐文件 SHA-256、总解压上限、拒绝绝对/父跳转/重复/大小写碰撞/链接；临时目录成功后原子落位。 |
 
-10 秒是用户可见刷新预算，不是假设所有内核 I/O 都可瞬间取消。实现必须在慢/锁定文件和网络路径夹具中证明：超时后 UI 可操作、旧快照仍在、下一周期能用新 worker 成功刷新，且不产生无界 worker 或句柄。
+10 秒是用户可见刷新预算，不是假设所有内核 I/O 都可瞬间取消。实现不等待被阻塞的文件调用协作取消，而是在预算到期时终止隔离的扫描子进程。慢/锁定文件和网络路径夹具必须证明：超时后 UI 可操作、旧快照仍在、用户三份状态文件逐字节不变、下一周期能用新子进程成功刷新，且不产生无界进程、临时目录或句柄。
 
 ### 并发、生命周期与恢复
 
 | 场景 | 规则 |
 |---|---|
 | 刷新 tick 重入 | 同一平台同一时刻只有一个 active scan；tick 合并，不排队。 |
+| 扫描超时或退出 | 主进程只终止本轮记录的精确子 PID，等待有界退出后清理本轮私有临时目录；扫描子进程无持久化权限，超时结果永不提交。 |
 | Windows EXE 同时首次启动 | 引导使用版本级命名锁；只有锁 owner 释放/校验，其他实例等待有界时间后复用完整版本。主程序继续使用现有应用 mutex。 |
 | EXE 释放中终止 | 只留下本次临时目录；下次清理同版本孤儿临时目录，旧完整版本不变。 |
 | 偏好写与退出竞争 | 复用原子写；退出只等待当前小文件写入，不等待新扫描。 |
@@ -1088,7 +1100,7 @@ macos/
 | 完整/部分/未知/全坏/空分类 | ✓ | 损坏 JSONL 与锁定文件 | 六状态摘要 | 两端首次真实扫描 |
 | invalid 持久化保字节、显式重置 | ✓ | 三文件 byte-identical + 原子替换 | 恢复入口 | 重启后状态保持 |
 | 链接/路径越界 | ✓ | Windows junction / macOS symlink | 错误动作 | 候选包手选目录 |
-| 10 秒预算与 worker 恢复 | 固定时钟 | 大目录、1 MiB 索引、60 文件、慢/锁定文件 | 陈旧环且 UI 可操作 | 17 秒后下一刷新成功 |
+| 10 秒预算与 worker 恢复 | 固定时钟 | 大目录、1 MiB 索引、60 文件、慢/锁定文件、超限/截断结果 | 陈旧环且 UI 可操作 | 精确子 PID 被回收；三状态文件不变；17 秒后下一刷新成功 |
 | 圆环窗口选择与状态样式 | ✓ | 共同 snapshot -> view state | 截图 + a11y 值 | Windows/Mac 实机 |
 | hover/click/drag/focus/吸附 | 几何/状态机 | 虚拟屏幕矩形 | 180/250 ms、4 点、Esc、热插拔 | 双显示器手工签核 |
 | 五语言/八主题/最长文案 | key/placeholder/font width | 资源加载回退 | 五语言截图、VoiceOver | 两平台候选 |
@@ -1107,7 +1119,8 @@ macos/
 | 偏好/账本/提醒加载 | JSON 损坏或字段越界 | 内存安全值 + 原文件写保护 + 显式重置 | 自动刷新/位置恢复后原文件逐字节相同。 |
 | 会话解析 | 单条坏、全坏、未知 schema | partial / error / unsupported 分开 | 三类输入不得都落到 empty。 |
 | 目录枚举 | 10,000 项或超过预算 | partial/stale，不扩大读取 | 大目录在预算后仍可操作且下次恢复。 |
-| 文件读取 | 锁定、慢网络卷、权限丢失 | 保留上次可信快照 | worker 可重建，无无界后台任务。 |
+| 文件读取 | 锁定、慢网络卷、权限丢失 | 终止只读扫描子进程并保留上次可信快照 | 精确 PID 被回收；用户状态不变；下一周期成功且无无界进程。 |
+| 扫描结果通道 | 截断、超 256 KiB、错误 schema、伪造字段 | 拒绝整份结果；不更新账本或提醒 | 每类坏结果都保持旧快照和三状态文件原字节。 |
 | 路径 | junction/symlink 越根 | 拒绝文件，绝不打开 | 越界目标访问计数保持 0。 |
 | 数字 | `2^53+1`、Int64 overflow | 字符串保真 / invalid | Windows 与 Swift 输出逐字节一致；overflow 不环绕。 |
 | 时间 | DST、回拨、`resetAt==now` | UTC 重算、过期过滤 | 固定时钟两端一致。 |
@@ -1148,7 +1161,7 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T2（P1，人工约 2 天 / AI 约 2 小时）— Windows 数据边界 — 修复分类、持久化、路径与预算根因**
   - 来源：发现 1/2/3/5。
   - 文件：`CodexUsageWidget.ps1`、`-SelfTest` 内最小断言。
-  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；大目录/锁定文件超时后 worker 恢复；junction 越界访问为 0。
+  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；只读 `-ScanWorker` 的结果上限/协议校验；大目录/锁定文件超时后精确子 PID 回收、三状态文件不变且下一 tick 恢复；junction 越界访问为 0。
 - [ ] **ENG-T3（P1，人工约 2 天 / AI 约 2 小时）— Windows 分发 — 最小单文件 EXE 引导**
   - 来源：CEO-T2、并发/信任边界。
   - 文件：单一 C# 引导源码、一个构建入口、现有 release checker/launcher fixture。
@@ -1156,7 +1169,7 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T4（P1，人工约 4 天 / AI 约 4 小时）— macOS Core — 建立一个 app target 的解析与本地状态**
   - 来源：发现 5/6/7、CEO-T3。
   - 文件：`macos/CodexUsageWidget/Core/*`、`macos/CodexUsageWidgetTests/*`。
-  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、超时与单调账本。
+  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 的只读/超时回收与单调账本；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
 - [ ] **ENG-T5（P1，人工约 1 天 / AI 约 1 小时）— CI — 建立无密钥双平台构建**
   - 来源：发现 8/9、CEO-T5。
   - 文件：`.github/workflows/*`、版本/资产清单验证。
@@ -1194,7 +1207,8 @@ ENG-T1 契约/预期快照（串行冻结）
 
 - 不引入共享跨平台 runtime、数据库、后台服务、遥测或账号层。
 - 不建立 Swift framework/Package、插件系统、通用 installer framework 或自动更新器。
-- 不为网络文件系统承诺内核级即时取消；只承诺 UI 预算、可信陈旧状态和 worker 可恢复。
+- 不为网络文件系统承诺内核级即时取消；通过精确终止隔离扫描子进程承诺 UI 预算、可信陈旧状态和下一周期恢复，不增加常驻后台服务。
+- 不做 Mac App Store 或 App Sandbox 发行变体；未来若进入 App Store，再单独设计首次目录选择、安全作用域书签与子进程继承权限。
 - 不在 v1.1.0 加 Homebrew Cask 或 Windows Authenticode；已分别由稳定发布和证书可用性约束，保留在 `TODOS.md`。
 - 不把 Apple Developer 账号、身份验证或购买证书当作可由代码自动完成的事项。
 
@@ -1569,15 +1583,15 @@ P0 VERSION + schema v1 + 匿名 fixtures + expected ----------------------------
 | 阶段 | 前置 | 唯一 owner 与文件 | 交付结果 | 完成门槛 |
 |---|---|---|---|---|
 | **P0 契约与版本** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端 runner 后续逐字节相等 |
-| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；有界扫描与可恢复 worker | invalid 偏好/账本/提醒原字节不变；累计值不下降；junction 越界访问为 0；10 秒预算后 UI 可继续刷新 |
+| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；只读隔离扫描进程；主进程唯一持久化 | invalid 偏好/账本/提醒原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；10 秒后精确子 PID 回收且下一 tick 恢复 |
 | **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
-| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 原生目录发现、解析、状态、账本、提醒；macOS 13+ | 共同快照、三态持久化、symlink containment、固定时钟、超时和单调账本全绿；没有第三方依赖 |
+| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、精确子进程超时回收和单调账本全绿；没有第三方依赖或 helper target |
 | **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret | Windows 自检/检查器/EXE 与 Mac test/unsigned Universal build 全绿；日志无私有路径、session 或密钥 |
 | **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、`locales/*.json`、Windows UI 回归 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | 五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
 | **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Resources、UI-test target、`DESIGN.md` | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
 | **P7 文档、本地化与截图** | P5、P6 | Docs owner：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README、CHANGELOG、`docs/releases/v1.1.0.md`、发布截图 | 单一贡献入口、源码地图、平台资产表、升级/回滚、脱敏反馈格式、维护者 runbook | Windows-only、Mac-only、无证书维护者分别按文档完成允许路径；链接/命令/五语言键和字体宽度检查通过 |
 | **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单 | 同一 commit 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 共同契约、架构、隐私、哈希、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
-| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | Developer ID 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | `codesign`、`spctl`、`stapler` 全绿；实际拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
+| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | `codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；自动发现、拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
 | **P10 不可变发布** | P9 | Release maintainer + docs owner | annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | tag peeled SHA 等于候选；上传后全部重下验证；最后才公开；工作树、Release 与 README 指向一致 |
 
 ### 可复制验证命令
@@ -1612,6 +1626,7 @@ open .build/Build/Products/Debug/CodexUsageWidget.app --args --demo
 
 ```bash
 codesign --verify --deep --strict --verbose=2 CodexUsageWidget.app
+codesign -d --entitlements - CodexUsageWidget.app
 spctl --assess --type execute --verbose=2 CodexUsageWidget.app
 xcrun stapler validate CodexUsageWidget-v1.1.0-macos.dmg
 shasum -a 256 -c CodexUsageWidget-v1.1.0-macos.dmg.sha256
@@ -1627,6 +1642,7 @@ shasum -a 256 -c CodexUsageWidget-v1.1.0-macos.dmg.sha256
 | 数值 | `2^53+1`、Int64 overflow、乱序重复缓存记录 | decimal string 无精度丢失；checked addition；累计值不下降、不重计 |
 | 时间 | UTC epoch ms、DST 边界、30 分钟临界点 | 规范化结果不依赖本地时区；UI 再按 locale 格式化 |
 | 路径 | junction/symlink 越界、绝对/`..` ZIP entry、网络路径慢读 | containment 先验证；EXE 拒绝危险 entry；UI 在预算内进入可信陈旧/错误态 |
+| Mac 权限 | Xcode 默认 App Sandbox、POSIX/ACL/TCC 拒绝 | 正式构建必须无 App Sandbox entitlement；系统拒绝进入无权限状态，不伪装为空目录 |
 | 持久化 | 三份状态文件缺失、有效、截断/无效 | invalid 永不被普通位置/主题/提醒保存覆盖；显式重置前保留原字节 |
 | demo | 本机已有真实 CODEX_HOME 与三份小组件状态 | 只读匿名 fixture；不读写真实状态、不通知、独立实例；退出后 SHA 不变 |
 | 本地化 | 五包缺键、额外键、占位符差异、长文本 | 完整键集/格式可解析；运行时缺可选包原子回退；真实字体无裁切 |
