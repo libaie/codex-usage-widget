@@ -46,9 +46,9 @@ try {
     }
     $sortedColdDurations = @($coldDurations.ToArray() | Sort-Object)
     $coldP95 = $sortedColdDurations[[int]([math]::Ceiling($sortedColdDurations.Count * 0.95) - 1)]
-    # ponytail: hosted PowerShell startup is noisy; restore one 750 ms limit only if the worker becomes native.
-    $coldP95Limit = if ($env:GITHUB_ACTIONS -eq 'true') { 15.0 } else { 3.0 }
-    Assert-Stability ($coldP95 -lt $coldP95Limit) ('95th-percentile empty-input cold start exceeded {0:N0} seconds: {1:N3}s.' -f $coldP95Limit, $coldP95)
+    # ponytail: local endpoint security varies; GitHub's pinned Windows image is the release performance reference.
+    $coldP95Limit = if ($env:GITHUB_ACTIONS -eq 'true') { 0.75 } else { 3.0 }
+    Assert-Stability ($coldP95 -lt $coldP95Limit) ('95th-percentile empty-input cold start exceeded {0:N2} seconds: {1:N3}s.' -f $coldP95Limit, $coldP95)
     $demoLine = [IO.File]::ReadAllText((Join-Path $package 'fixtures\contract\v1\inputs\demo.jsonl')).Trim()
     $tailPadding = (' ' * 262144) + "`n"
     for ($index = 0; $index -lt 30; $index++) {
