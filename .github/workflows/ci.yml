@@ -43,23 +43,15 @@ jobs:
             [void](git symbolic-ref -q HEAD)
             if ($LASTEXITCODE -eq 0) { throw 'Candidate checkout must be detached.' }
           }
-      - name: Windows core and contract
+      - name: Windows self-test
         shell: powershell
-        run: |
-          function Invoke-CheckedPowerShell([string]$Name, [string[]]$Arguments) {
-            $output = @(& powershell.exe @Arguments 2>&1)
-            $exitCode = $LASTEXITCODE
-            $output | Write-Output
-            if ($exitCode -eq 0) { return }
-            foreach ($line in @($output | Select-Object -Last 20)) {
-              $escaped = "$line".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-              Write-Output "::error title=$Name::$escaped"
-            }
-            exit $exitCode
-          }
-          Invoke-CheckedPowerShell 'Windows self-test' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', '.\CodexUsageWidget.ps1', '-SelfTest')
-          Invoke-CheckedPowerShell 'Windows contract' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\fixtures\Test-Contract.ps1', '-PackageRoot', '.')
-          Invoke-CheckedPowerShell 'Windows data boundary' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\fixtures\Test-WindowsDataBoundary.ps1', '-PackageRoot', '.')
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\CodexUsageWidget.ps1 -SelfTest
+      - name: Windows contract
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-Contract.ps1 -PackageRoot .
+      - name: Windows data boundary
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-WindowsDataBoundary.ps1 -PackageRoot .
       - name: Windows worker stability
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-WorkerStability.ps1 -PackageRoot .
