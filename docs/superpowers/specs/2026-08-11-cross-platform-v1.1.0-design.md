@@ -1039,9 +1039,11 @@ C# single-file bootstrap                Xcode build -> Universal .app -> DMG
                  immutable v1.1.0 + draft assets
 ```
 
-刷新使用进程隔离而不是尝试强制取消进程内文件 I/O。Windows 每次刷新启动隐藏的 Windows PowerShell `-ScanWorker` 子进程；macOS 由同一个应用可执行文件在 `--scan-worker` 模式运行，不新增 helper target。主进程保留现有平台 UI 与生命周期控制，只有子进程访问 Codex 数据目录。
+刷新使用进程隔离而不是尝试强制取消进程内文件 I/O。Windows 每次刷新通过标准库 `System.Diagnostics.Process` 启动隐藏的 Windows PowerShell `-ScanWorker` 子进程（`UseShellExecute=false`、`CreateNoWindow=true`）；macOS 通过 Foundation `Process` 运行同一个应用可执行文件的 `--scan-worker` 模式，不新增 helper target。主进程保留现有平台 UI 与生命周期控制，只有子进程访问 Codex 数据目录。worker 分支必须在 WPF/AppKit、托盘/菜单栏、实例锁、本地化 UI 和持久化状态初始化之前返回，不能为只读扫描加载界面程序集。
 
-扫描子进程严格只读，不得写偏好、累计账本或 `reminders.json`。它只输出 schema v1 的规范化快照与逐会话令牌计数；主进程在校验退出码、结果大小（最大 256 KiB）、schema 和字段边界后，才更新内存状态并作为唯一 writer 原子保存累计账本与提醒。数据目录与结果通道通过子进程环境/私有临时目录传递，不进入命令行或日志；每轮只创建一个精确临时目录，成功、失败和超时都只清理本轮目录。
+扫描子进程严格只读，不得写偏好、累计账本或 `reminders.json`。它只输出 schema v1 的规范化快照与逐会话令牌计数；主进程在校验退出码、结果大小（最大 256 KiB）、schema 和字段边界后，才更新内存状态并作为唯一 writer 原子保存累计账本与提醒。数据目录与结果通道通过子进程环境/私有临时目录传递，不进入命令行或日志；每轮只创建一个精确临时目录，Windows ACL 仅允许当前用户，macOS 权限为 `0700`。成功、失败和超时都只清理本轮目录；启动时只清理应用专属根下、通过名称与所有者校验且超过 24 小时的孤儿目录，不跟随 reparse point/symlink。
+
+worker 在第一次目录访问前启动独立的 12 秒自终止看门狗，正常退出时撤销。Windows 使用进程内标准 .NET timer 调用 `Environment.Exit`，macOS 使用独立 Dispatch timer 调用 `_exit`；它们不启动第二个 helper。父进程仍在 10 秒用户预算处主动终止并等待最多 2 秒。这样即使主进程崩溃、被强制结束或睡眠期间消失，阻塞 I/O 的孤儿生命周期也有 12 秒硬上限；看门狗退出码和父超时一样不得产生可提交结果。
 
 Mac 工程保持最小：
 
@@ -1073,15 +1075,21 @@ macos/
 | 边界 | v1.1.0 上限/动作 |
 |---|---|
 | 目录遍历 | 每次至多检查 10,000 个目录项并保持固定 30 个最新候选；达到上限记 `partial`。不构造完整文件数组后全排序。 |
+| 候选选择 | 一次递归遍历同时维护“最新用量 30 个”和“近 30 分钟活动 30 个”两个固定容量线性有序列表，复杂度上限 `O(10,000 × 30)`、内存 `O(30)`；不增加自定义堆。`ponytail:` 只有目录上限或候选数以后提高一个数量级，才换标准优先队列。 |
 | 活动任务 | 最近 30 分钟且至多额外 30 个文件；总读取文件数不超过 60。 |
 | 单会话读取 | 尾部 256 KiB；只有最新候选在未找到有效限制事件时允许一次 1 MiB 重试。 |
 | 任务索引 | 只读最后 1 MiB；最多接受 10,000 行、任务名 500 字符。 |
 | 单次刷新 | 使用单调时钟预算 10 秒；同一时刻只有一个只读扫描子进程。到期立即把 UI 转为 stale/error，精确终止并回收该 PID，下一 tick 创建新子进程且不排队。 |
+| worker 启动 | Windows 空输入 worker 从创建进程到校验空结果的 p95 不超过 750 ms；Mac p95 不超过 300 ms。两端实际 30 文件刷新仍受 2 秒 p95 与 10 秒硬截止共同约束，不能用延长 15 秒刷新间隔掩盖回归。 |
 | 扫描结果 | 子进程结果最大 256 KiB；主进程校验退出码、schema、Int64 字符串、集合上限和稳定排序后才一次提交。无效、截断或超限结果按 `error`，不得更新账本或提醒。 |
 | UI 线程 | 不做目录/文件/JSON I/O；整份不可变 view state 一次提交，自动性能夹具目标小于一帧（16 ms）。 |
 | 正常夹具 | 30 个最大尾读文件的本地刷新 p95 < 2 秒；CI 记录耗时但不上传用户数据。 |
+| 稳态资源 | 15 秒周期连续 120 次刷新：活动 worker 始终 `0..1`，结束宽限后残留子进程和临时目录为 0，父进程 handle/file descriptor 增量不超过 8、private bytes/RSS 相对第 10 次暖机后不增长超过 20 MiB；单个 worker 峰值 RSS 不超过 128 MiB。 |
+| 空闲 CPU | 详情关闭、固定夹具、120 次刷新期间，父进程空闲 CPU 小于一个逻辑核的 1%，父子合计平均小于一个逻辑核的 5%；CI 保存聚合数值，不保存路径、会话或逐任务数据。 |
 | 链接 | Windows 拒绝会话根及后代 reparse point；macOS canonicalize 后要求候选仍在 canonical root 的路径组件边界内。 |
 | EXE 载荷 | 精确 allowlist、逐文件 SHA-256、总解压上限、拒绝绝对/父跳转/重复/大小写碰撞/链接；临时目录成功后原子落位。 |
+
+2026-08-11 的 Windows 设计基线（非发布认证）显示：15 次标准库 `Process` 空启动 p95 为 162.15 ms；10 次短存活进程峰值工作集 p95 为 90.94 MiB；相同命令经 `Start-Process -Wait` 的中位数为 1,017.61 ms，因此监督层不使用该包装器。10,000 个候选的本地纯选择探针中，全排序中位数 35.79 ms，固定 30 个线性列表为 19.20 ms 且结果相同。发布 gate 必须对最终 `-ScanWorker`/`--scan-worker` 重测，不能把这些探针数字冒充成成品结果；任一硬门槛失败先做 profiler/系统调用证据，再决定优化，不预建常驻服务。
 
 10 秒是用户可见刷新预算，不是假设所有内核 I/O 都可瞬间取消。实现不等待被阻塞的文件调用协作取消，而是在预算到期时终止隔离的扫描子进程。慢/锁定文件和网络路径夹具必须证明：超时后 UI 可操作、旧快照仍在、用户三份状态文件逐字节不变、下一周期能用新子进程成功刷新，且不产生无界进程、临时目录或句柄。
 
@@ -1090,12 +1098,17 @@ macos/
 | 场景 | 规则 |
 |---|---|
 | 刷新 tick 重入 | 同一平台同一时刻只有一个 active scan；tick 合并，不排队。 |
+| worker 启动失败 | 本次尝试进入稳定错误/陈旧状态并重新等待完整 15 秒；不得因 1 秒 UI timer 已越过阈值而每秒重试。用户明确重新选择目录可触发一次立即刷新。 |
+| 扫描期间切换目录 | 当前监督记录保存启动时的数据目录代次；选择新目录先递增代次并终止旧 worker。即使旧结果同时完成，代次不等也整份丢弃，不更新 UI、账本或提醒。 |
 | 扫描超时或退出 | 主进程只终止本轮记录的精确子 PID，等待有界退出后清理本轮私有临时目录；扫描子进程无持久化权限，超时结果永不提交。 |
+| 主进程崩溃/被强制结束 | worker 自身 12 秒看门狗独立终止进程；本轮只读且结果不再有 writer，私有目录留给下次有界孤儿清理。 |
+| 自然退出与 deadline 同刻 | 监督对象只允许 `running -> completed` 或 `running -> timedOut` 一次原子终态；仅使用启动时持有的进程句柄，不按 PID 再查询或终止。 |
+| 用户退出时仍在扫描 | 先停 timer，再终止当前精确 worker；最多等待 2 秒后关闭 UI。worker 只读，未清理的本轮私有目录由下次启动的有界孤儿清理处理。 |
 | Windows EXE 同时首次启动 | 引导使用版本级命名锁；只有锁 owner 释放/校验，其他实例等待有界时间后复用完整版本。主程序继续使用现有应用 mutex。 |
 | EXE 释放中终止 | 只留下本次临时目录；下次清理同版本孤儿临时目录，旧完整版本不变。 |
 | 偏好写与退出竞争 | 复用原子写；退出只等待当前小文件写入，不等待新扫描。 |
 | Mac 第二次启动 | 由单应用激活现有实例，不创建第二份账本 writer。 |
-| 睡眠/唤醒 | 取消陈旧 timer 计算，唤醒后立即刷新并从绝对 UTC 时间重算。 |
+| 睡眠/唤醒 | 唤醒时把睡眠前 worker 视为超时并精确回收；取消陈旧 timer 计算，立即刷新并从绝对 UTC 时间重算。 |
 | 显示器断开 | 下一主线程帧把圆环和详情夹紧到仍存在的 `visibleFrame`，随后才保存有效位置。 |
 | 任务在焦点中消失 | 关闭任务详情，焦点回到圆环或任务列表标题，不指向已释放对象。 |
 
@@ -1110,6 +1123,7 @@ macos/
 | invalid 持久化保字节、显式重置 | ✓ | 三文件 byte-identical + 原子替换 | 恢复入口 | 重启后状态保持 |
 | 链接/路径越界 | ✓ | Windows junction / macOS symlink | 错误动作 | 候选包手选目录 |
 | 10 秒预算与 worker 恢复 | 固定时钟 | 大目录、1 MiB 索引、60 文件、慢/锁定文件、超限/截断结果、退出与 deadline 同刻竞态 | 陈旧环且 UI 可操作 | 只通过原始进程句柄结束一次；无误杀；三状态文件不变；17 秒后下一刷新成功 |
+| worker 性能与稳态资源 | 有界候选选择 | 两端空输入/30 最大文件基准；120 次刷新 | 状态提交 <16 ms | 启动/刷新/CPU/RSS 门槛；0 重叠、0 残留、handle/fd 有界 |
 | 圆环窗口选择与状态样式 | ✓ | 共同 snapshot -> view state | 截图 + a11y 值 | Windows/Mac 实机 |
 | hover/click/drag/focus/吸附 | 几何/状态机 | 虚拟屏幕矩形 | 180/250 ms、4 点、Esc、热插拔 | 双显示器手工签核 |
 | 五语言/八主题/最长文案 | key/placeholder/font width | 资源加载回退 | 五语言截图、VoiceOver | 两平台候选 |
@@ -1181,6 +1195,8 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 4. **CRITICAL — 账本提交与展示一致。** 子进程成功但父进程结果校验或账本原子替换失败时，磁盘旧值不降、UI 明确显示持久化失败/陈旧，重启不得把未落盘内存值伪装成已保存累计值。
 5. **CRITICAL — 两种 Windows 资产同源。** 构建后提取或查询 EXE 的内嵌载荷摘要，必须逐字节等于同一候选公开 ZIP；两者解出的运行清单和文件 SHA 完全一致。
 6. **CRITICAL — 测试夹具本身有界。** `Test-Launcher.ps1` 的进程启动、probe 等待、CIM/WMI 查询和清理共享一个固定总预算；查询不可用或超时时必须给稳定环境阶段码、非零退出，并只终止/删除本轮精确 probe 与临时目录。CI 外层保留更大的兜底 timeout，但不能代替夹具内部边界。
+7. **CRITICAL — 进程隔离不能变成资源泄漏。** 最终 worker 必须通过空输入冷启动、30 个最大文件和连续 120 次刷新三档基准；另在阻塞 I/O 中强制结束父进程，worker 必须在创建后 12 秒内自行退出。达到启动、2 秒刷新、CPU/RSS、handle/fd 或残留门槛即失败，不得通过降低刷新频率、隐藏失败输出或改成常驻服务绕过。
+8. **CRITICAL — 调度不能提交过期代次。** 测试在扫描即将完成时切换数据目录，并让旧结果先于终止通知落地；旧代次必须整份丢弃。另让启动连续失败 60 秒，自动尝试不得超过 4 次，UI timer 仍保持响应。
 
 所有新增非平凡分支至少落一个能在错误选择时失败的最小检查。业务数值由纯测试承担；真实 UI 自动化只验证平台集成、视觉和辅助功能，避免脆弱重复断言。
 
@@ -1191,7 +1207,12 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 | 偏好/账本/提醒加载 | JSON 损坏或字段越界 | 内存安全值 + 原文件写保护 + 显式重置 | 自动刷新/位置恢复后原文件逐字节相同。 |
 | 会话解析 | 单条坏、全坏、未知 schema | partial / error / unsupported 分开 | 三类输入不得都落到 empty。 |
 | 目录枚举 | 10,000 项或超过预算 | partial/stale，不扩大读取 | 大目录在预算后仍可操作且下次恢复。 |
+| worker 启动 | 可执行文件缺失、环境无效、启动超过预算 | 不提交结果；保留旧可信快照并给稳定阶段码 | 空输入冷启动超限或加载 UI 程序集必须失败。 |
+| 刷新调度 | 启动失败后每秒重试、切目录后旧结果晚到 | 每次尝试重置 15 秒周期；目录代次不等则丢弃 | 60 秒启动失败最多 4 次；旧目录结果永不提交。 |
 | 文件读取 | 锁定、慢网络卷、权限丢失 | 终止只读扫描子进程并保留上次可信快照 | 精确 PID 被回收；用户状态不变；下一周期成功且无无界进程。 |
+| 生命周期 | 退出/睡眠与扫描重叠、自然退出撞 deadline | 单终态、精确句柄回收、退出最多等待 2 秒 | 哨兵不受影响；下次启动清理唯一孤儿目录。 |
+| 父进程异常消失 | 阻塞 worker 失去父计时器 | worker 独立 12 秒看门狗自终止；不提交结果 | 强停父进程后 worker 在硬截止内消失且三状态文件不变。 |
+| 稳态资源 | worker 重叠、进程/目录/handle/fd/RSS 累积 | tick 合并、每轮释放、超限阻断候选 | 120 次刷新满足资源门槛且 0 残留。 |
 | 扫描结果通道 | 截断、超 256 KiB、错误 schema、伪造字段 | 拒绝整份结果；不更新账本或提醒 | 每类坏结果都保持旧快照和三状态文件原字节。 |
 | 路径 | junction/symlink 越根 | 拒绝文件，绝不打开 | 越界目标访问计数保持 0。 |
 | 数字 | `2^53+1`、Int64 overflow | 字符串保真 / invalid | Windows 与 Swift 输出逐字节一致；overflow 不环绕。 |
@@ -1199,7 +1220,7 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 | 引导 | 两进程、载荷坏、落位中断 | 单 owner、旧完整版本、可重试 | 并发首次 EXE 只产生一个完整 runtime。 |
 | 本地化 | 可选包坏 / 英语包坏 | 英语回退 / 内置最小错误 | 错误不依赖待加载语言包。 |
 | 通知 | 未授权、重启、过期点击 | 不重复请求/去重/打开当前状态 | 不完整或陈旧状态永不通知。 |
-| 签名发布 | secret 缺失、tag 错、上传断 | workflow fail closed、保留草稿 | 任一资产失败都不存在公开 v1.1.0。 |
+| 签名发布 | secret 缺失、job 超时、tag 错、上传断 | workflow fail closed、保留草稿；release run 不被新 run 自动取消 | 任一资产失败都不存在公开 v1.1.0；日志无 secret。 |
 | 公开后严重问题 | 资产已被下载 | 下线受影响资产，v1.0.0 恢复推荐，发布 v1.1.1 | 原 v1.1.0 tag 永不移动。 |
 
 ### 权威实施 DAG 与文件所有权
@@ -1233,7 +1254,7 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T2（P1，人工约 2 天 / AI 约 2 小时）— Windows 数据边界 — 修复分类、持久化、路径与预算根因**
   - 来源：发现 1/2/3/5。
   - 文件：`CodexUsageWidget.ps1`、`-SelfTest` 内最小断言。
-  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 的结果上限、静默/无副作用和协议校验；大目录/锁定文件超时及自然退出竞态只经原始进程句柄收口一次、无误杀、三状态文件不变且下一 tick 恢复；junction 越界访问为 0。
+  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 在 UI 初始化前分支，结果上限、静默/无副作用和协议校验；大目录/锁定文件超时及自然退出竞态只经原始进程句柄收口一次、无误杀、三状态文件不变且下一 tick 恢复；junction 越界访问为 0；冷启动/30 文件/120 次刷新满足性能与资源门槛。
 - [ ] **ENG-T3（P1，人工约 2 天 / AI 约 2 小时）— Windows 分发 — 最小单文件 EXE 引导**
   - 来源：CEO-T2、并发/信任边界。
   - 文件：单一 C# 引导源码、一个构建入口、现有 release checker/launcher fixture。
@@ -1241,11 +1262,11 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T4（P1，人工约 4 天 / AI 约 4 小时）— macOS Core — 建立一个 app target 的解析与本地状态**
   - 来源：发现 5/6/7、CEO-T3。
   - 文件：`macos/CodexUsageWidget/Core/*`、`macos/CodexUsageWidgetTests/*`。
-  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 的静默/只读/无副作用、输出拒绝、超时与自然退出竞态回收和单调账本；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
+  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 在 AppKit 初始化前分支且静默/只读/无副作用、输出拒绝、超时与自然退出竞态回收和单调账本；冷启动/30 文件/120 次刷新满足性能与资源门槛；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
 - [ ] **ENG-T5（P1，人工约 1 天 / AI 约 1 小时）— CI — 建立无密钥双平台构建**
   - 来源：发现 8/9、CEO-T5。
   - 文件：`.github/workflows/*`、版本/资产清单验证。
-  - 验证：普通 PR 构建 Windows ZIP/EXE 与 macOS unsigned Universal app，验证契约、架构、隐私和精确资产；Mac job 只用 Xcode/系统原生检查，不要求 PowerShell；没有 signing secrets。
+  - 验证：普通 PR 构建 Windows ZIP/EXE 与 macOS unsigned Universal app，验证契约、架构、隐私和精确资产；PR 并发组允许取消旧提交，Windows job 20 分钟、Mac job 30 分钟硬超时；Mac job 只用 Xcode/系统原生检查，不要求 PowerShell；没有 signing secrets。
 - [ ] **ENG-T6（P1，人工约 2 天 / AI 约 2 小时）— Windows UX — 落地六状态与统一交互**
   - 来源：DESIGN-T2/T3/T4。
   - 文件：`CodexUsageWidget.ps1`、UI/launcher regression；只消费 ENG-T1 冻结的五语言包。
@@ -1257,7 +1278,7 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T8（P1，人工约 2 天 + 外部等待 / AI 约 1 小时）— 候选 — 签名、公证与真实设备 gate**
   - 来源：发现 9、CEO-T5。
   - 文件：受保护 release workflow、codesign/notary/staple 脚本、候选清单。
-  - 验证：精确 commit 上 Windows/Universal Mac 候选全绿；Developer ID、notary、Gatekeeper、Apple Silicon、Rosetta、双显示器通过。账号/证书缺失时保持 BLOCKED，不创建 tag。
+  - 验证：受保护 job 以输入的完整 commit SHA 做 detached checkout 并重建，`release` 并发组 `cancel-in-progress: false`；Developer ID、notary、Gatekeeper、Apple Silicon、Rosetta、双显示器通过，公证轮询最多 45 分钟。账号/证书缺失或任一 job 超时时保持 BLOCKED，不创建 tag。
 - [ ] **ENG-T9（P1，人工约 1 天 / AI 约 1 小时）— 发布 — 文档、资产与不可变 v1.1.0**
   - 来源：CEO-T6、发现 4/9。
   - 文件：双语 README、`CHANGELOG.md`、release notes、截图和 GitHub Release 元数据。
@@ -1265,14 +1286,16 @@ ENG-T1 契约/预期快照（串行冻结）
 
 ### 精确发布与回滚顺序
 
+CI 的普通 PR workflow 只验证无密钥候选，可取消同分支旧提交；受保护 release workflow 必须串行、不得被新 run 自动取消。所有 job 有硬 `timeout-minutes`，公证轮询和 Release 重下也各自有内部截止时间；外层 Actions 超时只作兜底。签名 secret 只在无密钥 P8 结果已绑定完整候选 SHA、进入 `release` environment 并人工批准后注入，步骤输出与上传 artifact 均不得包含凭据。
+
 1. 在干净工作树锁定候选 commit SHA 和 `v1.1.0` 功能版本。
-2. 从该 SHA 构建无密钥候选，运行共同契约、平台测试、隐私与架构检查。
-3. 受保护环境从同一 SHA 重建/签名；Mac 完成 notarize、staple、Gatekeeper；真实 Apple Silicon、Rosetta 和双显示器签核。
+2. 用完整 SHA detached checkout 构建无密钥候选，运行共同契约、平台测试、隐私、架构和性能检查，并记录不含用户数据的候选清单。
+3. 受保护环境重新 detached checkout 同一 SHA 后重建/签名；Mac 在 45 分钟内部截止内完成 notarize、staple、Gatekeeper；真实 Apple Silicon、Rosetta 和双显示器签核。
 4. 所有 gate 通过后才创建不可变 annotated tag `v1.1.0`，并验证 tag peeled target 等于候选 SHA。
 5. 从该 tag 创建 GitHub **draft** release，上传 EXE、ZIP、DMG 与校验文件。
 6. 从 GitHub 重下全部资产，验证文件名、大小、SHA、Windows 启动、Mac 签名/票据和版本一致。
 7. 只有重下验证成功才公开；源码使用同一 tag 的自动 source archives，不另造不同版本源码包。
-8. 草稿阶段失败：删除失败候选并从新 commit 重走，不移动既有 tag。若 tag 已建但 release 未公开且代码需改，使用新版本号，不强推/移动 tag。
+8. 草稿上传或重下发生瞬态失败但代码和六个资产字节均未变时，可在同一 tag 下重试同一已验证资产；只要代码、签名或任一资产字节改变，就使用下一版本号，不强推或移动已创建 tag。
 9. 公开后严重缺陷：下线受影响二进制，把 v1.0.0 恢复为 README 推荐下载，保留 v1.1.0 tag 与审计记录，修复发布 v1.1.1。
 
 ### NOT in scope（工程）
@@ -1294,7 +1317,7 @@ ENG-T1 契约/预期快照（串行冻结）
 | 关键根因 | 持久化、扫描、worker 三个共享边界缺少失败状态 |
 | 数据契约 | Int64/UTC/舍入/null/排序/schema v1 已冻结 |
 | Mac 拓扑 | 1 app target + 1 unit test target + 1 UI test target |
-| 性能 | 10,000 项/60 文件/1 MiB/10 秒硬边界与恢复测试 |
+| 性能 | 10,000 项/60 文件/1 MiB/10 秒硬边界；冷启动、2 秒刷新、120 次资源稳态与恢复测试 |
 | 测试 | 13 类能力覆盖 U/I/UI/E2E，无关键静默路径 |
 | 实施 | 9 个权威任务、4 条 lane、共享文件单 owner |
 | 发布 | 精确 SHA -> 全 gate -> immutable tag -> draft -> redownload -> public |
@@ -1308,6 +1331,8 @@ ENG-T1 契约/预期快照（串行冻结）
 | 损坏本地状态 | 原字节只读 + 显式重置 | 静默覆盖、自动修复原文件 | 防数据丢失不能偷懒。 |
 | 解析结果 | 带计数的统一分类 | 每个 UI 调用方猜测 null | 一个根因位置比多处分支更小。 |
 | 刷新范围 | 固定候选/尾读/时间预算 | 全历史排序、SQLite 索引 | 先用标准文件 API 的有界扫描。 |
+| 候选算法 | 容量 30 的线性有序列表 | 自定义 heap、SQLite 索引 | 在 `10,000 × 30` 上更短、更快且有明确升级阈值。 |
+| worker 生命周期 | 每次刷新标准库子进程 | 进程内强停、常驻服务、`Start-Process -Wait` | 隔离阻塞 I/O；实测包装器有约 1 秒等待开销，原生 Process 足够。 |
 | 网络盘 | 保留并准确披露 | 移除 UNC、继续承诺绝不联网 | 兼容既有路径，纠正承诺而非删功能。 |
 | Mac 组织 | 单 app target + 测试 targets | 独立 core framework、共享 runtime | YAGNI；没有第二消费者。 |
 | 跨平台数值 | 十进制字符串 Int64 + reviewed fixture | JSON 浮点、平台各自格式 | 消除 `2^53` 与舍入漂移。 |
@@ -1655,16 +1680,16 @@ P0 VERSION + schema v1 + 匿名 fixtures + expected ----------------------------
 | 阶段 | 前置 | 唯一 owner 与文件 | 交付结果 | 完成门槛 |
 |---|---|---|---|---|
 | **P0 契约、版本与语言资源** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、`theme-catalog.json`、`locales/*.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义；八主题目录；五语言键与占位符固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端原生主题目录逐项匹配；五包键集/格式/长度全绿；两端 runner 后续逐字节相等 |
-| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；只读隔离扫描进程；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；worker 静默且无副作用；invalid 三文件原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；deadline/自然退出竞态无误杀且下一 tick 恢复 |
+| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；标准库 `Process` 启动只读隔离扫描；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；worker 在 UI 初始化前分支且静默无副作用；invalid 三文件原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；deadline/自然退出竞态无误杀且下一 tick 恢复；冷启动、30 文件和 120 次刷新资源门槛全绿 |
 | **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；内嵌 ZIP 与公开 ZIP 字节/解压 SHA 一致；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
-| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、worker 静默无副作用、deadline/自然退出竞态无误杀和单调账本全绿；没有第三方依赖或 helper target |
-| **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret；Mac bundle 直接打包根语言文件；平台使用原生验证入口 | Windows 自检/PowerShell 检查器/EXE 与 Mac xcodebuild/lipo/bundle tests 全绿；Mac job 不依赖 PowerShell；包内五语言 SHA 与根文件一致；日志无私有路径、session 或密钥 |
+| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、worker 在 AppKit 初始化前分支且静默无副作用、deadline/自然退出竞态无误杀和单调账本全绿；冷启动、30 文件和 120 次刷新资源门槛全绿；没有第三方依赖或 helper target |
+| **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret；Mac bundle 直接打包根语言文件；平台使用原生验证入口 | Windows 自检/PowerShell 检查器/EXE 与 Mac xcodebuild/lipo/bundle tests 全绿；PR 旧提交可取消，Windows 20 分钟/Mac 30 分钟硬超时；Mac job 不依赖 PowerShell；包内五语言 SHA 与根文件一致；日志无私有路径、session 或密钥 |
 | **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、Windows UI 回归；根语言包与主题契约只读 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | Windows 原生主题目录逐项匹配 P0；五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
 | **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Mac 专属 Resources、根语言包只读引用、UI-test target、`DESIGN.md`；主题契约只读 | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | Mac 原生主题目录逐项匹配 P0；App bundle 五语言 SHA 与根文件一致；VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
 | **P7 文档、本地化与截图** | P5、P6 | Docs owner：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README、CHANGELOG、`docs/releases/v1.1.0.md`、发布截图 | 单一贡献入口、源码地图、平台资产表、升级/回滚、脱敏反馈格式、维护者 runbook | Windows-only、Mac-only、无证书维护者分别按文档完成允许路径；链接/命令/五语言键和字体宽度检查通过 |
-| **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单、QA 测试计划 | 同一 commit 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 测试覆盖图 32/32 有自动证据或明确 E2E gate；共同契约、内嵌/公开 ZIP 同源、架构、隐私、哈希、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
-| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | `codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；自动发现、拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
-| **P10 不可变发布** | P9 | Release maintainer + docs owner | annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | tag peeled SHA 等于候选；上传后全部重下验证；最后才公开；工作树、Release 与 README 指向一致 |
+| **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单、QA 测试计划 | 完整 commit SHA detached checkout 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 测试覆盖图 32/32 有自动证据或明确 E2E gate；共同契约、内嵌/公开 ZIP 同源、架构、隐私、哈希、性能稳态、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
+| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 同一完整 SHA 重建；非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | release 并发不自动取消；签名 secret 只在人工审批后可见；`codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；公证 45 分钟内结束；自动发现、拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
+| **P10 不可变发布** | P9 | Release maintainer + docs owner | annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | tag peeled SHA 等于候选；上传后全部重下验证；最后才公开；瞬态失败只重试逐字节相同资产，任一字节变化则新版本；工作树、Release 与 README 指向一致 |
 
 ### 可复制验证命令
 
@@ -1719,7 +1744,8 @@ shasum -a 256 -c CodexUsageWidget-v1.1.0-macos.dmg.sha256
 | demo | 本机已有真实 CODEX_HOME 与三份小组件状态 | 只读匿名 fixture；不读写真实状态、不通知、独立实例；退出后 SHA 不变 |
 | 本地化 | 五包缺键、额外键、占位符差异、长文本 | 完整键集/格式可解析；运行时缺可选包原子回退；真实字体无裁切 |
 | 窗口 | 四角/跨屏/热插拔/缩放/菜单栏与 Dock | 始终位于当前 `visibleFrame`；拖拽结束吸附；偏好保留屏幕身份与坐标 |
-| 发布 | tag/SHA 不一致、资产缺失、重下哈希错、公证拒绝 | 不移动 tag、不公开草稿；修复进入新 commit，已公开缺陷用 v1.1.1 |
+| 性能 | 空输入、30 个最大文件、连续 120 次刷新 | worker/UI/CPU/RSS/handle/fd 满足硬门槛；0 重叠、0 残留；不得靠降低刷新频率通过 |
+| 发布 | job 超时、tag/SHA 不一致、资产缺失、重下哈希错、公证拒绝 | release run 不自动取消；不移动 tag、不公开草稿；同字节可重试，任一字节变化进入新版本；已公开缺陷用 v1.1.1 |
 
 ### 外部 Apple 门禁
 
@@ -1743,7 +1769,7 @@ E0 不是代码决策，不能由 Codex 代替账号持有人完成，也不阻�
 - `CodexUsageWidget-v1.1.0-macos.dmg.sha256`
 - GitHub 从同一 annotated tag 自动生成的 source archives
 
-候选失败只清理本次精确临时产物，保留当前公开版本和用户状态。公开前发现代码问题时创建新 commit 并重走 P8–P10，不移动既有 tag；公开后发现严重问题时下线受影响二进制、恢复 v1.0.0 推荐入口并发布 v1.1.1，不删除 v1.1.0 的 tag 或审计记录。
+候选失败只清理本次精确临时产物，保留当前公开版本和用户状态。tag 创建前发现代码问题时创建新 commit 并重走 P8–P10；tag 创建后只有逐字节相同的已验证资产可以重试，代码、签名或资产任一字节变化都使用下一版本号，不移动既有 tag。公开后发现严重问题时下线受影响二进制、恢复 v1.0.0 推荐入口并发布 v1.1.1，不删除 v1.1.0 的 tag 或审计记录。
 
 ### 实施就绪结论
 
