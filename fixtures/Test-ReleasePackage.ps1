@@ -67,10 +67,13 @@ if (-not $RuntimeArchive) {
         'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\expected-state.json',
         'fixtures\contract\v1\theme-catalog.json',
         'fixtures\contract\v1\inputs\all-malformed.jsonl', 'fixtures\contract\v1\inputs\cache-order.jsonl',
+        'fixtures\contract\v1\inputs\dst-safe-integer.jsonl', 'fixtures\contract\v1\inputs\int64-max.jsonl',
         'fixtures\contract\v1\inputs\demo.jsonl', 'fixtures\contract\v1\inputs\empty.jsonl',
+        'fixtures\contract\v1\inputs\late-old-cycle.jsonl',
         'fixtures\contract\v1\inputs\overflow.jsonl', 'fixtures\contract\v1\inputs\partial.jsonl',
         'fixtures\contract\v1\inputs\precision-and-tightest-window.jsonl',
         'fixtures\contract\v1\inputs\reset-boundary.jsonl', 'fixtures\contract\v1\inputs\unsupported.jsonl',
+        'fixtures\contract\v1\inputs\same-timestamp-tie.jsonl',
         'scripts\Build-Windows.ps1', 'windows\Bootstrap\Program.cs',
         'macos\CodexUsageWidget.xcodeproj\project.pbxproj',
         'macos\CodexUsageWidget.xcodeproj\xcshareddata\xcschemes\CodexUsageWidget.xcscheme',
@@ -205,7 +208,7 @@ if (-not $RuntimeArchive) {
         'docs\releases\v1.1.0.md' = @('Windows', 'macOS', 'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-macos.dmg', 'Developer ID')
         'docs\qa-v1.1.0.md' = @('32/32', 'P9 E2E', 'Test-WorkerStability.ps1', '-Demo', '--demo')
         'CHANGELOG.md' = @('## 1.1.0', 'macOS', '-Demo', '--demo')
-        '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest')
+        '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest', 'Test-Bootstrap.ps1')
     }
     foreach ($documentationPath in $documentationRequirements.Keys) {
         $documentationContent = [IO.File]::ReadAllText((Join-Path $package $documentationPath))

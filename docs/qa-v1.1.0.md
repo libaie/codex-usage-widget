@@ -14,12 +14,12 @@ This map binds all 32 release checks to an automated command or a named P9 E2E g
 | 8 | Eight theme identities and colors | Windows `-SelfTest` and `testThemeCatalogMatchesTheSharedEightThemes` |
 | 9 | Windows parser and UI self-test | `CodexUsageWidget.ps1 -SelfTest` |
 | 10 | Windows state, classification, path, and invalid-file boundaries | `fixtures/Test-WindowsDataBoundary.ps1` |
-| 11 | Windows worker protocol and 256 KiB producer/consumer limits | `-SelfTest` worker envelope assertions |
+| 11 | Windows worker protocol and 256 KiB producer/consumer limits | `fixtures/Test-WindowsDataBoundary.ps1` producer and consumer rejection cases |
 | 12 | Windows 30-file and 120-refresh stability | `fixtures/Test-WorkerStability.ps1` |
 | 13 | Hidden launcher, single instance, and bounded cleanup | `fixtures/Test-Launcher.ps1` |
-| 14 | Windows EXE/ZIP same bytes, exact payload, checksum, concurrency, and state isolation | `fixtures/Test-Bootstrap.ps1` |
+| 14 | Windows EXE/ZIP same bytes, exact payload, checksum, concurrency, and state isolation | CI executes `fixtures/Test-Bootstrap.ps1` |
 | 15 | Windows demo uses reviewed data and writes no state | `-Demo` assertions in `-SelfTest` plus isolated native smoke |
-| 16 | Windows 180/250 ms hover bridge, pin/Esc, drag threshold, and edge snapping | `-SelfTest` interaction assertions plus native smoke |
+| 16 | Windows 180/250 ms hover bridge, pin/Esc, four-point drag threshold, and edge snapping | `-SelfTest` interaction assertions plus P9 native smoke |
 | 17 | Windows keyboard and accessibility labels | `-SelfTest` accessibility contract plus P5 native UI record |
 | 18 | Windows five-language/eight-theme visual fit | P5 production-demo screenshots and font-width assertions |
 | 19 | macOS parser and normalized state | `CoreTests.testReviewedContractFixtures` |
