@@ -223,8 +223,9 @@ try {
     $workerWatch.Stop()
     $workerHasExited = $worker.HasExited
     $workerExitCode = if ($workerHasExited) { $worker.ExitCode } else { $null }
-    Assert-Boundary (-not $workerHasExited) ('the isolated worker host must remain alive after completing a request; exit={0}; result={1}; elapsed={2:N3}s.' -f
-        $workerExitCode, [IO.File]::Exists($workerOutput), $workerWatch.Elapsed.TotalSeconds)
+    $workerError = if ($workerHasExited) { $worker.StandardError.ReadToEnd().Trim() } else { '' }
+    Assert-Boundary (-not $workerHasExited) ('the isolated worker host must remain alive after completing a request; exit={0}; result={1}; elapsed={2:N3}s; diagnostic={3}.' -f
+        $workerExitCode, [IO.File]::Exists($workerOutput), $workerWatch.Elapsed.TotalSeconds, $workerError)
     Assert-Boundary ([IO.File]::Exists($workerOutput) -and ([IO.FileInfo]$workerOutput).Length -le 262144) 'the worker result must fit the 256 KiB protocol limit.'
     $workerResult = [IO.File]::ReadAllText($workerOutput) | ConvertFrom-Json -ErrorAction Stop
     Assert-Boundary ($workerResult.schemaVersion -eq 1 -and $workerResult.generation -ceq $generation -and $workerResult.snapshot.Classification -ceq 'complete') 'the worker result must bind schema, generation, and normalized snapshot.'

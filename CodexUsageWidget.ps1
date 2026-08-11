@@ -1218,18 +1218,23 @@ function New-UsageWorkerDeadline {
 function Invoke-UsageScanWorker {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
+    $workerStage = 'startup'
     try {
         $workerDataDirectory = $env:CODEX_WIDGET_DATA_DIRECTORY
         if ([string]::IsNullOrWhiteSpace($workerDataDirectory)) { throw 'Invalid scan-worker arguments.' }
         while ($true) {
+            $workerStage = 'request'
             $workerGeneration = [Console]::In.ReadLine()
             if ($null -eq $workerGeneration) { return 0 }
             $workerDeadline = $null
             try {
+                $workerStage = 'deadline'
                 $workerDeadline = New-UsageWorkerDeadline
                 if ($workerGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Invalid scan-worker arguments.' }
+                $workerStage = 'resolve'
                 $dataDirectory = Resolve-CodexDataDirectory $workerDataDirectory $null $null
                 if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
+                $workerStage = 'channel'
                 $workerRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($env:LOCALAPPDATA, 'CodexUsageWidget', 'worker'))
                 $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
                 if (-not $workerDirectory.Exists -or ($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1242,7 +1247,9 @@ function Invoke-UsageScanWorker {
                 }
                 $expectedOutput = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'result.json'))
                 if ([IO.File]::Exists($expectedOutput)) { throw 'Invalid scan output path.' }
+                $workerStage = 'snapshot'
                 $snapshot = Get-CodexUsageSnapshot -DataDirectory $dataDirectory -ReadOnly
+                $workerStage = 'write'
                 if (-not (Write-UsageScanResult -Snapshot $snapshot -Generation $workerGeneration -Path $expectedOutput)) {
                     throw 'Scan result could not be saved.'
                 }
@@ -1250,7 +1257,10 @@ function Invoke-UsageScanWorker {
             finally { if ($null -ne $workerDeadline) { $workerDeadline.Dispose() } }
         }
     }
-    catch { return 2 }
+    catch {
+        [Console]::Error.WriteLine(('scan-worker:{0}:{1}' -f $workerStage, $_.Exception.GetType().Name))
+        return 2
+    }
 }
 
 function Get-UsageWorkerScriptText {
