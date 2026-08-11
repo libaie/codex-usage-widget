@@ -9,7 +9,7 @@ A draggable usage ring for Windows and macOS. Hover to see locally observed Code
 </div>
 
 > [!IMPORTANT]
-> This is an independent community project, not an official OpenAI or Codex project. It reads a configured local filesystem path and makes no Web API calls, uploads, or telemetry requests. Values are local session observations, not official billing or account data.
+> This is an independent personal project, not an official OpenAI or Codex project. It reads a configured local filesystem path and makes no Web API calls, uploads, or telemetry requests. Values are local session observations, not official billing or account data.
 
 ## Install
 

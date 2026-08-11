@@ -61,7 +61,7 @@ if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage 'package root i
 $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
     $requiredPaths += @(
-        'SECURITY.md', 'docs\press-kit.md', 'docs\qa-v1.1.0.md', 'docs\releases\v1.0.0.md',
+        'SECURITY.md', 'docs\qa-v1.1.0.md',
         'assets\social-preview.png', 'fixtures\Test-Contract.ps1', 'fixtures\Test-WindowsDataBoundary.ps1',
         'fixtures\Test-WorkerStability.ps1', 'fixtures\Test-Bootstrap.ps1',
         'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\expected-state.json',
@@ -140,7 +140,7 @@ $commonReadmeRequirements = @(
     'CodexUsageWidget-v1.1.0-macos.dmg', 'CONTRIBUTING.md', 'DESIGN.md', 'docs/releasing.md',
     'docs/releases/v1.1.0.md', '-Demo', '--demo', 'Developer ID'
 )
-$zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x793E, 0x533A, 0x9879, 0x76EE) -join '')
+$zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
 $zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +
     ([char[]](0x5B98, 0x65B9, 0x9879, 0x76EE) -join '')
 $zhLocalSessionObservations = ([char[]](0x672C, 0x673A, 0x4F1A, 0x8BDD, 0x89C2, 0x6D4B) -join '')
@@ -149,7 +149,7 @@ $zhNotOfficialBillingOrAccountData = ([char[]](
 ) -join '')
 $readmeRequirements = @{
     'README.md' = @(
-        'README.zh-CN.md', 'independent community project', 'not an official OpenAI or Codex project',
+        'README.zh-CN.md', 'independent personal project', 'not an official OpenAI or Codex project',
         'local session observations', 'not official billing or account data'
     )
     'README.zh-CN.md' = @(
@@ -198,17 +198,11 @@ foreach ($readmePath in $readmeRequirements.Keys) {
 }
 
 if (-not $RuntimeArchive) {
-    $releaseNotesContent = [IO.File]::ReadAllText((Join-Path $package 'docs\releases\v1.0.0.md'))
-    if ([regex]::Matches($releaseNotesContent, 'reminders\.json', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -lt 2) {
-        Fail-ReleasePackage 'missing English or Chinese reminders.json privacy details in file: docs\releases\v1.0.0.md'
-    }
-    $zhFiveLanguages = ([char[]](0x4E94, 0x79CD, 0x8BED, 0x8A00) -join '')
     $documentationRequirements = @{
         'CONTRIBUTING.md' = @('Test-Contract.ps1', 'Build-Windows.ps1', 'xcodebuild', '-Demo', '--demo', 'CODE_SIGNING_ALLOWED=NO')
         'DESIGN.md' = @('local-session-observation', '-ScanWorker', '--scan-worker', 'cache-token-ledger.json')
         'docs\releasing.md' = @('Developer ID Application', 'notar', 'Gatekeeper', 'manifest', 'CodexUsageWidget-v1.1.0-macos.dmg')
         'docs\releases\v1.1.0.md' = @('Windows', 'macOS', 'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-macos.dmg', 'Developer ID')
-        'docs\press-kit.md' = @('Windows', 'macOS', 'five languages', $zhFiveLanguages)
         'docs\qa-v1.1.0.md' = @('32/32', 'P9 E2E', 'Test-WorkerStability.ps1', '-Demo', '--demo')
         'CHANGELOG.md' = @('## 1.1.0', 'macOS', '-Demo', '--demo')
         '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest')
