@@ -74,6 +74,7 @@
     "diagnostic.missingDirectory": "找不到本機工作階段目錄，請先完成一項程式設計任務。",
     "diagnostic.emptyDirectory": "本機尚無工作階段記錄，完成一項程式設計任務後會自動重新整理。",
     "diagnostic.readFailed": "無法讀取工作階段記錄，請確認目前帳戶有存取權後再試一次。",
+    "diagnostic.persistenceFailed": "累計資料儲存失敗，目前顯示上次已儲存的狀態。",
     "diagnostic.noValidEvent": "找不到可辨識的用量事件，請執行自我測試以確認相容性。",
     "diagnostic.unavailable": "目前沒有可用資料。",
     "limit.unknown": "未知週期",

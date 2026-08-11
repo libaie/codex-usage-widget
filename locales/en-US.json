@@ -74,6 +74,7 @@
     "diagnostic.missingDirectory": "No local session directory was found. Complete a coding task first.",
     "diagnostic.emptyDirectory": "There are no local session records yet. The widget will refresh after a coding task completes.",
     "diagnostic.readFailed": "Session records could not be read. Check that the current account has access and try again.",
+    "diagnostic.persistenceFailed": "Cumulative data could not be saved. The last saved state is shown.",
     "diagnostic.noValidEvent": "No recognized usage event was found. Run the self-test to confirm compatibility.",
     "diagnostic.unavailable": "No data is available.",
     "limit.unknown": "Unknown period",

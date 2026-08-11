@@ -74,6 +74,7 @@
     "diagnostic.missingDirectory": "未找到本机会话目录，请先完成一次编码任务。",
     "diagnostic.emptyDirectory": "还没有本机会话记录，完成一次编码任务后会自动刷新。",
     "diagnostic.readFailed": "会话记录读取失败，请确认当前账户可以读取后重试。",
+    "diagnostic.persistenceFailed": "累计数据保存失败，当前显示上次已保存的状态。",
     "diagnostic.noValidEvent": "没有找到可识别的用量事件，可先运行自检确认兼容性。",
     "diagnostic.unavailable": "暂无可用数据。",
     "limit.unknown": "未知周期",

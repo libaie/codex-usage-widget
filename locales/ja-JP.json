@@ -74,6 +74,7 @@
     "diagnostic.missingDirectory": "ローカルのセッションフォルダーが見つかりません。先にコーディングタスクを完了してください。",
     "diagnostic.emptyDirectory": "ローカルのセッション記録はまだありません。コーディングタスクが完了すると更新されます。",
     "diagnostic.readFailed": "セッション記録を読み取れません。現在のアカウントにアクセス権があることを確認して、もう一度お試しください。",
+    "diagnostic.persistenceFailed": "累積データを保存できませんでした。最後に保存された状態を表示しています。",
     "diagnostic.noValidEvent": "認識できる使用量イベントが見つかりません。互換性を確認するにはセルフテストを実行してください。",
     "diagnostic.unavailable": "利用できるデータがありません。",
     "limit.unknown": "期間不明",

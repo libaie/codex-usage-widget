@@ -52,6 +52,15 @@ try {
     $reminders.SentKeys = @('primary|4102444800|20')
     Assert-Boundary (-not (Save-ReminderGateState $reminders)) 'an invalid reminder store must reject implicit writes.'
     Assert-Boundary (([Convert]::ToBase64String([IO.File]::ReadAllBytes($reminderPath))) -ceq ([Convert]::ToBase64String($invalidBytes))) 'an invalid reminder store must remain byte-identical.'
+    Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'an explicit reset must replace all three local stores, including invalid files.'
+    $resetPreferences = Get-WidgetPreferences
+    $script:CacheTokenLedger = $null
+    $null = Update-CumulativeCacheTokens @()
+    $script:ReminderGateCache = $null
+    Assert-Boundary ($resetPreferences.Theme -eq 7 -and $resetPreferences.Language -ceq 'zh-CN' -and
+        $resetPreferences.StoreStatus -ceq 'valid' -and $script:CacheTokenLedger.StoreStatus -ceq 'valid' -and
+        $script:CacheTokenLedger.Sessions.Count -eq 0 -and (Get-ReminderGateState).StoreStatus -ceq 'valid' -and
+        @((Get-ReminderGateState).SentKeys).Count -eq 0) 'an explicit reset must publish only validated defaults after all writes succeed.'
 
     $partial = Get-FixtureSnapshot $testRoot $package 'partial'
     Assert-Boundary ($partial.Classification -ceq 'partial') 'valid usage plus malformed JSON must classify as partial.'
@@ -66,6 +75,43 @@ try {
     $overflow = Get-FixtureSnapshot $testRoot $package 'overflow'
     Assert-Boundary ($overflow.Classification -ceq 'partial' -and $overflow.Metrics.InvalidValueCount -eq 1) 'overflowing token data must be retained as a partial observation.'
 
+    $ledgerBaseline = '{"Sessions":[{"Id":"existing","CacheHitTokens":5,"CacheMissTokens":5}]}'
+    [IO.File]::WriteAllText($ledgerPath, $ledgerBaseline, [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $null = Update-CumulativeCacheTokens @()
+    $persistenceSnapshot = [pscustomobject]@{
+        Classification = 'complete'
+        State = [pscustomobject]@{
+            SessionTokenSnapshots = @([pscustomobject]@{ Id = 'fresh'; CacheHitTokens = 8; CacheMissTokens = 2 })
+            TokenDetails = $null
+        }
+    }
+    $ledgerLock = [IO.File]::Open($ledgerPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try {
+        $persistedSnapshot = Apply-UsageSnapshotPersistence $persistenceSnapshot
+    }
+    finally { $ledgerLock.Dispose() }
+    Assert-Boundary ($null -eq $persistedSnapshot) 'a failed ledger write must not publish unsaved cumulative values.'
+    Assert-Boundary ($script:CacheTokenLedger.Sessions.Count -eq 1) ('a failed ledger write must retain only the previously persisted session in memory; count={0}, status={1}, keys={2}.' -f
+        $script:CacheTokenLedger.Sessions.Count, $script:CacheTokenLedger.StoreStatus, (@($script:CacheTokenLedger.Sessions.Keys) -join ','))
+    Assert-Boundary ($script:CacheTokenLedger.Sessions.ContainsKey('existing')) 'a failed ledger write must retain the previously persisted session identity.'
+    Assert-Boundary (-not $script:CacheTokenLedger.Dirty) 'a failed ledger write must not mark unsaved memory as persisted state.'
+    Assert-Boundary ([IO.File]::ReadAllText($ledgerPath) -ceq $ledgerBaseline) 'a failed ledger write must leave the persisted ledger byte-identical.'
+
+    $reminderBaseline = '{"SentKeys":[]}'
+    [IO.File]::WriteAllText($reminderPath, $reminderBaseline, [Text.UTF8Encoding]::new($false))
+    $script:ReminderGateCache = $null
+    $null = Get-ReminderGateState
+    $reminderLock = [IO.File]::Open($reminderPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try {
+        $reminderRegistered = Register-UsageReminderThreshold -State ([pscustomobject]@{
+            Name = 'primary'; RemainingPercent = 10; ResetAt = [datetime]::UtcNow.AddHours(1)
+        }) -Threshold 10
+    }
+    finally { $reminderLock.Dispose() }
+    Assert-Boundary (-not $reminderRegistered -and @($script:ReminderGateCache.SentKeys).Count -eq 0) 'a failed reminder write must not publish or retain an unsaved notification gate.'
+    Assert-Boundary ([IO.File]::ReadAllText($reminderPath) -ceq $reminderBaseline) 'a failed reminder write must leave the persisted reminder gate byte-identical.'
+
     $boundedRoot = Join-Path $testRoot 'bounded-sessions'
     [void][IO.Directory]::CreateDirectory($boundedRoot)
     for ($index = 0; $index -lt 40; $index++) {
@@ -77,6 +123,32 @@ try {
     Assert-Boundary ($bounded.Files.Count -eq 30 -and $bounded.Files[0].Name -ceq 'session-39.jsonl' -and $bounded.Files[29].Name -ceq 'session-10.jsonl') 'bounded discovery must return only the thirty newest files.'
     $expired = Get-BoundedSessionFiles -SessionsPath $boundedRoot -MaxFiles 30 -MaxEntries 100 -DeadlineUtc ([datetime]::UtcNow.AddSeconds(-1))
     Assert-Boundary ($expired.Truncated -and $expired.Files.Count -eq 0) 'an expired discovery deadline must stop before enumeration.'
+
+    $defaultLimitRoot = Join-Path $testRoot 'default-limit-sessions'
+    [void][IO.Directory]::CreateDirectory($defaultLimitRoot)
+    for ($index = 0; $index -lt 4100; $index++) {
+        [IO.File]::WriteAllText((Join-Path $defaultLimitRoot ('entry-{0:D4}.jsonl' -f $index)), '')
+    }
+    $defaultLimit = Get-BoundedSessionFiles -SessionsPath $defaultLimitRoot -MaxFiles 30 -DeadlineUtc ([datetime]::UtcNow.AddSeconds(8))
+    Assert-Boundary ($defaultLimit.EntriesVisited -eq 4100 -and -not $defaultLimit.Truncated) 'the default discovery budget must include all entries through the 10,000-item boundary.'
+
+    $splitRoot = Join-Path $testRoot 'split-candidates'
+    $splitSessions = Join-Path $splitRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($splitSessions)
+    $splitNow = [datetime]::UtcNow
+    $splitDemo = [IO.File]::ReadAllText((Join-Path $package 'fixtures\contract\v1\inputs\demo.jsonl'))
+    $indexRows = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt 60; $index++) {
+        $id = '00000000-0000-0000-0000-{0:D12}' -f ($index + 1)
+        $path = Join-Path $splitSessions ('rollout-' + $id + '.jsonl')
+        [IO.File]::WriteAllText($path, $splitDemo)
+        [IO.File]::SetLastWriteTimeUtc($path, $splitNow.AddSeconds(-$index))
+        if ($index -ge 30) { $indexRows.Add('{"id":"' + $id + '","thread_name":"task ' + $index + '"}') }
+    }
+    [IO.File]::WriteAllLines((Join-Path $splitRoot 'session_index.jsonl'), $indexRows)
+    $splitSnapshot = Get-CodexUsageSnapshot -DataDirectory $splitRoot -ReadOnly
+    Assert-Boundary (@($splitSnapshot.State.SessionTokenSnapshots).Count -eq 30 -and
+        @($splitSnapshot.State.ActiveTasks).Count -eq 30) 'usage and named activity candidates must be selected independently and read at most sixty files.'
 
     $outside = Join-Path $testRoot 'outside-sessions'
     [void][IO.Directory]::CreateDirectory($outside)
@@ -118,14 +190,28 @@ try {
     $workerRoot = Join-Path $stateRoot 'worker'
     [void][IO.Directory]::CreateDirectory($workerRoot)
     $generation = [guid]::NewGuid().ToString('N')
-    $workerOutput = Join-Path $workerRoot ($generation + '.json')
     $stateHashes = @{}
     foreach ($path in $preferencePath, $ledgerPath, $reminderPath) {
         $stateHashes[$path] = [Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($path)))
     }
     $workerWatch = [Diagnostics.Stopwatch]::StartNew()
+    $workerEnvironmentNames = 'CODEX_WIDGET_DATA_DIRECTORY', 'CODEX_WIDGET_RESULT_PATH', 'CODEX_WIDGET_GENERATION'
+    $workerEnvironmentBefore = @{}
+    foreach ($name in $workerEnvironmentNames) { $workerEnvironmentBefore[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
     $workerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') -DataDirectory $workerData -Generation $generation
-    Assert-Boundary ($workerJob.OutputPath -ceq $workerOutput) 'the parent launcher must bind output to the private worker directory.'
+    $channelDirectory = Join-Path $workerRoot ('CodexUsageWidget-scan-' + $generation)
+    $workerOutput = Join-Path $channelDirectory 'result.json'
+    Assert-Boundary ($workerJob.OutputPath -ceq $workerOutput -and $workerJob.ChannelDirectory -ceq $channelDirectory) 'each scan must bind output to its own private channel directory.'
+    $arguments = [string]$workerJob.Process.StartInfo.Arguments
+    Assert-Boundary ($arguments -notlike ('*' + $workerData + '*') -and $arguments -notlike ('*' + $workerOutput + '*') -and
+        $arguments -notlike ('*' + $generation + '*')) 'data, result, and generation values must not appear in the worker command line.'
+    foreach ($name in $workerEnvironmentNames) {
+        Assert-Boundary ([Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) -ceq $workerEnvironmentBefore[$name]) 'the parent environment must be restored immediately after worker launch.'
+    }
+    $channelAcl = Get-Acl -LiteralPath $channelDirectory
+    $channelRules = @($channelAcl.Access | Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow })
+    Assert-Boundary ($channelAcl.AreAccessRulesProtected -and $channelRules.Count -eq 1 -and
+        $channelRules[0].IdentityReference.Value -ceq [Security.Principal.WindowsIdentity]::GetCurrent().Name) 'the per-round channel ACL must allow only the current user.'
     $worker = $workerJob.Process
     $workerCompleted = $worker.WaitForExit(12000)
     if (-not $workerCompleted) {
@@ -135,6 +221,15 @@ try {
     Assert-Boundary ([IO.File]::Exists($workerOutput) -and ([IO.FileInfo]$workerOutput).Length -le 262144) 'the worker result must fit the 256 KiB protocol limit.'
     $workerResult = [IO.File]::ReadAllText($workerOutput) | ConvertFrom-Json -ErrorAction Stop
     Assert-Boundary ($workerResult.schemaVersion -eq 1 -and $workerResult.generation -ceq $generation -and $workerResult.snapshot.Classification -ceq 'complete') 'the worker result must bind schema, generation, and normalized snapshot.'
+    $nestedForgery = $workerResult | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+    $nestedForgery.snapshot.State.TokenDetails | Add-Member -NotePropertyName Unexpected -NotePropertyValue 1
+    $nestedForgeryPath = Join-Path $workerRoot 'forged-nested.json'
+    [IO.File]::WriteAllText($nestedForgeryPath, ($nestedForgery | ConvertTo-Json -Depth 16 -Compress))
+    Assert-Boundary ($null -eq (Read-UsageScanResult -Path $nestedForgeryPath -ExpectedGeneration $generation)) 'the parent must reject unknown nested snapshot fields before state or persistence can observe them.'
+    Assert-Boundary ($null -ne (Get-Command Write-UsageScanResult -ErrorAction SilentlyContinue)) 'the worker must use one pre-serialization snapshot gate.'
+    $producerPath = Join-Path $workerRoot 'producer-rejected.json'
+    Assert-Boundary (-not (Write-UsageScanResult -Snapshot $nestedForgery.snapshot -Generation $generation -Path $producerPath) -and
+        -not [IO.File]::Exists($producerPath)) 'the producer must reject an invalid snapshot before serialization or any result write.'
     $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
     $workerWatch.Stop()
     Assert-Boundary ($received.Status -ceq 'completed' -and $received.ProcessExited -and -not [IO.File]::Exists($workerOutput)) 'the parent must reap a naturally completed worker exactly once.'
@@ -156,14 +251,38 @@ try {
     $timeoutInfo.RedirectStandardOutput = $true
     $timeoutInfo.RedirectStandardError = $true
     $timeoutProcess = [Diagnostics.Process]::Start($timeoutInfo)
+    $timeoutChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-55555555555555555555555555555555'
+    [void][IO.Directory]::CreateDirectory($timeoutChannel)
     $timeoutJob = [pscustomobject]@{
         Process = $timeoutProcess
         Generation = '55555555555555555555555555555555'
-        OutputPath = (Join-Path $workerRoot '55555555555555555555555555555555.json')
+        OutputPath = (Join-Path $timeoutChannel 'result.json')
+        ChannelDirectory = $timeoutChannel
         StartedAtUtc = [datetime]::UtcNow.AddSeconds(-11)
     }
     $timedOut = Receive-UsageScanProcess -Job $timeoutJob -TimeoutSeconds 10
     Assert-Boundary ($timedOut.Status -ceq 'timeout' -and $timedOut.ProcessExited) 'a timed-out worker must be killed and reaped through its original process object.'
+
+    $deadlineProbePath = Join-Path $testRoot 'deadline-probe.ps1'
+    $deadlineProbeText = @'
+param([Parameter(Mandatory)][string]$Package)
+. (Join-Path $Package 'CodexUsageWidget.ps1') -SelfTest | Out-Null
+$deadline = New-UsageWorkerDeadline
+Start-Sleep -Seconds 30
+'@
+    [IO.File]::WriteAllText($deadlineProbePath, $deadlineProbeText, [Text.UTF8Encoding]::new($false))
+    $deadlineInfo = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'powershell.exe'))
+    $deadlineInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $deadlineProbePath + '" -Package "' + $package + '"'
+    $deadlineInfo.UseShellExecute = $false
+    $deadlineInfo.CreateNoWindow = $true
+    $deadlineWatch = [Diagnostics.Stopwatch]::StartNew()
+    $deadlineProcess = [Diagnostics.Process]::Start($deadlineInfo)
+    $deadlineCompleted = $deadlineProcess.WaitForExit(25000)
+    $deadlineWatch.Stop()
+    if (-not $deadlineCompleted) { try { $deadlineProcess.Kill(); $deadlineProcess.WaitForExit() } catch { } }
+    Assert-Boundary ($deadlineCompleted -and $deadlineProcess.ExitCode -eq 2 -and $deadlineWatch.Elapsed.TotalSeconds -ge 11 -and
+        $deadlineWatch.Elapsed.TotalSeconds -lt 25) 'the worker watchdog must independently terminate a blocked process after twelve seconds.'
+    $deadlineProcess.Dispose()
 
     $killHandle = New-UsageWorkerJob
     $lifetimeInfo = [Diagnostics.ProcessStartInfo]::new()
