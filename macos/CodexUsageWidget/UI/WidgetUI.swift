@@ -254,3 +254,101 @@ struct WidgetPresentation {
         return WidgetPresentation(ringPercent: percent, statusKey: statusKey, demo: demo)
     }
 }
+
+enum WidgetDetailMode: Equatable { case closed, temporary, pinned }
+
+struct WidgetInteractionState {
+    private(set) var detailMode: WidgetDetailMode = .closed
+    private var ringInside = false
+    private var detailInside = false
+    private var pointerStart: CGPoint?
+    private var dragging = false
+    private var showAt: TimeInterval?
+    private var closeAt: TimeInterval?
+
+    mutating func pointerEnteredRing(at now: TimeInterval) {
+        ringInside = true
+        closeAt = nil
+        if detailMode == .closed, !dragging { showAt = now + 0.180 }
+    }
+
+    mutating func pointerExitedRing(at now: TimeInterval) {
+        ringInside = false
+        showAt = nil
+        if detailMode == .temporary, !detailInside { closeAt = now + 0.250 }
+    }
+
+    mutating func pointerEnteredDetail(at now: TimeInterval) {
+        detailInside = true
+        closeAt = nil
+    }
+
+    mutating func pointerExitedDetail(at now: TimeInterval) {
+        detailInside = false
+        if detailMode == .temporary, !ringInside { closeAt = now + 0.250 }
+    }
+
+    mutating func pointerDown(at point: CGPoint) {
+        pointerStart = point
+        dragging = false
+        showAt = nil
+    }
+
+    mutating func pointerMoved(to point: CGPoint) -> Bool {
+        guard let pointerStart else { return false }
+        if !dragging, hypot(point.x - pointerStart.x, point.y - pointerStart.y) > 4 {
+            dragging = true
+            showAt = nil
+            closeAt = nil
+            if detailMode == .temporary { detailMode = .closed }
+        }
+        return dragging
+    }
+
+    mutating func pointerUp() -> Bool {
+        let wasDragging = dragging
+        pointerStart = nil
+        dragging = false
+        return wasDragging
+    }
+
+    mutating func togglePinned() {
+        detailMode = detailMode == .pinned ? .closed : .pinned
+        showAt = nil
+        closeAt = nil
+    }
+
+    mutating func escape() {
+        detailMode = .closed
+        showAt = nil
+        closeAt = nil
+    }
+
+    mutating func advance(to now: TimeInterval) -> Bool {
+        var changed = false
+        if let deadline = showAt, deadline <= now {
+            showAt = nil
+            if ringInside, !dragging, detailMode == .closed {
+                detailMode = .temporary
+                changed = true
+            }
+        }
+        if let deadline = closeAt, deadline <= now {
+            closeAt = nil
+            if !ringInside, !detailInside, detailMode == .temporary {
+                detailMode = .closed
+                changed = true
+            }
+        }
+        return changed
+    }
+}
+
+enum WidgetDemo {
+    static func load(fixtureURL: URL, now: Date) throws -> UsageScanResult {
+        UsageScanResult(
+            state: UsageContract.evaluate(data: try Data(contentsOf: fixtureURL), now: now),
+            sessions: []
+        )
+    }
+}
