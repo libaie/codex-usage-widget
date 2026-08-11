@@ -237,8 +237,9 @@ try {
     $workerWatch.Stop()
     Assert-Boundary ($received.Status -ceq 'completed' -and $received.ProcessExited -and -not [IO.File]::Exists($workerOutput)) 'the parent must reap a naturally completed worker exactly once.'
     $validatedSnapshot = $received.Snapshot
-    Assert-Boundary ($validatedSnapshot.Classification -ceq 'complete' -and $null -ne $validatedSnapshot.State -and
-        @($validatedSnapshot.State.SessionTokenSnapshots).Count -eq 30 -and $workerWatch.Elapsed.TotalSeconds -lt 10) 'the parent must validate thirty bounded session files within the deadline.'
+    Assert-Boundary ($validatedSnapshot.Classification -ceq 'complete' -and $null -ne $validatedSnapshot.State) 'the parent must publish a complete validated snapshot.'
+    Assert-Boundary (@($validatedSnapshot.State.SessionTokenSnapshots).Count -eq 30) ('the parent must validate thirty bounded session files; count={0}.' -f @($validatedSnapshot.State.SessionTokenSnapshots).Count)
+    Assert-Boundary ($workerWatch.Elapsed.TotalSeconds -lt 10) ('the parent must validate the bounded snapshot within ten seconds; elapsed={0:N3}s.' -f $workerWatch.Elapsed.TotalSeconds)
     $forgedPath = Join-Path $workerRoot 'forged.json'
     [IO.File]::WriteAllText($forgedPath, '{"schemaVersion":1,"generation":"00000000000000000000000000000000","snapshot":{}}')
     Assert-Boundary ($null -eq (Read-UsageScanResult -Path $forgedPath -ExpectedGeneration $generation)) 'the parent must reject a stale generation.'
