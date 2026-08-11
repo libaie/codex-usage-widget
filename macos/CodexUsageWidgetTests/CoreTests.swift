@@ -56,22 +56,29 @@ final class CoreTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        for fixture in document["cases"] as! [[String: Any]] {
+        let cases = document["cases"] as! [[String: Any]]
+        XCTAssertEqual(cases.count, 14)
+        for fixture in cases {
             let identifier = fixture["id"] as! String
-            let input = contractRoot.appendingPathComponent(fixture["input"] as! String)
             let now = formatter.date(from: fixture["nowUtc"] as! String)!
-            let actual = try UsageContract.evaluate(fileURL: input, now: now).jsonObject()
-            let metrics = actual["metrics"] as! [String: Any]
-            for (key, expected) in fixture["expected"] as! [String: Any] {
-                let got = actual[key] ?? metrics[key]
-                if expected is NSNull {
-                    XCTAssertTrue(got is NSNull, "[contract/\(identifier)] expected \(key)=null, got \(String(describing: got))")
-                } else if let number = expected as? NSNumber {
-                    XCTAssertEqual(got as? NSNumber, number, "[contract/\(identifier)] \(key)")
-                } else {
-                    XCTAssertEqual(got as? String, expected as? String, "[contract/\(identifier)] \(key)")
-                }
+            let actual: [String: Any]
+            if fixture["scenario"] as? String == "read-failure" {
+                var metrics = ScanMetrics()
+                metrics.readFailureCount = 1
+                metrics.candidateFileCount = 1
+                actual = UsageContract.evaluate(data: Data(), now: now, metrics: metrics).jsonObject()
+            } else {
+                let input = contractRoot.appendingPathComponent(fixture["input"] as! String)
+                actual = try UsageContract.evaluate(fileURL: input, now: now).jsonObject()
             }
+            let expected = fixture["expected"] as! [String: Any]
+            let actualBytes = try JSONSerialization.data(withJSONObject: actual, options: [.sortedKeys])
+            let expectedBytes = try JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys])
+            XCTAssertEqual(
+                String(decoding: actualBytes, as: UTF8.self),
+                String(decoding: expectedBytes, as: UTF8.self),
+                "[contract/\(identifier)] full canonical snapshot"
+            )
         }
     }
 

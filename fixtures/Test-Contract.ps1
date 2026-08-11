@@ -9,49 +9,141 @@ function Assert-Contract([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "Contract assertion failed: $Message" }
 }
 
+function ConvertTo-CanonicalContractState {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][datetime]$Now,
+        [Parameter(Mandatory)][int]$CandidateFileCount
+    )
+
+    $state = $Snapshot.State
+    $current = if ($null -ne $state) { Get-CurrentLimitState -State $state -Now $Now } else { $null }
+    $details = if ($null -ne $state -and $null -ne $state.PSObject.Properties['TokenDetails']) { $state.TokenDetails } else { $null }
+    $observedAt = if ($null -ne $state -and $state.PSObject.Properties['ObservedAt'].Value -is [datetime]) {
+        [DateTimeOffset]::new(([datetime]$state.ObservedAt).ToUniversalTime()).ToUnixTimeMilliseconds()
+    } else { $null }
+    $tasks = @(
+        if ($null -ne $state -and $null -ne $state.PSObject.Properties['ActiveTasks']) {
+            foreach ($task in @($state.ActiveTasks)) {
+                $taskDetails = $task.TokenDetails
+                [ordered]@{
+                    id = [string]$task.Id
+                    name = [string]$task.Name
+                    observedAt = [DateTimeOffset]::new(([datetime]$task.UpdatedAt).ToUniversalTime()).ToUnixTimeMilliseconds()
+                    cumulativeTokens = if ($null -ne $taskDetails.CumulativeTokens) { [string]$taskDetails.CumulativeTokens } else { $null }
+                    cacheHitTokens = if ($null -ne $taskDetails.CacheHitTokens) { [string]$taskDetails.CacheHitTokens } else { $null }
+                    cacheMissTokens = if ($null -ne $taskDetails.CacheMissTokens) { [string]$taskDetails.CacheMissTokens } else { $null }
+                    contextTokens = if ($null -ne $taskDetails.ContextTokens) { [string]$taskDetails.ContextTokens } else { $null }
+                    contextLimit = if ($null -ne $taskDetails.ContextLimit) { [string]$taskDetails.ContextLimit } else { $null }
+                    contextPercent = if ($null -ne $taskDetails.ContextPercent) { ([decimal]$taskDetails.ContextPercent).ToString('F1', [Globalization.CultureInfo]::InvariantCulture) } else { $null }
+                    inputPercent = if ($null -ne $taskDetails.InputPercent) { ([decimal]$taskDetails.InputPercent).ToString('F1', [Globalization.CultureInfo]::InvariantCulture) } else { $null }
+                    outputPercent = if ($null -ne $taskDetails.OutputPercent) { ([decimal]$taskDetails.OutputPercent).ToString('F1', [Globalization.CultureInfo]::InvariantCulture) } else { $null }
+                    reasoningOutputPercent = if ($null -ne $taskDetails.ReasoningOutputPercent) { ([decimal]$taskDetails.ReasoningOutputPercent).ToString('F1', [Globalization.CultureInfo]::InvariantCulture) } else { $null }
+                }
+            }
+        }
+    )
+    $stringValue = {
+        param([string]$Name)
+        if ($null -ne $details -and $null -ne $details.PSObject.Properties[$Name] -and $null -ne $details.$Name) { return [string]$details.$Name }
+        return $null
+    }
+    $percentValue = {
+        param([string]$Name)
+        if ($null -ne $details -and $null -ne $details.PSObject.Properties[$Name] -and $null -ne $details.$Name) {
+            return ([decimal]$details.$Name).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        return $null
+    }
+
+    return [ordered]@{
+        schemaVersion = 1
+        sourceKind = 'local-session-observation'
+        classification = [string]$Snapshot.Classification
+        freshness = 'current'
+        selectedWindow = if ($null -ne $current) { [string]$current.Name } else { $null }
+        remainingPercent = if ($null -ne $current) { ([decimal]$current.RemainingPercent).ToString('F1', [Globalization.CultureInfo]::InvariantCulture) } else { $null }
+        cumulativeTokens = & $stringValue 'CumulativeTokens'
+        cacheHitTokens = & $stringValue 'CacheHitTokens'
+        cacheMissTokens = & $stringValue 'CacheMissTokens'
+        contextTokens = & $stringValue 'ContextTokens'
+        contextLimit = & $stringValue 'ContextLimit'
+        contextPercent = & $percentValue 'ContextPercent'
+        inputPercent = & $percentValue 'InputPercent'
+        outputPercent = & $percentValue 'OutputPercent'
+        reasoningOutputPercent = & $percentValue 'ReasoningOutputPercent'
+        observedAt = $observedAt
+        tasks = [object[]]$tasks
+        taskNamesAvailable = if ($null -ne $state -and $null -ne $state.PSObject.Properties['TaskNamesAvailable']) { [bool]$state.TaskNamesAvailable } else { $false }
+        metrics = [ordered]@{
+            validEventCount = [int]$Snapshot.Metrics.UsageEventCount
+            malformedLineCount = [int]$Snapshot.Metrics.MalformedLineCount
+            unknownEventCount = [int]$Snapshot.Metrics.UnknownEventCount
+            readFailureCount = [int]$Snapshot.Metrics.ReadFailureCount
+            candidateFileCount = $CandidateFileCount
+            limitWindowCount = if ($null -ne $state) { @($state.LimitWindows).Count } else { 0 }
+        }
+    }
+}
+
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 $contractRoot = Join-Path $package 'fixtures\contract\v1'
-$requiredPaths = @(
-    'VERSION',
-    'fixtures\contract\v1\schema.md',
-    'fixtures\contract\v1\theme-catalog.json',
-    'fixtures\contract\v1\expected-state.json',
-    'fixtures\contract\v1\inputs\precision-and-tightest-window.jsonl',
-    'fixtures\contract\v1\inputs\demo.jsonl',
-    'fixtures\contract\v1\inputs\partial.jsonl',
-    'fixtures\contract\v1\inputs\unsupported.jsonl',
-    'fixtures\contract\v1\inputs\all-malformed.jsonl',
-    'fixtures\contract\v1\inputs\empty.jsonl',
-    'fixtures\contract\v1\inputs\reset-boundary.jsonl',
-    'fixtures\contract\v1\inputs\overflow.jsonl',
-    'fixtures\contract\v1\inputs\cache-order.jsonl'
-)
-foreach ($relativePath in $requiredPaths) {
+$expectedPath = Join-Path $contractRoot 'expected-state.json'
+foreach ($relativePath in 'VERSION', 'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\theme-catalog.json', 'fixtures\contract\v1\expected-state.json') {
     Assert-Contract ([IO.File]::Exists((Join-Path $package $relativePath))) "missing required contract file: $relativePath"
 }
 
 $version = [IO.File]::ReadAllText((Join-Path $package 'VERSION')).Trim()
 Assert-Contract ($version -ceq '1.1.0') 'VERSION must be exactly 1.1.0.'
 
-$expected = [IO.File]::ReadAllText((Join-Path $contractRoot 'expected-state.json')) | ConvertFrom-Json -ErrorAction Stop
+$expected = [IO.File]::ReadAllText($expectedPath) | ConvertFrom-Json -ErrorAction Stop
 Assert-Contract ($expected.schemaVersion -eq 1) 'expected-state schemaVersion must be 1.'
 Assert-Contract ($expected.sourceKind -ceq 'local-session-observation') 'sourceKind must be local-session-observation.'
-Assert-Contract (@($expected.cases).Count -eq 9) 'the v1 contract must contain nine reviewed cases.'
-
-foreach ($case in @($expected.cases)) {
-    $inputPath = Join-Path $contractRoot $case.input
-    Assert-Contract ([IO.File]::Exists($inputPath)) "missing case input: $($case.input)"
-    $validLines = 0
-    $malformedLines = 0
-    foreach ($line in @(Get-Content -LiteralPath $inputPath | Where-Object { $_.Trim().Length -gt 0 })) {
-        try { $null = $line | ConvertFrom-Json -ErrorAction Stop; $validLines++ }
-        catch { $malformedLines++ }
-    }
-    Assert-Contract ($validLines -eq [int]$case.fixtureStats.validJsonLines) "valid JSON line count changed for $($case.id)."
-    Assert-Contract ($malformedLines -eq [int]$case.fixtureStats.malformedJsonLines) "malformed JSON line count changed for $($case.id)."
-}
+Assert-Contract (@($expected.cases).Count -eq 14) 'the v1 contract must contain fourteen reviewed cases.'
 
 . (Join-Path $package 'CodexUsageWidget.ps1') -SelfTest | Out-Null
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('CodexUsageWidget-contract-' + [guid]::NewGuid().ToString('N'))
+try {
+    [void][IO.Directory]::CreateDirectory($testRoot)
+    foreach ($case in @($expected.cases)) {
+        $caseRoot = Join-Path $testRoot $case.id
+        $sessions = Join-Path $caseRoot 'sessions'
+        [void][IO.Directory]::CreateDirectory($sessions)
+        $locked = $null
+        try {
+            $candidatePath = Join-Path $sessions 'contract.jsonl'
+            if ([string]$case.scenario -ceq 'read-failure') {
+                [IO.File]::WriteAllText($candidatePath, '{}')
+                $locked = [IO.File]::Open($candidatePath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            }
+            else {
+                $inputPath = Join-Path $contractRoot ([string]$case.input)
+                Assert-Contract ([IO.File]::Exists($inputPath)) "missing case input: $($case.input)"
+                [IO.File]::Copy($inputPath, $candidatePath)
+                $validLines = 0
+                $malformedLines = 0
+                foreach ($line in @(Get-Content -LiteralPath $inputPath | Where-Object { $_.Trim().Length -gt 0 })) {
+                    try { $null = $line | ConvertFrom-Json -ErrorAction Stop; $validLines++ }
+                    catch { $malformedLines++ }
+                }
+                Assert-Contract ($validLines -eq [int]$case.fixtureStats.validJsonLines) "valid JSON line count changed for $($case.id)."
+                Assert-Contract ($malformedLines -eq [int]$case.fixtureStats.malformedJsonLines) "malformed JSON line count changed for $($case.id)."
+            }
+            $snapshot = Get-CodexUsageSnapshot -DataDirectory $caseRoot -ReadOnly
+            $now = [datetime]::Parse($case.nowUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $actual = ConvertTo-CanonicalContractState -Snapshot $snapshot -Now $now -CandidateFileCount 1
+            $actualJson = $actual | ConvertTo-Json -Depth 20 -Compress
+            $expectedJson = $case.expected | ConvertTo-Json -Depth 20 -Compress
+            Assert-Contract ($actualJson -ceq $expectedJson) "full canonical snapshot changed for $($case.id).`nexpected: $expectedJson`nactual:   $actualJson"
+        }
+        finally {
+            if ($null -ne $locked) { $locked.Dispose() }
+        }
+    }
+}
+finally {
+    if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
+}
 
 $themeCatalog = [IO.File]::ReadAllText((Join-Path $contractRoot 'theme-catalog.json')) | ConvertFrom-Json -ErrorAction Stop
 $actualThemes = @(Get-WidgetThemes)
@@ -66,41 +158,5 @@ for ($index = 0; $index -lt 8; $index++) {
         Assert-Contract ($null -ne $languagePack.strings.PSObject.Properties[$want.nameKey]) "missing $($want.nameKey) in $languageCode."
     }
 }
-
-$precisionCase = @($expected.cases | Where-Object id -eq 'precision-and-tightest-window')[0]
-$precisionEvents = @(
-    Get-Content -LiteralPath (Join-Path $contractRoot $precisionCase.input) |
-        Where-Object { $_.Trim().Length -gt 0 } |
-        ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop }
-)
-$state = Get-NewestUsageState -Events $precisionEvents
-Assert-Contract ($null -ne $state) 'precision fixture must produce a usage state.'
-$current = Get-CurrentLimitState -State $state -Now ([datetime]::Parse($precisionCase.nowUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind))
-Assert-Contract ($current.Name -ceq $precisionCase.expected.selectedWindow) 'the tightest unexpired window must be selected.'
-$remaining = [decimal]$current.RemainingPercent
-Assert-Contract ($remaining.ToString('F1', [Globalization.CultureInfo]::InvariantCulture) -ceq $precisionCase.expected.remainingPercent) 'remaining percentage changed.'
-$details = $state.TokenDetails
-foreach ($propertyName in 'CumulativeTokens', 'CacheHitTokens', 'CacheMissTokens', 'ContextTokens', 'ContextLimit') {
-    $expectedName = $propertyName.Substring(0, 1).ToLowerInvariant() + $propertyName.Substring(1)
-    Assert-Contract ([string]$details.$propertyName -ceq [string]$precisionCase.expected.$expectedName) "$propertyName lost integer precision."
-}
-foreach ($propertyName in 'ContextPercent', 'InputPercent', 'OutputPercent', 'ReasoningOutputPercent') {
-    $expectedName = $propertyName.Substring(0, 1).ToLowerInvariant() + $propertyName.Substring(1)
-    $actual = ([decimal]$details.$propertyName).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)
-    Assert-Contract ($actual -ceq [string]$precisionCase.expected.$expectedName) "$propertyName changed."
-}
-
-$cacheCase = @($expected.cases | Where-Object id -eq 'cache-order')[0]
-$cacheEvents = @(Get-Content -LiteralPath (Join-Path $contractRoot $cacheCase.input) | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
-$cacheState = Get-NewestUsageState -Events $cacheEvents -LimitId 'codex'
-Assert-Contract ($cacheState.LimitWindows[0].UsedPercent -eq 51) 'the highest observation in the current reset cycle must win.'
-Assert-Contract ([string]$cacheState.TokenDetails.CacheHitTokens -ceq $cacheCase.expected.cacheHitTokens -and
-    [string]$cacheState.TokenDetails.CacheMissTokens -ceq $cacheCase.expected.cacheMissTokens) 'out-of-order cache counters must use the monotonic maximum.'
-
-$resetCase = @($expected.cases | Where-Object id -eq 'reset-boundary')[0]
-$resetEvents = @(Get-Content -LiteralPath (Join-Path $contractRoot $resetCase.input) | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
-$resetState = Get-NewestUsageState -Events $resetEvents -LimitId 'codex'
-$resetNow = [datetime]::Parse($resetCase.nowUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-Assert-Contract ($null -eq (Get-CurrentLimitState -State $resetState -Now $resetNow)) 'resetAt equal to now must be expired.'
 
 Write-Output 'Contract self-test passed.'
