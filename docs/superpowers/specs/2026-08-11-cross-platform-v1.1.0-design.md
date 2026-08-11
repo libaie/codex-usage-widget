@@ -160,7 +160,7 @@ Windows 作业：
 
 macOS 作业：
 
-1. 构建并测试 Swift 数据引擎和界面目标。
+1. 构建单一 `CodexUsageWidget` 应用目标，并运行单元测试与 UI 测试目标。
 2. 生成 `arm64` 与 `x86_64` 通用应用。
 3. 在没有签名凭据时只产生内部测试产物。
 4. 正式发布时使用 Developer ID Application、Hardened Runtime 和安全时间戳签名。
@@ -1228,3 +1228,308 @@ ENG-T1 契约/预期快照（串行冻结）
 | 发布 tag | 所有 gate 后创建且不可变 | 先打 tag 再修、移动 tag | 可审计和可回滚。 |
 
 **Phase 3 complete.** 独立工程审查提出 9 个 P1；Codex CLI 不可用。所有问题已转成冻结契约、硬边界、测试或发布 gate，下一阶段只审查贡献者与维护者的开发体验。
+
+## AUTOPLAN 阶段 4：开发体验审查
+
+审查状态：**CLEAR（计划完成后全部维度不低于 8/10）**
+
+模式：**DX EXPANSION**。这是从单平台脚本扩展为双平台开源桌面项目，开发者体验本身会决定是否有人能安全贡献和复现发布。
+
+参考降级：技能指定的 `dx-hall-of-fame.md` 在当前 gstack 安装中不存在；八个评审 pass 已完整执行，但不伪造该缺失参考中的案例或分数。
+
+### Developer Persona Card
+
+```text
+TARGET DEVELOPER PERSONA
+========================
+Who:       从 GitHub 进入的开源贡献者；次要角色是负责签名、候选和 Release 的维护者
+Context:   想修一个解析/界面问题、增加真实格式样本，或复现 Windows/macOS 候选
+Tolerance: 5 分钟内必须得到确定性绿灯或看到真实演示；否则会认为仓库不可复现
+Expects:   clone 后有精确命令、匿名 fixture、无密钥 CI、清楚的平台边界和不泄露个人会话的规则
+```
+
+典型环境：Windows 10/11 + Windows PowerShell 5.1，或 macOS 13+ + 计划锁定的 Xcode；贡献者通常只有其中一个平台，也不持有 Apple 证书。熟悉 Git 和本平台工具，但不应先阅读 4,000 行主脚本或猜测签名变量才能运行测试。
+
+### Developer Empathy Narrative
+
+> 我从 GitHub 打开仓库，README 的产品截图、两步启动、隐私和统计口径都很清楚，但这是用户说明，不是贡献入口。我点开 `CONTRIBUTING.md`，只看到 Windows PowerShell 5.1、两个测试命令和不要提交真实数据；它没有告诉我怎么克隆后启动一个确定性的界面、为什么发布检查器没在清单里，也没有 macOS 工程或命令。作为 Windows 贡献者，我能在几秒内看到 `自检通过。`，但若本机没有合适的 Codex 会话，就无法判断自己的 UI 改动；使用真实会话又担心截图或 fixture 泄露。作为 Mac 贡献者，我甚至不知道计划采用 Xcode 工程、哪个 scheme、哪个 Xcode/runner、怎样在没有 Developer ID 时构建。作为发布维护者，我知道原则上要签名、公证和重下验证，却找不到一条可以逐步执行、失败后知道停在哪里的 runbook。仓库证明了产品能运行，但还没有证明陌生贡献者能在一个短会话内安全复现它。
+
+该叙事由当前 `README.md`、14 行的 `CONTRIBUTING.md`、现有三个检查入口和尚不存在的 `macos/`、`.github/` 目录直接得出。
+
+### Competitive DX Benchmark
+
+下表的时间是在工具链已安装后的**估计 TTHW**，来源页面没有承诺具体分钟数，因此不把估计写成实测事实。
+
+| 工具 | 估计 TTHW | 值得复用的 DX 选择 | 来源 |
+|---|---:|---|---|
+| CodexBar | 2–5 分钟 | 一条打包脚本 + `open`，另有直接 compile/run、测试、开发和发布文档 | [CodexBar README](https://github.com/steipete/CodexBar) |
+| Codex Usage | 3–5 分钟 | 明确 Node 版本；clone 后 `npm run summary` 或 `npm run serve` 立即得到结果 | [Codex Usage README](https://github.com/DhWU-coder/codex-usage) |
+| 本项目当前 Windows | 5–10 分钟 | 无依赖，`-SelfTest` 约数秒；但无匿名可视演示和完整贡献命令 | 当前仓库 |
+| 本项目当前 macOS | 不可达 | 尚无工程、scheme 或构建入口 | 当前仓库 |
+| v1.1.0 目标 | 支持平台均 ≤5 分钟看到 demo | 原生命令 + 匿名 fixture + 无密钥 CI，不增加包管理器 | 本计划 |
+
+选择：**Competitive tier（2–5 分钟）**。不追求 hosted playground；桌面原生 UI 在浏览器里并不真实。一条确定性的本地 demo 命令比新增网站或视频更匹配贡献者。
+
+### Magical Moment Specification
+
+魔法时刻：**贡献者从干净 clone 使用完全虚构的数据，看到与生产结构相同的 55% 圆环和详情卡，并确认没有读取或写入自己的 Codex/小组件状态。**
+
+交付载体：**copy-paste demo command**。
+
+Windows 目标路径：
+
+```powershell
+git clone https://github.com/libaie/codex-usage-widget.git
+Set-Location .\codex-usage-widget
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\CodexUsageWidget.ps1 -SelfTest
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\CodexUsageWidget.ps1 -Demo
+```
+
+预期：第三条只输出 `自检通过。`；第四条打开明确标注“演示数据”的 55% 圆环，任务和详情来自 `fixtures/contract/v1/demo`。
+
+macOS 目标路径：
+
+```bash
+git clone https://github.com/libaie/codex-usage-widget.git
+cd codex-usage-widget
+xcodebuild -project macos/CodexUsageWidget.xcodeproj -scheme CodexUsageWidget -destination 'platform=macOS' -derivedDataPath .build test
+open .build/Build/Products/Debug/CodexUsageWidget.app --args --demo
+```
+
+`-Demo/--demo` 必须：只读已纳入发布检查的匿名 fixture；使用内存偏好/账本/提醒；不读取 `CODEX_HOME`、用户目录或真实状态；不发送通知；使用独立实例标识；详情来源显示“演示数据”。退出后用户状态文件的存在性和字节均不变化。两平台共用同一 demo 规范快照，避免另建演示业务逻辑。
+
+时间目标：已安装平台工具链时，首次确定性 demo ≤5 分钟；完整无密钥检查 Windows ≤10 分钟、macOS/CI ≤15 分钟。冷安装 Xcode 不计入仓库 TTHW，但在前置条件中明确说明。
+
+### Developer Journey Map
+
+| 阶段 | 贡献者操作 | 当前摩擦 | 计划后的状态 |
+|---|---|---|---|
+| Discover | 从 README 判断用途、隐私和支持平台 | 用户说明充分；贡献入口不突出 | README 保持用户优先，增加一条 Development 链接到 `CONTRIBUTING.md`。 |
+| Install | clone，确认 Windows PowerShell 或 Xcode | 仅 Windows 前置条件；Mac 不可达 | 贡献矩阵列精确 OS、工具、Xcode/runner、无证书路径和无 Mac 可贡献范围。 |
+| Hello World | 跑自检并看到 UI | 自检有绿灯，但 UI 依赖真实会话 | 同一匿名 fixture 驱动 `-Demo/--demo`，5 分钟内看到生产结构。 |
+| Real Usage | 修改 parser、主题、语言或 UI | 4,000+ 行脚本无源码地图；共同契约尚未落地 | CONTRIBUTING 给函数/目录入口；schema、DESIGN 和 owner 规则可直接定位。 |
+| Debug | 检查自检、launcher、release/Xcode 失败 | 命令不完整；launcher/CIM 可能无界；Mac 错误未定义 | 固定阶段前缀、退出码、预算、`-Verbose` 和文档 anchor，默认输出不含私人路径。 |
+| Upgrade | 改版本并生成候选 | v1.0 手工回滚清楚；双平台版本来源和签名 runbook 缺失 | 根 `VERSION` 是唯一功能版本源；`docs/releasing.md` 覆盖候选、签名、重下和回滚。 |
+
+### First-Time Developer Confusion Report
+
+| 时间 | 当前第一次尝试 | 解决状态 |
+|---|---|---|
+| T+0:00 | README 的 Quick start 是下载 ZIP，不知道源码贡献从哪里开始。 | README 增加 Development 链接；仍不把用户首页变成构建手册。 |
+| T+0:45 | CONTRIBUTING 只有两个 Windows 命令，发布检查器没有出现。 | 补精确 Windows/macOS/fresh-clone 检查矩阵和期望输出。 |
+| T+1:30 | 在 Windows 上看不到任何 Mac 工程，也不知道能否改共同 fixture。 | 文档明确无 Mac 可改契约/匿名样本，Swift 结果由无密钥 CI 验证。 |
+| T+2:15 | 想看 UI，只能读取自己的 Codex 数据；担心测试资料进入提交。 | `-Demo/--demo` 隔离用户目录，发布检查器继续拒绝真实路径/秘密。 |
+| T+3:00 | 修改 locale 后只知道“键要相同”，不知道完整 gate。 | 给五语言键/占位符/字体宽度及截图命令；CI 显示具体语言/键。 |
+| T+4:00 | 准备发布，不知道哪个值决定版本，也不知道无证书能跑到哪一步。 | `VERSION` + `docs/releasing.md` 明确无密钥候选与受保护 release 分界。 |
+
+所有六项都进入 v1.1.0；没有把贡献者困惑推迟为 TODO。
+
+### DX 独立声音
+
+**独立 DX 审查代理：** 给出当前平均约 5.1/10，指出 6 个 P1 和 2 个 P2。与主审高度一致的部分是：CONTRIBUTING 只覆盖 Windows、自检/构建参数未冻结、Mac 工具链与 CI 不存在、fixture 贡献流未定义、launcher 查询可能无界、需要最小发布 runbook。它建议根级通用 `build.ps1`；主审采用已有工程方向中的 `scripts/Build-Windows.ps1` + 原生 `xcodebuild`，避免在 Mac 引入 PowerShell 或再造跨平台包装器。
+
+**Codex CLI：** `[codex-unavailable: access denied]`，不声称跨模型共识。
+
+### Pass 1：Getting Started（4/10 -> 9/10）
+
+当前用户安装已接近一键，但贡献者路径不是：没有 clone-to-demo、Mac 命令、期望输出或匿名可视数据。计划后的理想流程限制为三件事：clone、平台自检、demo。完整 gate 放在下一层，不阻塞第一次成功。
+
+- Windows：`-SelfTest` 绿灯后 `-Demo`；无需安装依赖。
+- Mac：一个共享 scheme 的 `xcodebuild test` 后 `open ... --args --demo`；Debug 构建不需要 Apple 账号。
+- 无 Mac：本地运行共同 fixture 的 Windows runner；PR 的无密钥 macOS job 在 15 分钟内给出结果。
+- 最简调用已可用于真实贡献，复杂签名只在 maintainer runbook 展开。
+
+### Pass 2：接口与命令（4/10 -> 9/10）
+
+本产品不提供公共 API/SDK，不为得分虚构 CLI。贡献接口就是四组稳定命令：
+
+| 目的 | 稳定入口 | 成功契约 |
+|---|---|---|
+| Windows 核心 | `CodexUsageWidget.ps1 -SelfTest` | exit 0，只输出既有成功短语。 |
+| Windows demo | `CodexUsageWidget.ps1 -Demo` | 打开隔离 demo；关闭后 exit 0。 |
+| Windows 包 | `scripts/Build-Windows.ps1 -Version (Get-Content VERSION)` | 生成固定 artifacts 清单；不签名。 |
+| Windows 包验证 | 现有 release checker、launcher 与 EXE `--self-test` | 非零即阻断；输出稳定阶段。 |
+| macOS 核心/UI | 共享 `CodexUsageWidget` scheme 的 `xcodebuild test/build` | Debug 无账号可运行；scheme 纳入 Git。 |
+| macOS demo | app `--demo` | 与 Windows 同 fixture/显示语义。 |
+| 正式候选 | 受保护 workflow | 精确 SHA、签名、公证、重下全通过才可发布。 |
+
+根 `VERSION` 只含 `1.1.0`。构建脚本、Xcode build setting、CHANGELOG、资产名和 tag 都验证它；不新建配置框架。
+
+### Pass 3：错误与调试（6/10 -> 9/10）
+
+| 路径 | 当前看到 | 目标输出 |
+|---|---|---|
+| 共同契约不一致 | PowerShell assertion/stack，未必指出 fixture 和两端差异 | `[contract/<fixture>] expected <field>, got <value>`；给重跑命令和 `CONTRIBUTING.md#contract-fixtures`。 |
+| launcher/CIM 权限或等待 | assertion 尚可，但 CIM/WMI 查询与外层执行在受限环境可能无界 | 固定总预算；`[launcher/environment] 无法在预算内查询隐藏进程；请在本机管理员策略允许的 PowerShell 5.1 重跑`。超时非零退出且清理精确临时目录。 |
+| 签名/公证/tag | 计划只有通用 CI 失败 | `[release/signing-not-configured]`、`[release/notary-rejected]` 或 `[release/tag-sha-mismatch]`；给 `docs/releasing.md` anchor，绝不回显证书、账号或绝对私人路径。 |
+
+默认失败输出包含 problem、cause、fix、文档 anchor；`-Verbose`/CI artifact 才显示脱敏阶段细节。业务脚本错误保持本地化；构建/CI 错误使用稳定英文阶段码和可读说明，便于搜索而不维护五份开发文案。
+
+### Pass 4：文档与学习（6/10 -> 9/10）
+
+复用现有双语 README，不建文档站。最小文档结构：
+
+- `README.md` / `README.zh-CN.md`：用户价值、安装、隐私、使用、更新；增加平台资产表和 Development 链接。
+- `CONTRIBUTING.md`：唯一开发入口，含前置条件、5 分钟 demo、完整命令、源码地图、契约/locale/截图规则、无 Mac 路径、PR 清单和脱敏反馈格式。
+- `fixtures/contract/v1/schema.md`：统计参考，不把领域规则复制进 CONTRIBUTING。
+- `DESIGN.md`：主题、状态和 UI 参考，不创建组件站点。
+- `docs/releasing.md`：维护者候选、签名、公证、tag、草稿、重下和恢复 runbook。
+- `CHANGELOG.md` / `docs/releases/v1.1.0.md`：版本行为与迁移说明。
+
+源码地图只列已有/计划入口：目录解析、会话扫描、持久化、刷新 worker、WPF UI、自检；Mac 的 `Core/`、`UI/`、Resources 和两个测试 target。无需为导航拆分稳定 Windows 文件。
+
+### Pass 5：升级与迁移（7/10 -> 9/10）
+
+- 使用 Semantic Versioning；`VERSION` 是构建时唯一功能版本值。
+- Windows ZIP 与 EXE 继续使用同一 `%LOCALAPPDATA%\CodexUsageWidget` 偏好/账本/提醒，用户可切换分发方式，无数据迁移。
+- EXE 版本化程序目录不替换用户状态；回退 ZIP 或 v1.0.0 不删除 v1.1.0 数据。
+- macOS v1.1.0 是首版，没有跨平台复制/同步；自己的 Application Support 数据在替换 app 时保留。
+- 若未来持久化 schema 变化，先增加版本化读取和保字节回退；本次只修复 invalid 三态，不需要 migration framework 或 codemod。
+- CHANGELOG 和 release note 明确 Windows 用户变化、Mac 首版和外部签名 gate。
+
+### Pass 6：开发环境与工具（4/10 -> 9/10）
+
+| 环境 | 本地可做 | CI 补足 |
+|---|---|---|
+| Windows + PowerShell 5.1 | 自检、demo、契约、release checker、launcher、EXE build/self-test | 同一命令在干净 Windows runner 复跑并上传未签名候选。 |
+| macOS 13+ + 支持的 Xcode | 共同契约、unit/UI tests、Debug demo、unsigned Universal build | 显式 runner + `DEVELOPER_DIR`，记录 `xcodebuild -version`、双架构和测试。 |
+| 只有 Windows | 改 schema/匿名 fixtures、Windows 核心/UI、文档/locales | macOS job 验证 Swift；不能宣称完成 VoiceOver/通知/双显示器。 |
+| 只有 macOS | 改 schema/匿名 fixtures、Mac Core/UI、文档/locales | Windows job 验证 PowerShell/WPF；不能宣称完成 Windows GUI。 |
+| Release maintainer | 在精确 SHA 查看无密钥候选 | 受保护 environment 才注入 Apple secrets 并要求人工审批。 |
+
+实现第一个 Mac 工程时把 CI 实际使用的 runner、Xcode 版本与 `DEVELOPER_DIR` 写入 CONTRIBUTING；本地同版本或更新的兼容 Xcode均可。PR job 永不读取签名变量。不开 Codespaces、Docker 或 Windows-to-Mac 交叉编译：它们不能真实验证 AppKit。
+
+### Pass 7：社区与生态（7/10 -> 8/10）
+
+已有 MIT、`CONTRIBUTING.md`、`SECURITY.md`、CHANGELOG、GitHub Discussions 与严格虚构数据规则。v1.1.0 只补：
+
+- 普通问题的脱敏报告格式：版本、平台、稳定阶段码、最小复现；禁止 session、完整本机路径、偏好/账本、证书或密钥。
+- 安全问题继续使用 GitHub private vulnerability report，不进普通 Issue。
+- CONTRIBUTING 明确小 PR、单 owner、必跑命令和无 Mac/无证书边界。
+
+不增加插件生态、Discord、论坛、贡献积分或定价页面。仓库规模尚不需要 Code of Conduct/issue bot；真实社区增长后再评估。
+
+### Pass 8：DX 测量与反馈（3/10 -> 8/10）
+
+不加入遥测或 NPS。用可审计、隐私安全的轻量闭环：
+
+1. CI 每个 job 显示稳定阶段与总耗时，失败上传脱敏测试结果，不上传 session。
+2. RC 前让一名 Windows 和一名 Mac 维护者从干净 clone 只按 CONTRIBUTING 完成 demo 与完整无密钥 gate，记录 TTHW 和第一个卡点到候选 QA 报告。
+3. 目标：demo ≤5 分钟；Windows 全 gate ≤10 分钟；Mac/CI 全 gate ≤15 分钟。超标即在公开发布前修正文档或命令。
+4. 发布后运行一次 `/devex-review`，把计划分数与真实 TTHW 比较；之后仅在构建入口、工具链或发布流程变化时重跑。
+5. GitHub Issues/Discussions 收集脱敏反馈；没有后台 journey analytics。
+
+### What already exists
+
+| 现有资产 | 复用方式 |
+|---|---|
+| 用户双语 README、生产截图、Quick start | 保持用户首页简洁，只补平台资产和 Development 链接。 |
+| `CodexUsageWidget.ps1 -SelfTest` | 继续作为 Windows 最快绿灯和契约 runner，不重建测试框架。 |
+| `fixtures/rate-limits.jsonl` | 迁入/复制为匿名 contract 样本来源，并扩展 demo；不使用真实 session。 |
+| `Test-Launcher.ps1` | 保留真实无终端检查，只补有界等待与环境错误。 |
+| `Test-ReleasePackage.ps1` | 扩展精确 v1.1.0 清单、Mac/EXE 元数据和新文档，不另建隐私扫描器。 |
+| 原子写、自检、语言键/占位符/字体检查 | 两平台沿用语义和 fixture；不引入测试框架依赖。 |
+| MIT、SECURITY、CONTRIBUTING、CHANGELOG、Discussions | 扩充内容，不新增社区服务。 |
+
+### DX NOT in scope
+
+- 公共 API、SDK 或通用 CLI：产品是桌面应用，稳定构建/测试入口已足够。
+- hosted playground、文档站或搜索：匿名本地 demo 更真实，仓库文档规模很小。
+- Docker/Codespaces/Windows-to-Mac cross-build：无法验证原生 WPF/AppKit 和签名行为。
+- 开发遥测、NPS 或 session 采集：与本地隐私定位冲突。
+- 插件框架、example gallery 或多供应商示例：没有当前消费者。
+- 自动更新、Homebrew、Windows Authenticode：保持现有 `TODOS.md` 边界。
+- 五语言贡献文档：用户 UI/README 保持多语言；开发者命令使用一份英文 canonical 文档，避免漂移。
+
+### DX Implementation Tasks
+
+- [ ] **DX-T1（P1，人工约 1 天 / AI 约 1 小时）— Demo — 提供隔离的跨平台匿名可视演示**
+  - 来源：Magical Moment、Pass 1 — 自检有绿灯，但陌生贡献者不能安全看到 UI。
+  - 文件：`fixtures/contract/v1/demo/*`、Windows `-Demo`、Mac `--demo`、两端隔离测试。
+  - 验证：两端显示同一 55%/任务详情；运行前后真实偏好/账本/提醒的存在性和 SHA 不变；无通知、无用户目录访问。
+- [ ] **DX-T2（P1，人工约 1 天 / AI 约 1 小时）— Commands — 冻结构建入口、共享 scheme 与唯一版本**
+  - 来源：Pass 2/5/6 — 命令、Mac 工具链和版本来源尚不可猜。
+  - 文件：`VERSION`、`scripts/Build-Windows.ps1`、Xcode shared scheme/build settings、CONTRIBUTING 命令表。
+  - 验证：Windows build/EXE self-test；Mac xcodebuild test/build；资产、Info.plist、CHANGELOG 与 tag version 检查一致。
+- [ ] **DX-T3（P1，人工约 4 小时 / AI 约 30 分钟）— Diagnostics — 让所有贡献检查有界且可操作**
+  - 来源：Pass 3、独立审查 — launcher/CIM 与未来签名错误可能卡住或只给通用失败。
+  - 文件：现有三个 Windows 检查、构建/发布脚本、对应 CONTRIBUTING/releasing anchors。
+  - 验证：权限不足、WMI 慢、契约差异、Xcode 不兼容、签名缺失和 tag mismatch 均在预算内非零退出，输出 problem/cause/fix 且不泄露绝对私人路径。
+- [ ] **DX-T4（P1，人工约 1 天 / AI 约 1 小时）— Docs — 建立单一贡献入口与发布 runbook**
+  - 来源：Pass 1/4/5/7 — 用户文档成熟，贡献/发布文档不足。
+  - 文件：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README Development/平台资产链接、CHANGELOG、v1.1 release notes。
+  - 验证：Windows-only、Mac-only、无证书维护者分别只按文档完成其允许的路径；所有链接和命令由 CI/发布检查器验证。
+- [ ] **DX-T5（P1，人工约 4 小时 + 两次真实计时 / AI 约 30 分钟）— Feedback — 用无密钥 CI 与 fresh-clone gate 验证 TTHW**
+  - 来源：Pass 6/8 — 当前没有 CI 或真实贡献路径反馈。
+  - 文件：复用 ENG-T5 workflow、候选 QA 报告模板；不新增遥测代码。
+  - 验证：demo ≤5 分钟；Windows 全 gate ≤10 分钟；Mac/CI 全 gate ≤15 分钟；PR 无 secrets；实现后 `/devex-review` 复测。
+
+这些任务在最终聚合时并入 ENG DAG：DX-T1 在平台 Core/UI 完成后由对应 owner 实施；DX-T2/3 合入构建与 CI lane；DX-T4/5 保持最后的文档/候选 owner。不会出现共享文件双 owner。
+
+### DX Scorecard
+
+```text
++====================================================================+
+|              DX PLAN REVIEW — SCORECARD                             |
++====================================================================+
+| Dimension            | Target | Current | Trend                    |
+|----------------------|--------|---------|--------------------------|
+| Getting Started      | 9/10   | 4/10    | +5                       |
+| Commands/Interface   | 9/10   | 4/10    | +5                       |
+| Error Messages       | 9/10   | 6/10    | +3                       |
+| Documentation        | 9/10   | 6/10    | +3                       |
+| Upgrade Path         | 9/10   | 7/10    | +2                       |
+| Dev Environment      | 9/10   | 4/10    | +5                       |
+| Community            | 8/10   | 7/10    | +1                       |
+| DX Measurement       | 8/10   | 3/10    | +5                       |
++--------------------------------------------------------------------+
+| TTHW                 | <=5 min deterministic demo; full 10/15 min  |
+| Competitive Rank     | Competitive                                 |
+| Magical Moment       | designed via isolated copy-paste demo       |
+| Product Type         | open-source native desktop developer tool   |
+| Mode                 | DX EXPANSION                                |
+| Overall DX           | 8.8/10 | 5.1/10 | +3.7                     |
++====================================================================+
+| DX PRINCIPLE COVERAGE                                               |
+| Zero Friction      | covered by clone -> test -> demo               |
+| Learn by Doing     | covered by the real UI over anonymous fixtures |
+| Fight Uncertainty  | covered by staged bounded errors + CI          |
+| Opinionated + Escape Hatches | direct commands + platform-only CI   |
+| Code in Context    | covered by source map/schema/DESIGN             |
+| Magical Moments    | covered by 55% demo without personal data      |
++====================================================================+
+```
+
+### DX Implementation Checklist
+
+```text
+[ ] Supported-host deterministic demo completes in <=5 minutes
+[ ] Windows complete no-secret gate completes in <=10 minutes
+[ ] macOS/CI complete no-secret gate completes in <=15 minutes
+[ ] First run produces the 55% fictional ring and details
+[ ] Demo never reads/writes user Codex or widget state
+[ ] Every build/check failure has problem + cause + fix + docs anchor
+[ ] CONTRIBUTING commands are copy-paste complete and run in CI
+[ ] VERSION, app metadata, asset names, changelog and tag agree
+[ ] macOS Debug build/test needs no Apple account
+[ ] Fork PR jobs receive no signing secrets
+[ ] Upgrade and rollback preserve all user state
+[ ] Safe issue guidance excludes sessions, paths and secrets
+[ ] Fresh-clone Windows and Mac timings are recorded before release
+[ ] /devex-review re-measures reality after implementation
+```
+
+### DX Decision Audit Trail
+
+| 决策 | 自动选择 | 未选项 | 原因 |
+|---|---|---|---|
+| Persona | OSS contributor + release maintainer | SDK integrator、普通终端用户 | 仓库没有公共 API；跨平台源码与发布是本次开发表面。 |
+| 竞争层级 | 2–5 分钟 Competitive | <2 分钟 hosted champion、维持现状 | 原生编译有真实成本；匿名 demo 足以达到高匹配度。 |
+| 魔法时刻 | copy-paste isolated demo | hosted playground、视频、真实用户数据教程 | 最真实、最小且保护隐私。 |
+| 命令入口 | Windows 原生 PowerShell + Mac 原生 xcodebuild | 根级跨平台 wrapper | 不给 Mac 增加 PowerShell，也不复制工具链。 |
+| 文档 | 扩充 CONTRIBUTING + 一个 releasing runbook | 文档站、多份平台教程 | 当前规模下最少文件覆盖全部角色。 |
+| 反馈 | CI + 两次 fresh-clone 计时 + GitHub | 遥测/NPS | 可验收且不破坏隐私。 |
+
+无新增 DX TODO。发现的五类工作都属于 v1.1.0 可复现开发/发布的必要条件，已进入实施任务。
+
+**Phase 4 complete.** 独立 DX 审查提出 6 个 P1、2 个 P2；Codex CLI 不可用。计划把贡献者 TTHW 从“Windows 5–10 分钟、Mac 不可达”收敛为两端 ≤5 分钟的匿名 demo，并保留无密钥 CI 与真实 Mac 发布边界。
