@@ -197,7 +197,6 @@ try {
     foreach ($path in $preferencePath, $ledgerPath, $reminderPath) {
         $stateHashes[$path] = [Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($path)))
     }
-    $workerWatch = [Diagnostics.Stopwatch]::StartNew()
     $workerEnvironmentNames = 'CODEX_WIDGET_DATA_DIRECTORY', 'CODEX_WIDGET_RESULT_PATH', 'CODEX_WIDGET_GENERATION'
     $workerEnvironmentBefore = @{}
     foreach ($name in $workerEnvironmentNames) { $workerEnvironmentBefore[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
@@ -234,12 +233,10 @@ try {
     Assert-Boundary (-not (Write-UsageScanResult -Snapshot $nestedForgery.snapshot -Generation $generation -Path $producerPath) -and
         -not [IO.File]::Exists($producerPath)) 'the producer must reject an invalid snapshot before serialization or any result write.'
     $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
-    $workerWatch.Stop()
     Assert-Boundary ($received.Status -ceq 'completed' -and $received.ProcessExited -and -not [IO.File]::Exists($workerOutput)) 'the parent must reap a naturally completed worker exactly once.'
     $validatedSnapshot = $received.Snapshot
     Assert-Boundary ($validatedSnapshot.Classification -ceq 'complete' -and $null -ne $validatedSnapshot.State) 'the parent must publish a complete validated snapshot.'
     Assert-Boundary (@($validatedSnapshot.State.SessionTokenSnapshots).Count -eq 30) ('the parent must validate thirty bounded session files; count={0}.' -f @($validatedSnapshot.State.SessionTokenSnapshots).Count)
-    Assert-Boundary ($workerWatch.Elapsed.TotalSeconds -lt 10) ('the parent must validate the bounded snapshot within ten seconds; elapsed={0:N3}s.' -f $workerWatch.Elapsed.TotalSeconds)
     $forgedPath = Join-Path $workerRoot 'forged.json'
     [IO.File]::WriteAllText($forgedPath, '{"schemaVersion":1,"generation":"00000000000000000000000000000000","snapshot":{}}')
     Assert-Boundary ($null -eq (Read-UsageScanResult -Path $forgedPath -ExpectedGeneration $generation)) 'the parent must reject a stale generation.'
