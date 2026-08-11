@@ -172,7 +172,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(firstTotals.hitTokens, 9_007_199_254_741_000)
         XCTAssertEqual(firstTotals.missTokens, 993)
         let regressed = result.sessions.map {
-            SessionTokenSnapshot(id: $0.id, cacheHitTokens: "1", cacheMissTokens: "1")
+            SessionTokenSnapshot(id: $0.id, cacheHitTokens: "0", cacheMissTokens: "0")
         }
         let secondTotals = try XCTUnwrap(ledger.merge(regressed))
         XCTAssertEqual(secondTotals.hitTokens, firstTotals.hitTokens)
