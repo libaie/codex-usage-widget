@@ -959,7 +959,7 @@ Release 环境：签名/公证/哈希/重下验证 -> 发布 v1.1.0
 
 ### 冻结的规范化快照契约 v1
 
-规范文件：`fixtures/contract/v1/schema.md`。测试样本使用匿名路径和固定时钟；两端都读同一输入并与人工审过的 `expected-state.json` 比较。
+规范文件：`fixtures/contract/v1/schema.md`。测试样本使用匿名路径和固定时钟；两端都读同一输入并与人工审过的 `expected-state.json` 比较。`fixtures/contract/v1/theme-catalog.json` 另行冻结八个主题的稳定 id、顺序和起止十六进制颜色，以及 warning/critical 状态色；它只用于契约测试，不成为新的运行时配置或加载失败面。
 
 | 规则 | 冻结值 |
 |---|---|
@@ -1057,7 +1057,16 @@ macos/
   CodexUsageWidgetUITests/
 ```
 
+`Resources/` 只保存 Mac 专属图标和平台资源。Xcode target 直接引用仓库根目录五个 `locales/*.json`，构建时复制到 `.app/Contents/Resources/locales/`；仓库内不创建第二份语言文件。无密钥 CI 与发布检查器逐文件验证包内语言文件和根文件 SHA-256 相同。
+
 不创建 Swift Package、framework target、repository layer、DI container 或跨平台运行时。测试通过 `@testable import CodexUsageWidget` 访问 app module 内部类型。工程显式锁定非沙盒 Developer ID 构建；不创建安全作用域书签层或 App Store 变体。
+
+### 实现复用边界
+
+- Windows 正常刷新、`-ScanWorker`、`-Demo` 和契约自检调用同一组现有解析/分类函数；不得为子进程复制解析器。现有进程内 Runspace 只可缩减为有界子进程监督与小结果解析层，不再复制 `Get-UsageWorkerFunctionNames` 的整条业务函数清单，也不得直接访问 Codex 数据目录。
+- macOS 正常刷新、`--scan-worker`、`--demo` 和 unit tests 直接调用 app module 内同一个 `Core/SessionScanner` 实现；只有一个实现时不增加 protocol、repository 或 service factory。
+- Windows 与 macOS 各自使用原生颜色类型和一个本地主题目录；两端测试逐项对照 `theme-catalog.json`。`DESIGN.md` 链接该目录而不重抄颜色值，避免增加运行时 JSON 加载器或第三份主题常量。
+- 现有 `fixtures/Test-ReleasePackage.ps1` 继续负责仓库隐私、Windows 运行包和跨平台源码清单；Mac app bundle 的架构、资源 SHA、构建设置与 entitlements 由 Mac unit test、`lipo` 和 `codesign` 原生检查。不给 Mac 贡献路径增加 PowerShell，也不把现有检查器重写成第二种语言。
 
 ### 信任边界与性能硬上限
 
@@ -1154,14 +1163,14 @@ ENG-T1 契约/预期快照（串行冻结）
 
 ### Engineering Implementation Tasks
 
-- [ ] **ENG-T1（P1，人工约 1 天 / AI 约 1 小时）— 契约 — 冻结 schema、匿名输入与人工审阅快照**
+- [ ] **ENG-T1（P1，人工约 1 天 / AI 约 1 小时）— 契约 — 冻结 schema、匿名输入、语言资源与人工审阅快照**
   - 来源：发现 2/6/8。
-  - 文件：`fixtures/contract/v1/schema.md`、匿名 JSONL、`expected-state.json`、两端 contract runner。
-  - 验证：`2^53+1`、overflow、DST、并列、全坏、unknown 等样本两端逐字节一致；独立 reviewer 签核 expected。
+  - 文件：`fixtures/contract/v1/schema.md`、匿名 JSONL、`expected-state.json`、`theme-catalog.json`、`locales/*.json`、两端 contract runner。
+  - 验证：`2^53+1`、overflow、DST、并列、全坏、unknown 等样本两端逐字节一致；主题 id/顺序/颜色与五包键集、占位符和长度约束冻结；独立 reviewer 签核 expected、主题目录与文案键。
 - [ ] **ENG-T2（P1，人工约 2 天 / AI 约 2 小时）— Windows 数据边界 — 修复分类、持久化、路径与预算根因**
   - 来源：发现 1/2/3/5。
   - 文件：`CodexUsageWidget.ps1`、`-SelfTest` 内最小断言。
-  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；只读 `-ScanWorker` 的结果上限/协议校验；大目录/锁定文件超时后精确子 PID 回收、三状态文件不变且下一 tick 恢复；junction 越界访问为 0。
+  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 的结果上限/协议校验；大目录/锁定文件超时后精确子 PID 回收、三状态文件不变且下一 tick 恢复；junction 越界访问为 0。
 - [ ] **ENG-T3（P1，人工约 2 天 / AI 约 2 小时）— Windows 分发 — 最小单文件 EXE 引导**
   - 来源：CEO-T2、并发/信任边界。
   - 文件：单一 C# 引导源码、一个构建入口、现有 release checker/launcher fixture。
@@ -1173,15 +1182,15 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T5（P1，人工约 1 天 / AI 约 1 小时）— CI — 建立无密钥双平台构建**
   - 来源：发现 8/9、CEO-T5。
   - 文件：`.github/workflows/*`、版本/资产清单验证。
-  - 验证：普通 PR 构建 Windows ZIP/EXE 与 macOS unsigned Universal app，验证契约、架构、隐私和精确资产；没有 signing secrets。
+  - 验证：普通 PR 构建 Windows ZIP/EXE 与 macOS unsigned Universal app，验证契约、架构、隐私和精确资产；Mac job 只用 Xcode/系统原生检查，不要求 PowerShell；没有 signing secrets。
 - [ ] **ENG-T6（P1，人工约 2 天 / AI 约 2 小时）— Windows UX — 落地六状态与统一交互**
   - 来源：DESIGN-T2/T3/T4。
-  - 文件：`CodexUsageWidget.ps1`、五语言包、UI/launcher regression。
+  - 文件：`CodexUsageWidget.ps1`、UI/launcher regression；只消费 ENG-T1 冻结的五语言包。
   - 验证：180/250 ms、4 点拖拽、固定/Esc、partial/stale 外环、详情首行元信息、键盘和五语言真实截图。
 - [ ] **ENG-T7（P1，人工约 4 天 / AI 约 4 小时）— macOS UX — 原生圆环、详情、菜单栏和提醒**
   - 来源：CEO-T4、DESIGN-T1..T4。
-  - 文件：`macos/CodexUsageWidget/UI/*`、Resources、`macos/CodexUsageWidgetUITests/*`、最小 `DESIGN.md`。
-  - 验证：SwiftUI/AppKit UI 测试、VoiceOver、Reduce Motion、通知授权/拒绝/点击、五语言八主题、屏幕热插拔和真实双显示器。
+  - 文件：`macos/CodexUsageWidget/UI/*`、Mac 专属 Resources、根语言包的只读 Xcode 引用、`macos/CodexUsageWidgetUITests/*`、最小 `DESIGN.md`。
+  - 验证：SwiftUI/AppKit UI 测试、VoiceOver、Reduce Motion、通知授权/拒绝/点击、五语言八主题、屏幕热插拔和真实双显示器；App bundle 五语言文件 SHA 与根文件一致。
 - [ ] **ENG-T8（P1，人工约 2 天 + 外部等待 / AI 约 1 小时）— 候选 — 签名、公证与真实设备 gate**
   - 来源：发现 9、CEO-T5。
   - 文件：受保护 release workflow、codesign/notary/staple 脚本、候选清单。
@@ -1408,7 +1417,7 @@ open .build/Build/Products/Debug/CodexUsageWidget.app --args --demo
 | Windows + PowerShell 5.1 | 自检、demo、契约、release checker、launcher、EXE build/self-test | 同一命令在干净 Windows runner 复跑并上传未签名候选。 |
 | macOS 13+ + 支持的 Xcode | 共同契约、unit/UI tests、Debug demo、unsigned Universal build | 显式 runner + `DEVELOPER_DIR`，记录 `xcodebuild -version`、双架构和测试。 |
 | 只有 Windows | 改 schema/匿名 fixtures、Windows 核心/UI、文档/locales | macOS job 验证 Swift；不能宣称完成 VoiceOver/通知/双显示器。 |
-| 只有 macOS | 改 schema/匿名 fixtures、Mac Core/UI、文档/locales | Windows job 验证 PowerShell/WPF；不能宣称完成 Windows GUI。 |
+| 只有 macOS | 改 Mac Core/UI、文档，并向 Contract owner 提议 schema/fixture/locale 变更 | Windows job 验证共同契约与 PowerShell/WPF；不能自行改冻结资源或宣称完成 Windows GUI。 |
 | Release maintainer | 在精确 SHA 查看无密钥候选 | 受保护 environment 才注入 Apple secrets 并要求人工审批。 |
 
 实现第一个 Mac 工程时把 CI 实际使用的 runner、Xcode 版本与 `DEVELOPER_DIR` 写入 CONTRIBUTING；本地同版本或更新的兼容 Xcode均可。PR job 永不读取签名变量。不开 Codespaces、Docker 或 Windows-to-Mac 交叉编译：它们不能真实验证 AppKit。
@@ -1576,19 +1585,19 @@ P0 VERSION + schema v1 + 匿名 fixtures + expected ----------------------------
                                P5 + P6 ------> P7 文档/本地化/截图 -----------/
 ```
 
-可并行窗口只有两处：P0 完成后 P1/P2/P3/P4 可并行；P5 与 P6 可并行。P7、P8、P9、P10 按依赖串行收口。共享文件在同一检查点只允许一个 owner。
+可并行窗口只有两处：P0 完成后 P1/P2/P3/P4 可并行；P5 与 P6 可并行。P7、P8、P9、P10 按依赖串行收口。共享文件在同一检查点只允许一个 owner；五个根语言包由 P0 冻结，P5/P6 只读消费。若实现确需新增键，先回到 Contract owner 串行更新五包并复跑契约，再恢复 UI 并行线。
 
 ### 实施阶段与唯一文件所有权
 
 | 阶段 | 前置 | 唯一 owner 与文件 | 交付结果 | 完成门槛 |
 |---|---|---|---|---|
-| **P0 契约与版本** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端 runner 后续逐字节相等 |
-| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；只读隔离扫描进程；主进程唯一持久化 | invalid 偏好/账本/提醒原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；10 秒后精确子 PID 回收且下一 tick 恢复 |
+| **P0 契约、版本与语言资源** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、`theme-catalog.json`、`locales/*.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义；八主题目录；五语言键与占位符固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端原生主题目录逐项匹配；五包键集/格式/长度全绿；两端 runner 后续逐字节相等 |
+| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；只读隔离扫描进程；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；invalid 三文件原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；10 秒后精确子 PID 回收且下一 tick 恢复 |
 | **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
 | **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、精确子进程超时回收和单调账本全绿；没有第三方依赖或 helper target |
-| **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret | Windows 自检/检查器/EXE 与 Mac test/unsigned Universal build 全绿；日志无私有路径、session 或密钥 |
-| **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、`locales/*.json`、Windows UI 回归 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | 五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
-| **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Resources、UI-test target、`DESIGN.md` | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
+| **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret；Mac bundle 直接打包根语言文件；平台使用原生验证入口 | Windows 自检/PowerShell 检查器/EXE 与 Mac xcodebuild/lipo/bundle tests 全绿；Mac job 不依赖 PowerShell；包内五语言 SHA 与根文件一致；日志无私有路径、session 或密钥 |
+| **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、Windows UI 回归；根语言包与主题契约只读 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | Windows 原生主题目录逐项匹配 P0；五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
+| **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Mac 专属 Resources、根语言包只读引用、UI-test target、`DESIGN.md`；主题契约只读 | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | Mac 原生主题目录逐项匹配 P0；App bundle 五语言 SHA 与根文件一致；VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
 | **P7 文档、本地化与截图** | P5、P6 | Docs owner：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README、CHANGELOG、`docs/releases/v1.1.0.md`、发布截图 | 单一贡献入口、源码地图、平台资产表、升级/回滚、脱敏反馈格式、维护者 runbook | Windows-only、Mac-only、无证书维护者分别按文档完成允许路径；链接/命令/五语言键和字体宽度检查通过 |
 | **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单 | 同一 commit 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 共同契约、架构、隐私、哈希、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
 | **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | `codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；自动发现、拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
