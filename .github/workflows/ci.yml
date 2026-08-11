@@ -3,20 +3,46 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase commit SHA to verify
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.candidate_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 20
     steps:
+      - name: Validate requested candidate SHA
+        if: github.event_name == 'workflow_dispatch'
+        shell: powershell
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: if ($env:CANDIDATE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'candidate_sha must be a full lowercase commit SHA.' }
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - name: Verify source commit
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $env:EXPECTED_SHA) { throw 'Checked-out commit does not match the requested SHA.' }
+          if (-not [string]::IsNullOrWhiteSpace((git status --porcelain))) { throw 'Candidate checkout is not clean.' }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            [void](git symbolic-ref -q HEAD)
+            if ($LASTEXITCODE -eq 0) { throw 'Candidate checkout must be detached.' }
+          }
       - name: Windows core and contract
         shell: powershell
         run: |
@@ -57,7 +83,27 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
+      - name: Validate requested candidate SHA
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - name: Verify source commit
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            ! git symbolic-ref -q HEAD
+          fi
       - name: Test macOS core
         shell: bash
         run: |
@@ -130,3 +176,93 @@ jobs:
             dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip
             dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256
           if-no-files-found: error
+
+  candidate:
+    if: github.event_name != 'pull_request'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - name: Verify detached candidate source
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
+          ! git symbolic-ref -q HEAD
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-unsigned'
+          path: candidate
+          merge-multiple: true
+      - name: Verify and describe unsigned candidate
+        id: manifest
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidate = Join-Path $PWD 'candidate'
+          $expected = @(
+            'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
+            'CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256',
+            'CodexUsageWidget-v1.1.0-windows.exe',
+            'CodexUsageWidget-v1.1.0-windows.exe.sha256',
+            'CodexUsageWidget-v1.1.0-windows.zip',
+            'CodexUsageWidget-v1.1.0-windows.zip.sha256'
+          ) | Sort-Object
+          $actual = @([IO.Directory]::GetFiles($candidate) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+          if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Unsigned candidate inventory mismatch.' }
+          foreach ($name in @(
+            'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
+            'CodexUsageWidget-v1.1.0-windows.exe',
+            'CodexUsageWidget-v1.1.0-windows.zip'
+          )) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $candidate $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $line = [IO.File]::ReadAllText((Join-Path $candidate ($name + '.sha256')), [Text.Encoding]::ASCII).TrimEnd("`r", "`n")
+            if ($line -cne ($hash + '  ' + $name)) { throw "Checksum mismatch: $name" }
+          }
+          $assets = @($expected | ForEach-Object {
+            $path = Join-Path $candidate $_
+            [ordered]@{
+              name = $_
+              bytes = ([IO.FileInfo]$path).Length
+              sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          })
+          $qaPlan = Join-Path $PWD 'docs/qa-v1.1.0.md'
+          Copy-Item -LiteralPath $qaPlan -Destination (Join-Path $candidate 'qa-plan.md')
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            stage = 'unsigned-candidate'
+            version = '1.1.0'
+            commitSha = $env:CANDIDATE_SHA
+            workflowRunId = [long]$env:GITHUB_RUN_ID
+            qaPlanSha256 = (Get-FileHash -LiteralPath $qaPlan -Algorithm SHA256).Hash.ToLowerInvariant()
+            assets = $assets
+          }
+          $manifestPath = Join-Path $candidate 'candidate-manifest.json'
+          [IO.File]::WriteAllText($manifestPath, (($manifest | ConvertTo-Json -Depth 6) + "`n"), [Text.UTF8Encoding]::new($false))
+          $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(($manifestPath + '.sha256'), ($manifestHash + '  candidate-manifest.json' + "`n"), [Text.Encoding]::ASCII)
+          "manifest_sha=$manifestHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Upload bound unsigned candidate
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-candidate-v1.1.0-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record candidate binding
+        shell: bash
+        run: |
+          echo "Artifact ID: ${{ steps.upload.outputs.artifact-id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifact digest: ${{ steps.upload.outputs.artifact-digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Manifest SHA-256: ${{ steps.manifest.outputs.manifest_sha }}" >> "$GITHUB_STEP_SUMMARY"

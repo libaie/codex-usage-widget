@@ -61,7 +61,7 @@ if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage 'package root i
 $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
     $requiredPaths += @(
-        'SECURITY.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md',
+        'SECURITY.md', 'docs\press-kit.md', 'docs\qa-v1.1.0.md', 'docs\releases\v1.0.0.md',
         'assets\social-preview.png', 'fixtures\Test-Contract.ps1', 'fixtures\Test-WindowsDataBoundary.ps1',
         'fixtures\Test-WorkerStability.ps1', 'fixtures\Test-Bootstrap.ps1',
         'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\expected-state.json',
@@ -209,7 +209,9 @@ if (-not $RuntimeArchive) {
         'docs\releasing.md' = @('Developer ID Application', 'notar', 'Gatekeeper', 'manifest', 'CodexUsageWidget-v1.1.0-macos.dmg')
         'docs\releases\v1.1.0.md' = @('Windows', 'macOS', 'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-macos.dmg', 'Developer ID')
         'docs\press-kit.md' = @('Windows', 'macOS', 'five languages', $zhFiveLanguages)
+        'docs\qa-v1.1.0.md' = @('32/32', 'P9 E2E', 'Test-WorkerStability.ps1', '-Demo', '--demo')
         'CHANGELOG.md' = @('## 1.1.0', 'macOS', '-Demo', '--demo')
+        '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest')
     }
     foreach ($documentationPath in $documentationRequirements.Keys) {
         $documentationContent = [IO.File]::ReadAllText((Join-Path $package $documentationPath))
