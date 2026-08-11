@@ -36,7 +36,8 @@ try {
     $hostProcess = [Diagnostics.Process]::GetCurrentProcess()
     $workerIds = [Collections.Generic.List[int]]::new()
     $durations = [Collections.Generic.List[double]]::new()
-    $workerCpuSeconds = 0.0
+    $workerProcess = $null
+    $workerCpuBaseline = 0.0
     $workerPeakBytes = 0L
     $baselineHandles = 0
     $baselineMemory = 0L
@@ -48,29 +49,24 @@ try {
         $generation = [guid]::NewGuid().ToString('N')
         $workerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') `
             -DataDirectory $dataRoot -Generation $generation -WorkerJobHandle $killHandle
+        if ($null -eq $workerProcess) { $workerProcess = $workerJob.Process }
         $workerIds.Add($workerJob.Process.Id)
         $roundPeakBytes = 0L
-        $roundCpuSeconds = 0.0
-        while (-not $workerJob.Process.WaitForExit(250)) {
+        $received = $null
+        do {
             try {
                 $workerJob.Process.Refresh()
                 $roundPeakBytes = [math]::Max($roundPeakBytes, [long]$workerJob.Process.PeakWorkingSet64)
             }
             catch { }
-        }
-        try {
-            $workerJob.Process.Refresh()
-            $roundPeakBytes = [math]::Max($roundPeakBytes, [long]$workerJob.Process.PeakWorkingSet64)
-            $roundCpuSeconds = [math]::Max($roundCpuSeconds, $workerJob.Process.TotalProcessorTime.TotalSeconds)
-        }
-        catch { }
-        $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
+            $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
+            if ($received.Status -ceq 'pending') { Start-Sleep -Milliseconds 50 }
+        } while ($received.Status -ceq 'pending')
         $roundWatch.Stop()
-        Assert-Stability ($received.Status -ceq 'completed' -and $received.ProcessExited) "refresh $round did not complete cleanly."
+        Assert-Stability ($received.Status -ceq 'completed' -and -not $received.ProcessExited) "refresh $round did not complete on a reusable worker."
         $workerJob = $null
         if ($measured) {
             $durations.Add($roundWatch.Elapsed.TotalSeconds)
-            $workerCpuSeconds += $roundCpuSeconds
             $workerPeakBytes = [math]::Max($workerPeakBytes, $roundPeakBytes)
         }
         elseif ($round -eq 9) {
@@ -80,13 +76,25 @@ try {
             $baselineHandles = $hostProcess.HandleCount
             $baselineMemory = $hostProcess.PrivateMemorySize64
             $baselineCpuSeconds = $hostProcess.TotalProcessorTime.TotalSeconds
+            $workerProcess.Refresh()
+            $workerCpuBaseline = $workerProcess.TotalProcessorTime.TotalSeconds
         }
     }
+    $uniqueWorkerIds = @($workerIds.ToArray() | Sort-Object -Unique)
+    Assert-Stability ($uniqueWorkerIds.Count -eq 1) 'refreshes must reuse exactly one isolated worker process.'
+    $workerProcess.Refresh()
+    $workerCpuSeconds = [math]::Max(0, $workerProcess.TotalProcessorTime.TotalSeconds - $workerCpuBaseline)
+    Close-UsageWorkerJob -Handle $killHandle
+    $killHandle = [IntPtr]::Zero
+    Assert-Stability ($workerProcess.WaitForExit(2000)) 'closing the parent job handle must stop the reusable worker.'
+    $workerProcess.Dispose()
+    $workerProcess = $null
+    $script:UsageWorkerHost = $null
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
     $hostProcess.Refresh()
     $alive = 0
-    foreach ($id in $workerIds) {
+    foreach ($id in $uniqueWorkerIds) {
         try { $probe = [Diagnostics.Process]::GetProcessById($id); if (-not $probe.HasExited) { $alive++ }; $probe.Dispose() } catch { }
     }
     $workerRoot = Join-Path $testRoot 'CodexUsageWidget\worker'

@@ -1218,37 +1218,39 @@ function New-UsageWorkerDeadline {
 function Invoke-UsageScanWorker {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
-    $workerDeadline = $null
     try {
-        $workerDeadline = New-UsageWorkerDeadline
-        $workerGeneration = $env:CODEX_WIDGET_GENERATION
         $workerDataDirectory = $env:CODEX_WIDGET_DATA_DIRECTORY
-        $workerOutputPath = $env:CODEX_WIDGET_RESULT_PATH
-        if ($workerGeneration -cnotmatch '^[0-9a-f]{32}$' -or [string]::IsNullOrWhiteSpace($workerDataDirectory) -or
-            [string]::IsNullOrWhiteSpace($workerOutputPath)) { throw 'Invalid scan-worker arguments.' }
-        $dataDirectory = Resolve-CodexDataDirectory $workerDataDirectory $null $null
-        if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
-        $workerRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($env:LOCALAPPDATA, 'CodexUsageWidget', 'worker'))
-        $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
-        if (-not $workerDirectory.Exists -or ($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Invalid scan output directory.'
+        if ([string]::IsNullOrWhiteSpace($workerDataDirectory)) { throw 'Invalid scan-worker arguments.' }
+        while ($true) {
+            $workerGeneration = [Console]::In.ReadLine()
+            if ($null -eq $workerGeneration) { return 0 }
+            $workerDeadline = $null
+            try {
+                $workerDeadline = New-UsageWorkerDeadline
+                if ($workerGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Invalid scan-worker arguments.' }
+                $dataDirectory = Resolve-CodexDataDirectory $workerDataDirectory $null $null
+                if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
+                $workerRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($env:LOCALAPPDATA, 'CodexUsageWidget', 'worker'))
+                $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
+                if (-not $workerDirectory.Exists -or ($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Invalid scan output directory.'
+                }
+                $channelPath = [IO.Path]::GetFullPath([IO.Path]::Combine($workerRoot, 'CodexUsageWidget-scan-' + $workerGeneration))
+                $channel = [IO.DirectoryInfo]::new($channelPath)
+                if (-not $channel.Exists -or ($channel.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Invalid scan channel directory.'
+                }
+                $expectedOutput = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'result.json'))
+                if ([IO.File]::Exists($expectedOutput)) { throw 'Invalid scan output path.' }
+                $snapshot = Get-CodexUsageSnapshot -DataDirectory $dataDirectory -ReadOnly
+                if (-not (Write-UsageScanResult -Snapshot $snapshot -Generation $workerGeneration -Path $expectedOutput)) {
+                    throw 'Scan result could not be saved.'
+                }
+            }
+            finally { if ($null -ne $workerDeadline) { $workerDeadline.Dispose() } }
         }
-        $channelPath = [IO.Path]::GetFullPath([IO.Path]::Combine($workerRoot, 'CodexUsageWidget-scan-' + $workerGeneration))
-        $channel = [IO.DirectoryInfo]::new($channelPath)
-        if (-not $channel.Exists -or ($channel.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Invalid scan channel directory.'
-        }
-        $expectedOutput = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'result.json'))
-        if (-not $expectedOutput.Equals([IO.Path]::GetFullPath($workerOutputPath), [StringComparison]::OrdinalIgnoreCase) -or
-            [IO.File]::Exists($expectedOutput)) { throw 'Invalid scan output path.' }
-        $snapshot = Get-CodexUsageSnapshot -DataDirectory $dataDirectory -ReadOnly
-        if (-not (Write-UsageScanResult -Snapshot $snapshot -Generation $workerGeneration -Path $expectedOutput)) {
-            throw 'Scan result could not be saved.'
-        }
-        return 0
     }
     catch { return 2 }
-    finally { if ($null -ne $workerDeadline) { $workerDeadline.Dispose() } }
 }
 
 function Get-UsageWorkerScriptText {
@@ -1288,6 +1290,22 @@ function Close-UsageWorkerJob {
     param([Parameter(Mandatory)][IntPtr]$Handle)
 
     if ($Handle -ne [IntPtr]::Zero) { [CodexUsageWorkerJobNative]::Close($Handle) }
+}
+
+function Stop-UsageWorkerProcess {
+    param([Parameter(Mandatory)][Diagnostics.Process]$Process)
+
+    $exited = $false
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill()
+            [void]$Process.WaitForExit(2000)
+        }
+        $exited = $Process.HasExited
+    }
+    catch { }
+    try { $Process.Dispose() } catch { }
+    return $exited
 }
 
 function Start-UsageScanProcess {
@@ -1340,57 +1358,84 @@ function Start-UsageScanProcess {
         throw 'Usage worker script could not be created.'
     }
 
-    $compactPowerShell = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not [IO.File]::Exists($compactPowerShell)) { $compactPowerShell = Join-Path $PSHOME 'powershell.exe' }
-    $startInfo = [Diagnostics.ProcessStartInfo]::new($compactPowerShell)
-    $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -Mta -ExecutionPolicy Bypass -File "' + $workerScriptPath + '" -ScanWorker'
-    $startInfo.WorkingDirectory = $scriptFile.DirectoryName
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $launchEnvironment = [ordered]@{
-        CODEX_WIDGET_DATA_DIRECTORY = $dataPath
-        CODEX_WIDGET_RESULT_PATH = $outputPath
-        CODEX_WIDGET_GENERATION = $Generation
-    }
-    $previousEnvironment = @{}
-    try {
-        foreach ($name in $launchEnvironment.Keys) {
-            $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
-            [Environment]::SetEnvironmentVariable($name, $launchEnvironment[$name], [EnvironmentVariableTarget]::Process)
+    # ponytail: refreshes are serialized by the caller, so one host needs no queue or lock.
+    $workerHost = $script:UsageWorkerHost
+    $reuseHost = $false
+    if ($null -ne $workerHost) {
+        try {
+            $reuseHost = -not $workerHost.Process.HasExited -and $workerHost.DataDirectory -ieq $dataPath -and
+                $workerHost.ScriptPath -ieq $scriptFile.FullName -and $workerHost.WorkerJobHandle -eq $WorkerJobHandle
         }
-        $process = [Diagnostics.Process]::Start($startInfo)
-    }
-    catch {
-        try { [IO.Directory]::Delete($channelPath, $true) } catch { }
-        throw
-    }
-    finally {
-        foreach ($name in $launchEnvironment.Keys) {
-            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], [EnvironmentVariableTarget]::Process)
+        catch { $reuseHost = $false }
+        if (-not $reuseHost) {
+            $script:UsageWorkerHost = $null
+            if ($workerHost.Process -is [Diagnostics.Process]) { [void](Stop-UsageWorkerProcess -Process $workerHost.Process) }
         }
     }
-    if ($null -eq $process) {
-        try { [IO.Directory]::Delete($channelPath, $true) } catch { }
-        throw 'Scan worker did not start.'
-    }
-    if ($WorkerJobHandle -ne [IntPtr]::Zero) {
-        try { Add-UsageWorkerProcessToJob -Handle $WorkerJobHandle -Process $process }
+    if (-not $reuseHost) {
+        $compactPowerShell = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not [IO.File]::Exists($compactPowerShell)) { $compactPowerShell = Join-Path $PSHOME 'powershell.exe' }
+        $startInfo = [Diagnostics.ProcessStartInfo]::new($compactPowerShell)
+        $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -Mta -ExecutionPolicy Bypass -File "' + $workerScriptPath + '" -ScanWorker'
+        $startInfo.WorkingDirectory = $scriptFile.DirectoryName
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $previousDataDirectory = [Environment]::GetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', [EnvironmentVariableTarget]::Process)
+        try {
+            [Environment]::SetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', $dataPath, [EnvironmentVariableTarget]::Process)
+            $process = [Diagnostics.Process]::Start($startInfo)
+        }
         catch {
-            try { if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() } } catch { }
-            $process.Dispose()
             try { [IO.Directory]::Delete($channelPath, $true) } catch { }
             throw
         }
+        finally {
+            [Environment]::SetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', $previousDataDirectory, [EnvironmentVariableTarget]::Process)
+        }
+        if ($null -eq $process) {
+            try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+            throw 'Scan worker did not start.'
+        }
+        if ($WorkerJobHandle -ne [IntPtr]::Zero) {
+            try { Add-UsageWorkerProcessToJob -Handle $WorkerJobHandle -Process $process }
+            catch {
+                [void](Stop-UsageWorkerProcess -Process $process)
+                try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+                throw
+            }
+        }
+        $script:UsageWorkerHost = [pscustomobject]@{
+            Process = $process
+            DataDirectory = $dataPath
+            ScriptPath = $scriptFile.FullName
+            WorkerJobHandle = $WorkerJobHandle
+        }
+    }
+    else { $process = $workerHost.Process }
+    $startedAt = [datetime]::UtcNow
+    try {
+        if ($process.HasExited) { throw 'Scan worker exited before receiving a request.' }
+        $process.StandardInput.WriteLine($Generation)
+        $process.StandardInput.Flush()
+    }
+    catch {
+        if ($null -ne $script:UsageWorkerHost -and [object]::ReferenceEquals($script:UsageWorkerHost.Process, $process)) {
+            $script:UsageWorkerHost = $null
+        }
+        [void](Stop-UsageWorkerProcess -Process $process)
+        try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+        throw
     }
     return [pscustomobject]@{
         Process = $process
         Generation = $Generation
         OutputPath = $outputPath
         ChannelDirectory = $channelPath
-        StartedAtUtc = [datetime]::UtcNow
+        StartedAtUtc = $startedAt
     }
 }
 
@@ -1409,34 +1454,30 @@ function Receive-UsageScanProcess {
         $outputPath -isnot [string] -or $channelPath -isnot [string] -or $startedAt -isnot [datetime]) {
         return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false }
     }
-    try { $hasExited = $process.HasExited }
+    try {
+        $hasExited = $process.HasExited
+        $hasResult = [IO.File]::Exists($outputPath)
+    }
     catch { return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false } }
-    if (-not $hasExited -and ([datetime]::UtcNow - $startedAt.ToUniversalTime()).TotalSeconds -lt $TimeoutSeconds) {
+    if (-not $hasResult -and -not $hasExited -and
+        ([datetime]::UtcNow - $startedAt.ToUniversalTime()).TotalSeconds -lt $TimeoutSeconds) {
         return [pscustomobject]@{ Status = 'pending'; Snapshot = $null; ProcessExited = $false }
     }
 
-    $timedOut = -not $hasExited
+    $timedOut = -not $hasResult -and -not $hasExited
     $snapshot = $null
-    try {
-        if ($timedOut) {
-            try { $process.Kill() } catch { }
-            try { [void]$process.WaitForExit(2000) } catch { }
-        }
-        try { $hasExited = $process.HasExited } catch { $hasExited = $false }
-        if ($hasExited -and -not $timedOut) {
-            $stdout = $process.StandardOutput.ReadToEnd()
-            $stderr = $process.StandardError.ReadToEnd()
-            if ($process.ExitCode -eq 0 -and $stdout.Length -eq 0 -and $stderr.Length -eq 0) {
-                $snapshot = Read-UsageScanResult -Path $outputPath -ExpectedGeneration $generation
-            }
-        }
+    if ($hasResult -and -not $hasExited) {
+        $snapshot = Read-UsageScanResult -Path $outputPath -ExpectedGeneration $generation
     }
-    catch { $snapshot = $null }
-    finally {
-        try { if ([IO.File]::Exists($outputPath)) { [IO.File]::Delete($outputPath) } } catch { }
-        try { if ([IO.Directory]::Exists($channelPath)) { [IO.Directory]::Delete($channelPath, $false) } } catch { }
-        try { $process.Dispose() } catch { }
+    $stopProcess = $timedOut -or $hasExited -or $null -eq $snapshot
+    if ($stopProcess) {
+        if ($null -ne $script:UsageWorkerHost -and [object]::ReferenceEquals($script:UsageWorkerHost.Process, $process)) {
+            $script:UsageWorkerHost = $null
+        }
+        $hasExited = Stop-UsageWorkerProcess -Process $process
     }
+    try { if ([IO.File]::Exists($outputPath)) { [IO.File]::Delete($outputPath) } } catch { }
+    try { if ([IO.Directory]::Exists($channelPath)) { [IO.Directory]::Delete($channelPath, $false) } } catch { }
     $status = if ($timedOut) { 'timeout' } elseif ($null -ne $snapshot) { 'completed' } else { 'failed' }
     return [pscustomobject]@{ Status = $status; Snapshot = $snapshot; ProcessExited = $hasExited }
 }
@@ -4977,6 +5018,7 @@ $script:LastUsageClassification = 'empty'
 $script:RefreshTicks = 0
 $script:WidgetTimer = $null
 $script:UsageJob = $null
+$script:UsageWorkerHost = $null
 $script:UsageWorkerJobHandle = [IntPtr]::Zero
 $script:UsageFailureCount = 0
 $script:UsageNextAttemptAtUtc = [datetime]::MinValue
@@ -5468,19 +5510,17 @@ function Complete-UsageRefresh {
 }
 
 function Stop-UsageWorker {
-    if ($null -ne $script:UsageJob) {
-        $job = $script:UsageJob
-        try {
-            if (-not $job.Process.HasExited) {
-                $job.Process.Kill()
-                [void]$job.Process.WaitForExit(2000)
-            }
-        }
-        catch { }
+    $job = $script:UsageJob
+    $workerHost = $script:UsageWorkerHost
+    $script:UsageJob = $null
+    $script:UsageWorkerHost = $null
+    $process = if ($null -ne $workerHost -and $workerHost.Process -is [Diagnostics.Process]) { $workerHost.Process }
+        elseif ($null -ne $job -and $job.Process -is [Diagnostics.Process]) { $job.Process }
+        else { $null }
+    if ($null -ne $process) { [void](Stop-UsageWorkerProcess -Process $process) }
+    if ($null -ne $job) {
         try { if ([IO.File]::Exists($job.OutputPath)) { [IO.File]::Delete($job.OutputPath) } } catch { }
         try { if ([IO.Directory]::Exists($job.ChannelDirectory)) { [IO.Directory]::Delete($job.ChannelDirectory, $false) } } catch { }
-        try { $job.Process.Dispose() } catch { }
-        $script:UsageJob = $null
     }
     if ($script:UsageWorkerJobHandle -ne [IntPtr]::Zero) {
         try { Close-UsageWorkerJob -Handle $script:UsageWorkerJobHandle } catch { }

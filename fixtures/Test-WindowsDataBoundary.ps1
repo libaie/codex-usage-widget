@@ -215,11 +215,11 @@ try {
     Assert-Boundary ($channelAcl.AreAccessRulesProtected -and $channelRules.Count -eq 1 -and
         $channelRules[0].IdentityReference.Value -ceq [Security.Principal.WindowsIdentity]::GetCurrent().Name) 'the per-round channel ACL must allow only the current user.'
     $worker = $workerJob.Process
-    $workerCompleted = $worker.WaitForExit(12000)
-    if (-not $workerCompleted) {
-        try { $worker.Kill(); $worker.WaitForExit() } catch { }
+    $workerDeadlineAt = [datetime]::UtcNow.AddSeconds(12)
+    while (-not [IO.File]::Exists($workerOutput) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $workerDeadlineAt) {
+        Start-Sleep -Milliseconds 50
     }
-    Assert-Boundary $workerCompleted 'the isolated worker must finish inside its parent deadline.'
+    Assert-Boundary (-not $worker.HasExited) 'the isolated worker host must remain alive after completing a request.'
     Assert-Boundary ([IO.File]::Exists($workerOutput) -and ([IO.FileInfo]$workerOutput).Length -le 262144) 'the worker result must fit the 256 KiB protocol limit.'
     $workerResult = [IO.File]::ReadAllText($workerOutput) | ConvertFrom-Json -ErrorAction Stop
     Assert-Boundary ($workerResult.schemaVersion -eq 1 -and $workerResult.generation -ceq $generation -and $workerResult.snapshot.Classification -ceq 'complete') 'the worker result must bind schema, generation, and normalized snapshot.'
@@ -233,10 +233,20 @@ try {
     Assert-Boundary (-not (Write-UsageScanResult -Snapshot $nestedForgery.snapshot -Generation $generation -Path $producerPath) -and
         -not [IO.File]::Exists($producerPath)) 'the producer must reject an invalid snapshot before serialization or any result write.'
     $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
-    Assert-Boundary ($received.Status -ceq 'completed' -and $received.ProcessExited -and -not [IO.File]::Exists($workerOutput)) 'the parent must reap a naturally completed worker exactly once.'
+    Assert-Boundary ($received.Status -ceq 'completed' -and -not $received.ProcessExited -and -not [IO.File]::Exists($workerOutput)) 'the parent must consume one result without stopping the reusable worker host.'
     $validatedSnapshot = $received.Snapshot
     Assert-Boundary ($validatedSnapshot.Classification -ceq 'complete' -and $null -ne $validatedSnapshot.State) 'the parent must publish a complete validated snapshot.'
     Assert-Boundary (@($validatedSnapshot.State.SessionTokenSnapshots).Count -eq 30) ('the parent must validate thirty bounded session files; count={0}.' -f @($validatedSnapshot.State.SessionTokenSnapshots).Count)
+    $secondGeneration = [guid]::NewGuid().ToString('N')
+    $secondWorkerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') -DataDirectory $workerData -Generation $secondGeneration
+    Assert-Boundary ($secondWorkerJob.Process.Id -eq $worker.Id) 'consecutive scans must reuse the same isolated worker process.'
+    $secondDeadlineAt = [datetime]::UtcNow.AddSeconds(12)
+    while (-not [IO.File]::Exists($secondWorkerJob.OutputPath) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $secondDeadlineAt) {
+        Start-Sleep -Milliseconds 50
+    }
+    $secondReceived = Receive-UsageScanProcess -Job $secondWorkerJob -TimeoutSeconds 10
+    Assert-Boundary ($secondReceived.Status -ceq 'completed' -and -not $secondReceived.ProcessExited -and
+        -not [IO.Directory]::Exists($secondWorkerJob.ChannelDirectory)) 'a reused worker must publish and clean an independent second channel.'
     $forgedPath = Join-Path $workerRoot 'forged.json'
     [IO.File]::WriteAllText($forgedPath, '{"schemaVersion":1,"generation":"00000000000000000000000000000000","snapshot":{}}')
     Assert-Boundary ($null -eq (Read-UsageScanResult -Path $forgedPath -ExpectedGeneration $generation)) 'the parent must reject a stale generation.'
@@ -318,6 +328,7 @@ finally {
         try { if (-not $worker.HasExited) { $worker.Kill(); $worker.WaitForExit() } } catch { }
         $worker.Dispose()
     }
+    $script:UsageWorkerHost = $null
     $env:LOCALAPPDATA = $savedLocalAppData
     if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
 }
