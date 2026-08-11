@@ -63,10 +63,12 @@ jobs:
         run: |
           set -euo pipefail
           VERSION_VALUE="$(tr -d '\r\n' < VERSION)"
+          SCREENSHOT_DIR="$RUNNER_TEMP/codex-widget-screenshots"
+          mkdir -p "$SCREENSHOT_DIR"
           test "$VERSION_VALUE" = "1.1.0"
           xcodebuild -version
           set +e
-          xcodebuild -project macos/CodexUsageWidget.xcodeproj \
+          CODEX_SCREENSHOT_DIR="$SCREENSHOT_DIR" xcodebuild -project macos/CodexUsageWidget.xcodeproj \
             -scheme CodexUsageWidget \
             -destination 'platform=macOS' \
             -derivedDataPath .build \
@@ -83,6 +85,15 @@ jobs:
             done
             exit "$XCODE_STATUS"
           fi
+          test -s "$SCREENSHOT_DIR/widget-ring-macos.png"
+          test -s "$SCREENSHOT_DIR/widget-details-macos.png"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-demo-screenshots
+          path: |
+            ${{ runner.temp }}/codex-widget-screenshots/widget-ring-macos.png
+            ${{ runner.temp }}/codex-widget-screenshots/widget-details-macos.png
+          if-no-files-found: error
       - name: Build and verify unsigned Universal app
         shell: bash
         run: |
