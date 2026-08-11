@@ -4,7 +4,10 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Assert-Boundary([bool]$Condition, [string]$Message) {
-    if (-not $Condition) { throw "Windows data-boundary assertion failed: $Message" }
+    if (-not $Condition) {
+        if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "::error title=Windows data boundary::$Message" }
+        throw "Windows data-boundary assertion failed: $Message"
+    }
 }
 
 function Get-FixtureSnapshot([string]$TestRoot, [string]$Package, [string]$Name) {
