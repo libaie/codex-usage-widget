@@ -1,5 +1,10 @@
 ﻿param(
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$Demo,
+    [switch]$ScanWorker,
+    [string]$ScanDataDirectory,
+    [string]$ScanOutputPath,
+    [string]$ScanGeneration
 )
 
 $script:CodexUsageDiagnostic = $null
@@ -10,6 +15,10 @@ $script:OwnsInstanceMutex = $false
 $script:WidgetLanguagePacks = $null
 $script:CurrentLanguageCode = $null
 $script:CurrentLanguageCulture = [cultureinfo]'en-US'
+$script:PreferenceStoreStatus = 'missing'
+$script:CodexUsageClassification = 'empty'
+$script:CodexUsageMetrics = $null
+$script:IsDemoMode = [bool]$Demo
 
 function Stop-InstanceMutex {
     if ($null -eq $script:InstanceMutex) { return }
@@ -89,7 +98,7 @@ function ConvertTo-LimitWindow {
         [double]::IsInfinity($resetValue) -or $resetValue -ne [math]::Truncate($resetValue) -or
         $resetValue -lt [long]::MinValue -or $resetValue -gt [long]::MaxValue) { return $null }
 
-    try { $resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$resetValue).LocalDateTime }
+    try { $resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$resetValue).UtcDateTime }
     catch { return $null }
 
     $values = [ordered]@{
@@ -133,8 +142,9 @@ function Get-CurrentLimitState {
         [Parameter(Mandatory)][datetime]$Now
     )
 
+    $nowUtc = $Now.ToUniversalTime()
     @($State.LimitWindows) |
-        Where-Object { [datetime]$_.ResetAt -gt $Now } |
+        Where-Object { ([datetime]$_.ResetAt).ToUniversalTime() -gt $nowUtc } |
         Sort-Object @{ Expression = 'RemainingPercent'; Ascending = $true },
                     @{ Expression = { if ($_.Name -eq 'primary') { 0 } else { 1 } }; Ascending = $true } |
         Select-Object -First 1
@@ -143,17 +153,39 @@ function Get-CurrentLimitState {
 function Get-TokenNumber {
     param(
         [AllowNull()]$Object,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()][ref]$Invalid
     )
 
     if ($null -eq $Object) { return $null }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     $value = $property.Value
-    if ($null -eq $value -or $value -is [bool] -or $value -isnot [System.ValueType]) { return $null }
-    $number = [double]$value
-    if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt 0) { return $null }
-    return $number
+    if ($null -eq $value) { return $null }
+    if ($value -is [bool] -or $value -isnot [System.ValueType]) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
+    $typeCode = [Type]::GetTypeCode($value.GetType())
+    if ($typeCode -notin [TypeCode]::Byte, [TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::UInt16,
+        [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64,
+        [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
+    if (($typeCode -eq [TypeCode]::Single -and [math]::Abs([double]$value) -gt 16777215) -or
+        ($typeCode -eq [TypeCode]::Double -and ([double]::IsNaN([double]$value) -or
+            [double]::IsInfinity([double]$value) -or [math]::Abs([double]$value) -gt 9007199254740991))) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
+    try { $number = [decimal]$value }
+    catch { if ($null -ne $Invalid) { $Invalid.Value = $true }; return $null }
+    if ($number -lt 0 -or $number -gt [long]::MaxValue -or $number -ne [decimal]::Truncate($number)) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
+    return [long]$number
 }
 
 function Get-TokenPercent {
@@ -165,22 +197,25 @@ function Get-TokenPercent {
     if ($null -eq $Numerator -or $null -eq $Denominator -or $Numerator -is [bool] -or
         $Denominator -is [bool] -or $Numerator -isnot [System.ValueType] -or
         $Denominator -isnot [System.ValueType]) { return $null }
-    $numeratorValue = [double]$Numerator
-    $denominatorValue = [double]$Denominator
-    if ([double]::IsNaN($numeratorValue) -or [double]::IsInfinity($numeratorValue) -or
-        $numeratorValue -lt 0 -or [double]::IsNaN($denominatorValue) -or
-        [double]::IsInfinity($denominatorValue) -or $denominatorValue -le 0) { return $null }
-    $percent = ($numeratorValue / $denominatorValue) * 100.0
-    if ([double]::IsNaN($percent) -or [double]::IsInfinity($percent)) { return $null }
-    return [math]::Round(
-        [math]::Max([double]0, [math]::Min([double]100, $percent)),
-        1,
-        [MidpointRounding]::ToEven
-    )
+    try {
+        $numeratorValue = [decimal]$Numerator
+        $denominatorValue = [decimal]$Denominator
+    }
+    catch { return $null }
+    if ($numeratorValue -lt 0 -or $denominatorValue -le 0) { return $null }
+    if ($numeratorValue -ge $denominatorValue) { return [decimal]100 }
+    return [decimal]::Round(($numeratorValue / $denominatorValue) * 100, 1, [MidpointRounding]::ToEven)
 }
 
 function Get-EventTokenDetails {
-    param([Parameter(Mandatory)]$Event)
+    param(
+        [Parameter(Mandatory)]$Event,
+        [AllowNull()][ref]$InvalidToken
+    )
+
+    if ($null -ne $InvalidToken) { $InvalidToken.Value = $false }
+    $invalidValue = $false
+    $invalidReference = [ref]$invalidValue
 
     $payloadProperty = $Event.PSObject.Properties['payload']
     if ($null -eq $payloadProperty) { return $null }
@@ -191,15 +226,16 @@ function Get-EventTokenDetails {
     $totalUsageProperty = $info.PSObject.Properties['total_token_usage']
     $lastUsageProperty = $info.PSObject.Properties['last_token_usage']
     $total = if ($null -ne $totalUsageProperty) { $totalUsageProperty.Value } else { $null }
-    $cumulative = Get-TokenNumber $total 'total_tokens'
-    $cumulativeInputTokens = Get-TokenNumber $total 'input_tokens'
-    $cumulativeCachedTokens = Get-TokenNumber $total 'cached_input_tokens'
+    $cumulative = Get-TokenNumber $total 'total_tokens' -Invalid $invalidReference
+    $cumulativeInputTokens = Get-TokenNumber $total 'input_tokens' -Invalid $invalidReference
+    $cumulativeCachedTokens = Get-TokenNumber $total 'cached_input_tokens' -Invalid $invalidReference
     $last = if ($null -ne $lastUsageProperty) { $lastUsageProperty.Value } else { $null }
-    $contextLimit = Get-TokenNumber $info 'model_context_window'
-    $contextTokens = Get-TokenNumber $last 'total_tokens'
-    $inputTokens = Get-TokenNumber $last 'input_tokens'
-    $outputTokens = Get-TokenNumber $last 'output_tokens'
-    $reasoningTokens = Get-TokenNumber $last 'reasoning_output_tokens'
+    $contextLimit = Get-TokenNumber $info 'model_context_window' -Invalid $invalidReference
+    $contextTokens = Get-TokenNumber $last 'total_tokens' -Invalid $invalidReference
+    $inputTokens = Get-TokenNumber $last 'input_tokens' -Invalid $invalidReference
+    $outputTokens = Get-TokenNumber $last 'output_tokens' -Invalid $invalidReference
+    $reasoningTokens = Get-TokenNumber $last 'reasoning_output_tokens' -Invalid $invalidReference
+    if ($null -ne $InvalidToken) { $InvalidToken.Value = $invalidValue }
 
     $cacheHitTokens = $null
     $cacheMissTokens = $null
@@ -219,7 +255,7 @@ function Get-EventTokenDetails {
         $null -eq $inputTokens -and $null -eq $outputTokens -and $null -eq $reasoningTokens -and
         $null -eq $cacheHitTokens) { return $null }
 
-    $compositionTotal = if ($null -ne $inputTokens -and $null -ne $outputTokens) { $inputTokens + $outputTokens } else { $null }
+    $compositionTotal = if ($null -ne $inputTokens -and $null -ne $outputTokens) { [decimal]$inputTokens + [decimal]$outputTokens } else { $null }
     [pscustomobject]@{
         CumulativeTokens       = $cumulative
         CacheHitTokens         = $cacheHitTokens
@@ -241,11 +277,11 @@ function ConvertTo-ObservedAt {
     try {
         if ($Timestamp -is [bool]) { return $null }
         if ($Timestamp -is [System.ValueType]) {
-            return [DateTimeOffset]::FromUnixTimeSeconds([long]$Timestamp).LocalDateTime
+            return [DateTimeOffset]::FromUnixTimeSeconds([long]$Timestamp).UtcDateTime
         }
 
         $parsed = [DateTimeOffset]::MinValue
-        if ([DateTimeOffset]::TryParse([string]$Timestamp, [ref]$parsed)) { return $parsed.LocalDateTime }
+        if ([DateTimeOffset]::TryParse([string]$Timestamp, [ref]$parsed)) { return $parsed.UtcDateTime }
     }
     catch { }
 
@@ -272,16 +308,27 @@ function Get-EventRateLimits {
 }
 
 function Read-TaskNameIndex {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateRange(1, 4194304)][long]$MaxBytes = 1048576,
+        [ValidateRange(1, 50000)][int]$MaxLines = 10000,
+        [AllowNull()][ref]$BytesRead
+    )
 
+    if ($null -ne $BytesRead) { $BytesRead.Value = 0L }
     if (-not [System.IO.File]::Exists($Path)) { return $null }
     $names = @{}
     try {
         $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
         try {
+            $start = [math]::Max(0, $stream.Length - $MaxBytes)
+            if ($start -gt 0) { [void]$stream.Seek($start, [IO.SeekOrigin]::Begin) }
+            if ($null -ne $BytesRead) { $BytesRead.Value = $stream.Length - $start }
             $reader = [System.IO.StreamReader]::new($stream)
             try {
-                while (($line = $reader.ReadLine()) -ne $null) {
+                if ($start -gt 0) { [void]$reader.ReadLine() }
+                $lineCount = 0
+                while ($lineCount++ -lt $MaxLines -and ($line = $reader.ReadLine()) -ne $null) {
                     if ($line.IndexOf('thread_name', [StringComparison]::Ordinal) -lt 0) { continue }
                     try {
                         $row = $line | ConvertFrom-Json -ErrorAction Stop
@@ -340,10 +387,20 @@ function Read-SessionEvents {
     param(
         [Parameter(Mandatory)][string]$Path,
         [long]$TailBytes = 0,
-        [ref]$ReadFailed
+        [ref]$ReadFailed,
+        [ref]$Metrics
     )
 
     if ($null -ne $ReadFailed) { $ReadFailed.Value = $false }
+    $readMetrics = [pscustomobject]@{
+        CandidateLineCount = 0
+        UsageEventCount = 0
+        MalformedLineCount = 0
+        UnknownEventCount = 0
+        ReadFailureCount = 0
+        InvalidValueCount = 0
+    }
+    if ($null -ne $Metrics) { $Metrics.Value = $readMetrics }
     $events = New-Object 'System.Collections.Generic.List[object]'
     try {
         $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
@@ -354,8 +411,23 @@ function Read-SessionEvents {
             try {
                 if ($truncated) { [void]$reader.ReadLine() } # discard the partial first JSONL record
                 while (($line = $reader.ReadLine()) -ne $null) {
-                    if ($line.IndexOf('rate_limits', [System.StringComparison]::Ordinal) -lt 0) { continue }
-                    try { $events.Add(($line | ConvertFrom-Json -ErrorAction Stop)) } catch { }
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    try { $event = $line | ConvertFrom-Json -ErrorAction Stop }
+                    catch { $readMetrics.MalformedLineCount++; continue }
+                    $payloadProperty = $event.PSObject.Properties['payload']
+                    $schemaProperty = if ($null -ne $payloadProperty) { $payloadProperty.Value.PSObject.Properties['schema_version'] } else { $null }
+                    if ($null -ne $schemaProperty -and $schemaProperty.Value -ne 1) {
+                        $readMetrics.CandidateLineCount++
+                        $readMetrics.UnknownEventCount++
+                        continue
+                    }
+                    if ($null -eq (Get-EventRateLimits $event)) { continue }
+                    $readMetrics.CandidateLineCount++
+                    $readMetrics.UsageEventCount++
+                    $invalidToken = $false
+                    [void](Get-EventTokenDetails -Event $event -InvalidToken ([ref]$invalidToken))
+                    if ($invalidToken) { $readMetrics.InvalidValueCount++ }
+                    $events.Add($event)
                 }
             }
             finally { $reader.Dispose() }
@@ -364,6 +436,7 @@ function Read-SessionEvents {
     }
     catch {
         if ($null -ne $ReadFailed) { $ReadFailed.Value = $true }
+        $readMetrics.ReadFailureCount++
     }
     return $events.ToArray()
 }
@@ -375,6 +448,7 @@ function Get-NewestUsageState {
     )
 
     $newest = $null
+    $allStates = New-Object 'System.Collections.Generic.List[object]'
     $matchingStates = New-Object 'System.Collections.Generic.List[object]'
     $legacyStates = New-Object 'System.Collections.Generic.List[object]'
     $filterByLimit = $PSBoundParameters.ContainsKey('LimitId')
@@ -403,6 +477,7 @@ function Get-NewestUsageState {
             $state = ConvertTo-UsageState -Json $json
             $state | Add-Member -NotePropertyName TokenDetails -NotePropertyValue (Get-EventTokenDetails $event)
             $state | Add-Member -NotePropertyName ObservedAt -NotePropertyValue $timestamp
+            $allStates.Add($state)
             if ($filterByLimit) {
                 if ($isLegacyLimit) { $legacyStates.Add($state) }
                 else { $matchingStates.Add($state) }
@@ -411,7 +486,22 @@ function Get-NewestUsageState {
         }
         catch { }
     }
-    if (-not $filterByLimit) { return $newest }
+    if (-not $filterByLimit) {
+        if ($null -eq $newest) { return $null }
+        $tokenSource = $allStates.ToArray() |
+            Where-Object { $null -ne $_.TokenDetails } |
+            Sort-Object @{ Expression = {
+                    if ($null -ne $_.TokenDetails.CacheHitTokens -and $null -ne $_.TokenDetails.CacheMissTokens) {
+                        return [decimal]$_.TokenDetails.CacheHitTokens + [decimal]$_.TokenDetails.CacheMissTokens
+                    }
+                    if ($null -ne $_.TokenDetails.CumulativeTokens) { return [decimal]$_.TokenDetails.CumulativeTokens }
+                    return [decimal]-1
+                }; Descending = $true },
+                @{ Expression = { [datetime]$_.ObservedAt }; Descending = $true } |
+            Select-Object -First 1
+        if ($null -ne $tokenSource) { $newest.TokenDetails = $tokenSource.TokenDetails }
+        return $newest
+    }
 
     $states = if ($matchingStates.Count -gt 0) { $matchingStates.ToArray() } else { $legacyStates.ToArray() }
     if ($states.Count -eq 0) { return $null }
@@ -442,9 +532,20 @@ function Get-NewestUsageState {
     if ($selectedWindows.Count -eq 0) { return $null }
 
     $sourceState = $currentStates.ToArray() | Sort-Object ObservedAt -Descending | Select-Object -First 1
+    $tokenSource = $currentStates.ToArray() |
+        Where-Object { $null -ne $_.TokenDetails } |
+        Sort-Object @{ Expression = {
+                if ($null -ne $_.TokenDetails.CacheHitTokens -and $null -ne $_.TokenDetails.CacheMissTokens) {
+                    return [decimal]$_.TokenDetails.CacheHitTokens + [decimal]$_.TokenDetails.CacheMissTokens
+                }
+                if ($null -ne $_.TokenDetails.CumulativeTokens) { return [decimal]$_.TokenDetails.CumulativeTokens }
+                return [decimal]-1
+            }; Descending = $true },
+            @{ Expression = { [datetime]$_.ObservedAt }; Descending = $true } |
+        Select-Object -First 1
     return [pscustomobject]@{
         LimitWindows = $selectedWindows.ToArray()
-        TokenDetails = $sourceState.TokenDetails
+        TokenDetails = if ($null -ne $tokenSource) { $tokenSource.TokenDetails } else { $sourceState.TokenDetails }
         ObservedAt   = $sourceState.ObservedAt
     }
 }
@@ -466,38 +567,148 @@ function Resolve-CodexDataDirectory {
     )
 
     $profilePath = ConvertTo-CodexDataDirectoryPath $UserProfile
-    $defaultDirectory = if ($null -ne $profilePath) { Join-Path $profilePath '.codex' } else { $null }
+    $defaultDirectory = if ($null -ne $profilePath) { [IO.Path]::Combine($profilePath, '.codex') } else { $null }
     foreach ($candidate in $SavedDirectory, $CodexHome, $defaultDirectory) {
         $directory = ConvertTo-CodexDataDirectoryPath $candidate
-        if ($null -ne $directory -and [System.IO.Directory]::Exists((Join-Path $directory 'sessions'))) {
+        if ($null -ne $directory -and [System.IO.Directory]::Exists([IO.Path]::Combine($directory, 'sessions'))) {
             return $directory
         }
     }
     return $null
 }
 
+function Get-BoundedSessionFiles {
+    param(
+        [Parameter(Mandatory)][string]$SessionsPath,
+        [ValidateRange(1, 1000)][int]$MaxFiles = 30,
+        [ValidateRange(1, 100000)][int]$MaxEntries = 10000,
+        [AllowNull()]$TaskNames,
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [Parameter(Mandatory)][datetime]$DeadlineUtc
+    )
+
+    $result = [pscustomobject]@{
+        Files = @()
+        ActiveFiles = @()
+        EntriesVisited = 0
+        RejectedPathCount = 0
+        ReadFailureCount = 0
+        Truncated = $false
+    }
+    if ([datetime]::UtcNow -ge $DeadlineUtc.ToUniversalTime()) { $result.Truncated = $true; return $result }
+    try {
+        $root = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($SessionsPath))
+        if (-not $root.Exists) { $result.ReadFailureCount = 1; return $result }
+        if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $result.RejectedPathCount = 1
+            return $result
+        }
+        $rootPrefix = $root.FullName.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    }
+    catch { $result.ReadFailureCount = 1; return $result }
+
+    $directories = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+    $files = [Collections.Generic.List[IO.FileInfo]]::new()
+    $activeFiles = [Collections.Generic.List[IO.FileInfo]]::new()
+    $activityCutoff = $NowUtc.ToUniversalTime().AddMinutes(-30)
+    $insertNewest = {
+        param([Collections.Generic.List[IO.FileInfo]]$List, [IO.FileInfo]$File, [int]$Capacity)
+
+        $position = 0
+        while ($position -lt $List.Count) {
+            $timeOrder = [datetime]::Compare($File.LastWriteTimeUtc, $List[$position].LastWriteTimeUtc)
+            if ($timeOrder -gt 0 -or ($timeOrder -eq 0 -and
+                [string]::CompareOrdinal($File.FullName, $List[$position].FullName) -lt 0)) { break }
+            $position++
+        }
+        $List.Insert($position, $File)
+        if ($List.Count -gt $Capacity) { $List.RemoveAt($List.Count - 1) }
+    }
+    $directories.Push($root)
+    while ($directories.Count -gt 0) {
+        if ($result.EntriesVisited -ge $MaxEntries -or [datetime]::UtcNow -ge $DeadlineUtc.ToUniversalTime()) {
+            $result.Truncated = $true
+            break
+        }
+        $directory = $directories.Pop()
+        try {
+            foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+                if ($result.EntriesVisited -ge $MaxEntries -or [datetime]::UtcNow -ge $DeadlineUtc.ToUniversalTime()) {
+                    $result.Truncated = $true
+                    break
+                }
+                $result.EntriesVisited++
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $result.RejectedPathCount++
+                    continue
+                }
+                $fullName = [IO.Path]::GetFullPath($entry.FullName)
+                if (-not $fullName.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    $result.RejectedPathCount++
+                    continue
+                }
+                if (($entry.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                    $directories.Push([IO.DirectoryInfo]$entry)
+                }
+                elseif ($entry -is [IO.FileInfo] -and $entry.Extension.Equals('.jsonl', [StringComparison]::OrdinalIgnoreCase)) {
+                    & $insertNewest $files ([IO.FileInfo]$entry) $MaxFiles
+                    if ($null -ne $TaskNames -and $entry.LastWriteTimeUtc -ge $activityCutoff -and
+                        $entry.BaseName -match '([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$') {
+                        $taskId = ([guid]$Matches[1]).ToString()
+                        if ($TaskNames.ContainsKey($taskId)) { & $insertNewest $activeFiles ([IO.FileInfo]$entry) 30 }
+                    }
+                }
+            }
+        }
+        catch { $result.ReadFailureCount++ }
+    }
+    $result.Files = $files.ToArray()
+    $result.ActiveFiles = $activeFiles.ToArray()
+    return $result
+}
+
 function Get-CodexUsageState {
-    param([AllowNull()][string]$DataDirectory)
+    param(
+        [AllowNull()][string]$DataDirectory,
+        [switch]$ReadOnly
+    )
 
     if (-not $PSBoundParameters.ContainsKey('DataDirectory')) {
         $DataDirectory = Resolve-CodexDataDirectory $null $env:CODEX_HOME $env:USERPROFILE
     }
-    $sessionsPath = if (-not [string]::IsNullOrWhiteSpace($DataDirectory)) { Join-Path $DataDirectory 'sessions' } else { $null }
+    $sessionsPath = if (-not [string]::IsNullOrWhiteSpace($DataDirectory)) { [IO.Path]::Combine($DataDirectory, 'sessions') } else { $null }
     $events = New-Object 'System.Collections.Generic.List[object]'
     $sessionTokenSnapshots = New-Object 'System.Collections.Generic.List[object]'
     $activeTasks = New-Object 'System.Collections.Generic.List[object]'
     $script:CodexUsageDiagnostic = $null
+    $script:CodexUsageClassification = 'empty'
+    $script:CodexUsageMetrics = [pscustomobject]@{
+        CandidateLineCount = 0
+        UsageEventCount = 0
+        MalformedLineCount = 0
+        UnknownEventCount = 0
+        ReadFailureCount = 0
+        InvalidValueCount = 0
+        RejectedPathCount = 0
+        EnumerationTruncated = $false
+    }
     if (-not [System.IO.Directory]::Exists($sessionsPath)) {
         $script:CodexUsageDiagnostic = 'missing_directory'
         return $null
     }
 
-    try {
-        $allFiles = @(Get-ChildItem -LiteralPath $sessionsPath -Recurse -File -Filter '*.jsonl' -ErrorAction Stop |
-            Sort-Object LastWriteTimeUtc -Descending)
-        $files = @($allFiles | Select-Object -First 30)
-    }
-    catch {
+    $taskIndexPath = [IO.Path]::Combine($DataDirectory, 'session_index.jsonl')
+    $taskNames = Read-TaskNameIndex $taskIndexPath
+    $scanNow = [datetime]::UtcNow
+    $discovery = Get-BoundedSessionFiles -SessionsPath $sessionsPath -MaxFiles 30 -MaxEntries 10000 `
+        -TaskNames $taskNames -NowUtc $scanNow -DeadlineUtc $scanNow.AddSeconds(3)
+    $script:CodexUsageMetrics.ReadFailureCount += $discovery.ReadFailureCount
+    $script:CodexUsageMetrics.RejectedPathCount = $discovery.RejectedPathCount
+    $script:CodexUsageMetrics.EnumerationTruncated = $discovery.Truncated
+    $allFiles = @($discovery.Files)
+    $files = $allFiles
+    if ($discovery.ReadFailureCount -gt 0 -and $files.Count -eq 0) {
+        $script:CodexUsageClassification = 'error'
         $script:CodexUsageDiagnostic = 'read_failed'
         return $null
     }
@@ -506,9 +717,7 @@ function Get-CodexUsageState {
         return $null
     }
 
-    $taskIndexPath = Join-Path $DataDirectory 'session_index.jsonl'
-    $taskNames = Read-TaskNameIndex $taskIndexPath
-    $activeCandidates = @(Get-ActiveTaskCandidates -Files $allFiles -Names $taskNames -Now ([datetime]::UtcNow))
+    $activeCandidates = @(Get-ActiveTaskCandidates -Files $discovery.ActiveFiles -Names $taskNames -Now $scanNow)
     $activeByPath = @{}
     foreach ($candidate in $activeCandidates) { $activeByPath[$candidate.FullName] = $candidate }
     $usagePaths = @{}
@@ -528,18 +737,22 @@ function Get-CodexUsageState {
         $readPaths[$candidate.FullName] = $true
     }
 
-    $readFailed = $false
+    $readFailed = $discovery.ReadFailureCount -gt 0
     $isNewestCandidate = $true
     foreach ($file in $filesToRead) {
         $fileReadFailed = $false
-        $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 262144 -ReadFailed ([ref]$fileReadFailed))
+        $fileMetrics = $null
+        $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 262144 -ReadFailed ([ref]$fileReadFailed) -Metrics ([ref]$fileMetrics))
         if ($fileReadFailed) { $readFailed = $true }
         $fileState = Get-NewestUsageState -Events $fileEvents
         if ($isNewestCandidate -and $null -eq $fileState) {
             # ponytail: one 1 MiB retry bounds fallback I/O; enlarge only if Codex records outgrow it.
-            $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 1048576 -ReadFailed ([ref]$fileReadFailed))
+            $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 1048576 -ReadFailed ([ref]$fileReadFailed) -Metrics ([ref]$fileMetrics))
             if ($fileReadFailed) { $readFailed = $true }
             $fileState = Get-NewestUsageState -Events $fileEvents
+        }
+        foreach ($metricName in 'CandidateLineCount', 'UsageEventCount', 'MalformedLineCount', 'UnknownEventCount', 'ReadFailureCount', 'InvalidValueCount') {
+            $script:CodexUsageMetrics.$metricName += [int]$fileMetrics.$metricName
         }
         if ($usagePaths.ContainsKey($file.FullName)) {
             if ($null -ne $fileState -and $null -ne $fileState.TokenDetails) {
@@ -564,18 +777,34 @@ function Get-CodexUsageState {
     }
     $state = Get-NewestUsageState -Events $events.ToArray() -LimitId 'codex'
     if ($null -ne $state) {
-        $cacheTotals = Update-CumulativeCacheTokens $sessionTokenSnapshots.ToArray()
-        if ($null -ne $cacheTotals) {
-            if ($null -eq $state.TokenDetails) { $state.TokenDetails = [pscustomobject]@{} }
-            foreach ($name in 'CacheHitTokens', 'CacheMissTokens', 'CacheHitPercent', 'CacheMissPercent') {
-                $state.TokenDetails | Add-Member -NotePropertyName $name -NotePropertyValue $cacheTotals.$name -Force
+        $sortedSessions = @($sessionTokenSnapshots.ToArray() | Sort-Object { [string]$_.Id })
+        $sortedTasks = @($activeTasks.ToArray() | Sort-Object `
+            @{ Expression = { ([datetime]$_.UpdatedAt).ToUniversalTime() }; Descending = $true },
+            @{ Expression = { [string]$_.Id }; Ascending = $true })
+        $state | Add-Member -NotePropertyName SessionTokenSnapshots -NotePropertyValue $sortedSessions
+        if (-not $ReadOnly) {
+            $cacheTotals = Update-CumulativeCacheTokens $sessionTokenSnapshots.ToArray()
+            if ($null -ne $cacheTotals) {
+                if ($null -eq $state.TokenDetails) { $state.TokenDetails = [pscustomobject]@{} }
+                foreach ($name in 'CacheHitTokens', 'CacheMissTokens', 'CacheHitPercent', 'CacheMissPercent') {
+                    $state.TokenDetails | Add-Member -NotePropertyName $name -NotePropertyValue $cacheTotals.$name -Force
+                }
             }
         }
-        $state | Add-Member -NotePropertyName ActiveTasks -NotePropertyValue $activeTasks.ToArray()
+        $state | Add-Member -NotePropertyName ActiveTasks -NotePropertyValue $sortedTasks
         $state | Add-Member -NotePropertyName TaskNamesAvailable -NotePropertyValue ($null -ne $taskNames)
+        $script:CodexUsageClassification = if ($readFailed -or $script:CodexUsageMetrics.MalformedLineCount -gt 0 -or
+            $script:CodexUsageMetrics.UnknownEventCount -gt 0 -or $script:CodexUsageMetrics.InvalidValueCount -gt 0 -or
+            $script:CodexUsageMetrics.RejectedPathCount -gt 0 -or $script:CodexUsageMetrics.EnumerationTruncated) { 'partial' } else { 'complete' }
         $script:CodexUsageDiagnostic = $null
         return $state
     }
+    $script:CodexUsageClassification = if ($script:CodexUsageMetrics.UnknownEventCount -gt 0 -and
+        -not $readFailed -and $script:CodexUsageMetrics.MalformedLineCount -eq 0) { 'unsupported' }
+        elseif ($readFailed -or $script:CodexUsageMetrics.MalformedLineCount -gt 0 -or
+            $script:CodexUsageMetrics.CandidateLineCount -gt 0 -or $script:CodexUsageMetrics.RejectedPathCount -gt 0 -or
+            $script:CodexUsageMetrics.EnumerationTruncated) { 'error' }
+        else { 'empty' }
     $script:CodexUsageDiagnostic = if ($readFailed) { 'read_failed' } else { 'no_valid_event' }
     return $state
 }
@@ -585,26 +814,60 @@ function Get-CodexUsageDiagnostic {
 }
 
 function Get-CodexUsageSnapshot {
-    param([AllowNull()][string]$DataDirectory)
+    param(
+        [AllowNull()][string]$DataDirectory,
+        [switch]$ReadOnly
+    )
 
     $state = if ($PSBoundParameters.ContainsKey('DataDirectory')) {
-        Get-CodexUsageState -DataDirectory $DataDirectory
+        Get-CodexUsageState -DataDirectory $DataDirectory -ReadOnly:$ReadOnly
     } else {
-        Get-CodexUsageState
+        Get-CodexUsageState -ReadOnly:$ReadOnly
     }
     [pscustomobject]@{
-        State      = $state
-        Diagnostic = Get-CodexUsageDiagnostic
+        State          = $state
+        Diagnostic     = Get-CodexUsageDiagnostic
+        Classification = $script:CodexUsageClassification
+        Metrics        = $script:CodexUsageMetrics
+    }
+}
+
+function Get-DemoUsageSnapshot {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $fixture = [IO.FileInfo]::new((Join-Path $Root 'fixtures\contract\v1\inputs\demo.jsonl'))
+    if (-not $fixture.Exists -or $fixture.Length -lt 1 -or $fixture.Length -gt 262144 -or
+        ($fixture.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Invalid demo fixture.' }
+    $readFailed = $false
+    $metrics = $null
+    $events = @(Read-SessionEvents -Path $fixture.FullName -ReadFailed ([ref]$readFailed) -Metrics ([ref]$metrics))
+    $state = Get-NewestUsageState -Events $events -LimitId 'codex'
+    if ($readFailed -or $null -eq $state -or $events.Count -ne 1 -or
+        $metrics.MalformedLineCount -ne 0 -or $metrics.UnknownEventCount -ne 0 -or
+        $metrics.InvalidValueCount -ne 0) { throw 'Invalid demo fixture.' }
+    # ponytail: the fixture stays far-future for stable parser tests; only its demo presentation dates are rebased.
+    $demoNow = Get-Date
+    $state.ObservedAt = $demoNow.AddMinutes(-1)
+    foreach ($window in @($state.LimitWindows)) { $window.ResetAt = $demoNow.AddHours(5).AddMinutes(19) }
+    $state | Add-Member -NotePropertyName SessionTokenSnapshots -NotePropertyValue @()
+    $state | Add-Member -NotePropertyName ActiveTasks -NotePropertyValue @()
+    $state | Add-Member -NotePropertyName TaskNamesAvailable -NotePropertyValue $false
+    return [pscustomobject]@{
+        State = $state
+        Diagnostic = $null
+        Classification = 'complete'
+        Metrics = $metrics
     }
 }
 
 function Resolve-UsageRefreshResult {
     param(
         [AllowNull()]$Snapshot,
-        [Parameter(Mandatory)][int]$ErrorCount
+        [Parameter(Mandatory)][int]$ErrorCount,
+        [ValidateSet('read_failed', 'persistence_failed')][string]$FailureDiagnostic = 'read_failed'
     )
 
-    $failure = [pscustomobject]@{ State = $null; Diagnostic = 'read_failed' }
+    $failure = [pscustomobject]@{ State = $null; Diagnostic = $FailureDiagnostic }
     if ($ErrorCount -ne 0 -or $null -eq $Snapshot) { return $failure }
     $stateProperty = $Snapshot.PSObject.Properties['State']
     $diagnosticProperty = $Snapshot.PSObject.Properties['Diagnostic']
@@ -622,27 +885,715 @@ function Resolve-UsageRefreshResult {
     return [pscustomobject]@{ State = $null; Diagnostic = $diagnostic }
 }
 
-function Get-UsageWorkerFunctionNames {
-    @(
-        'ConvertTo-LimitWindow',
-        'ConvertTo-UsageState',
-        'ConvertTo-ObservedAt',
-        'Get-TokenNumber',
-        'Get-TokenPercent',
-        'Get-EventTokenDetails',
-        'Get-EventRateLimits',
-        'Read-TaskNameIndex',
-        'Get-ActiveTaskCandidates',
-        'Read-SessionEvents',
-        'Get-NewestUsageState',
-        'ConvertTo-CodexDataDirectoryPath',
-        'Resolve-CodexDataDirectory',
-        'Save-TextAtomically',
-        'Update-CumulativeCacheTokens',
-        'Get-CodexUsageState',
-        'Get-CodexUsageDiagnostic',
-        'Get-CodexUsageSnapshot'
+function Test-UsageScanSnapshot {
+    param([Parameter(Mandatory)][AllowNull()]$Snapshot)
+
+    try {
+        $hasExactProperties = {
+            param([AllowNull()]$Value, [string]$Names)
+            return $Value -is [pscustomobject] -and
+                (@($Value.PSObject.Properties.Name | Sort-Object) -join ',') -ceq $Names
+        }
+        $isCounter = {
+            param([AllowNull()]$Value, [switch]$Nullable)
+            if ($null -eq $Value) { return [bool]$Nullable }
+            return $null -ne (Get-TokenNumber ([pscustomobject]@{ Value = $Value }) 'Value')
+        }
+        $isPercent = {
+            param([AllowNull()]$Value, [switch]$Nullable)
+            if ($null -eq $Value) { return [bool]$Nullable }
+            if ($Value -is [bool] -or $Value -isnot [System.ValueType]) { return $false }
+            try { $number = [decimal]$Value } catch { return $false }
+            return $number -ge 0 -and $number -le 100 -and
+                [decimal]::Round($number, 1, [MidpointRounding]::ToEven) -eq $number
+        }
+        $isDate = {
+            param([AllowNull()]$Value)
+            if ($Value -isnot [datetime] -and $Value -isnot [datetimeoffset]) { return $false }
+            try { $null = ([DateTimeOffset]$Value).ToUnixTimeMilliseconds(); return $true } catch { return $false }
+        }
+        $isTokenDetails = {
+            param([AllowNull()]$Value)
+            if ($null -eq $Value) { return $true }
+            if (-not (& $hasExactProperties $Value 'CacheHitPercent,CacheHitTokens,CacheMissPercent,CacheMissTokens,ContextLimit,ContextPercent,ContextTokens,CumulativeTokens,InputPercent,OutputPercent,ReasoningOutputPercent')) { return $false }
+            foreach ($name in 'CumulativeTokens', 'CacheHitTokens', 'CacheMissTokens', 'ContextTokens', 'ContextLimit') {
+                if (-not (& $isCounter $Value.$name -Nullable)) { return $false }
+            }
+            foreach ($name in 'CacheHitPercent', 'CacheMissPercent', 'ContextPercent', 'InputPercent', 'OutputPercent', 'ReasoningOutputPercent') {
+                if (-not (& $isPercent $Value.$name -Nullable)) { return $false }
+            }
+            return $true
+        }
+
+        if (-not (& $hasExactProperties $Snapshot 'Classification,Diagnostic,Metrics,State') -or
+            $Snapshot.Classification -isnot [string] -or
+            $Snapshot.Classification -cnotin 'complete', 'partial', 'unsupported', 'error', 'empty' -or
+            -not (& $hasExactProperties $Snapshot.Metrics 'CandidateLineCount,EnumerationTruncated,InvalidValueCount,MalformedLineCount,ReadFailureCount,RejectedPathCount,UnknownEventCount,UsageEventCount') -or
+            $Snapshot.Metrics.EnumerationTruncated -isnot [bool]) { return $false }
+        foreach ($name in 'CandidateLineCount', 'InvalidValueCount', 'MalformedLineCount', 'ReadFailureCount', 'RejectedPathCount', 'UnknownEventCount', 'UsageEventCount') {
+            $value = Get-TokenNumber ([pscustomobject]@{ Value = $Snapshot.Metrics.$name }) 'Value'
+            if ($null -eq $value -or $value -gt 1000000) { return $false }
+        }
+        if ($null -eq $Snapshot.State) {
+            return $Snapshot.Classification -cin 'unsupported', 'error', 'empty' -and
+                $Snapshot.Diagnostic -is [string] -and
+                $Snapshot.Diagnostic -cin 'missing_directory', 'empty_directory', 'read_failed', 'no_valid_event'
+        }
+        if ($Snapshot.Classification -cnotin 'complete', 'partial' -or $null -ne $Snapshot.Diagnostic -or
+            -not (& $hasExactProperties $Snapshot.State 'ActiveTasks,LimitWindows,ObservedAt,SessionTokenSnapshots,TaskNamesAvailable,TokenDetails') -or
+            $Snapshot.State.TaskNamesAvailable -isnot [bool] -or -not (& $isDate $Snapshot.State.ObservedAt) -or
+            -not (& $isTokenDetails $Snapshot.State.TokenDetails)) { return $false }
+
+        $windows = @($Snapshot.State.LimitWindows)
+        if ($windows.Count -lt 1 -or $windows.Count -gt 2) { return $false }
+        $windowNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($window in $windows) {
+            $names = @($window.PSObject.Properties.Name | Sort-Object) -join ','
+            if ($window -isnot [pscustomobject] -or $names -cnotin 'Name,RemainingPercent,ResetAt,UsedPercent', 'Name,RemainingPercent,ResetAt,UsedPercent,WindowMinutes' -or
+                $window.Name -isnot [string] -or $window.Name -cnotin 'primary', 'secondary' -or
+                -not $windowNames.Add($window.Name) -or -not (& $isPercent $window.UsedPercent) -or
+                -not (& $isPercent $window.RemainingPercent) -or
+                [decimal]$window.UsedPercent + [decimal]$window.RemainingPercent -ne 100 -or
+                -not (& $isDate $window.ResetAt)) { return $false }
+            if ($null -ne $window.PSObject.Properties['WindowMinutes'] -and
+                -not (& $isCounter $window.WindowMinutes)) { return $false }
+        }
+        if ($windows.Count -eq 2 -and ($windows[0].Name -cne 'primary' -or $windows[1].Name -cne 'secondary')) { return $false }
+
+        $sessions = @($Snapshot.State.SessionTokenSnapshots)
+        if ($sessions.Count -gt 30) { return $false }
+        $previousId = $null
+        $sessionIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($session in $sessions) {
+            if (-not (& $hasExactProperties $session 'CacheHitTokens,CacheMissTokens,Id') -or
+                $session.Id -isnot [string] -or $session.Id -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
+                -not $sessionIds.Add($session.Id) -or
+                ($null -ne $previousId -and [string]::CompareOrdinal($previousId, $session.Id) -ge 0) -or
+                -not (& $isCounter $session.CacheHitTokens -Nullable) -or
+                -not (& $isCounter $session.CacheMissTokens -Nullable)) { return $false }
+            $previousId = $session.Id
+        }
+
+        $tasks = @($Snapshot.State.ActiveTasks)
+        if ($tasks.Count -gt 30) { return $false }
+        $previousTask = $null
+        $taskIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($task in $tasks) {
+            $parsedId = [guid]::Empty
+            if (-not (& $hasExactProperties $task 'Id,Name,TokenDetails,UpdatedAt') -or
+                $task.Id -isnot [string] -or -not [guid]::TryParse($task.Id, [ref]$parsedId) -or
+                -not $taskIds.Add($parsedId.ToString()) -or $task.Name -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($task.Name) -or $task.Name.Length -gt 500 -or
+                -not (& $isDate $task.UpdatedAt) -or -not (& $isTokenDetails $task.TokenDetails)) { return $false }
+            if ($null -ne $previousTask) {
+                $timeOrder = [datetime]::Compare(([datetime]$previousTask.UpdatedAt).ToUniversalTime(), ([datetime]$task.UpdatedAt).ToUniversalTime())
+                if ($timeOrder -lt 0 -or ($timeOrder -eq 0 -and [string]::CompareOrdinal($previousTask.Id, $task.Id) -ge 0)) { return $false }
+            }
+            $previousTask = $task
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Get-UsageJsonWorstCaseByteCount {
+    param(
+        [AllowNull()]$Value,
+        [ValidateRange(0, 32)][int]$Depth = 0
     )
+
+    if ($Depth -ge 32) { return 262145L }
+    if ($null -eq $Value) { return 4L }
+    if ($Value -is [string]) { return [math]::Min(262145L, 2L + 6L * $Value.Length) }
+    if ($Value -is [bool]) { return 5L }
+    if ($Value -is [datetime] -or $Value -is [datetimeoffset]) { return 386L }
+    if ($Value -is [System.ValueType]) { return 32L }
+
+    $total = 2L
+    if ($Value -is [pscustomobject]) {
+        $properties = @($Value.PSObject.Properties)
+        for ($index = 0; $index -lt $properties.Count; $index++) {
+            $property = $properties[$index]
+            $total += 3L + 6L * $property.Name.Length
+            $total += Get-UsageJsonWorstCaseByteCount -Value $property.Value -Depth ($Depth + 1)
+            if ($index -gt 0) { $total++ }
+            if ($total -gt 262144) { return 262145L }
+        }
+        return $total
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        $entries = @($Value.GetEnumerator())
+        for ($index = 0; $index -lt $entries.Count; $index++) {
+            $name = [string]$entries[$index].Key
+            $total += 3L + 6L * $name.Length
+            $total += Get-UsageJsonWorstCaseByteCount -Value $entries[$index].Value -Depth ($Depth + 1)
+            if ($index -gt 0) { $total++ }
+            if ($total -gt 262144) { return 262145L }
+        }
+        return $total
+    }
+    if ($Value -is [Collections.IEnumerable]) {
+        $items = @($Value)
+        for ($index = 0; $index -lt $items.Count; $index++) {
+            $total += Get-UsageJsonWorstCaseByteCount -Value $items[$index] -Depth ($Depth + 1)
+            if ($index -gt 0) { $total++ }
+            if ($total -gt 262144) { return 262145L }
+        }
+        return $total
+    }
+    return 262145L
+}
+
+function Write-UsageScanResult {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$Generation,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    try {
+        if ($Generation -cnotmatch '^[0-9a-f]{32}$' -or -not [IO.Path]::IsPathRooted($Path) -or
+            [IO.File]::Exists($Path) -or -not (Test-UsageScanSnapshot $Snapshot)) { return $false }
+        $parent = [IO.DirectoryInfo]::new([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path)))
+        if (-not $parent.Exists -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        $result = [pscustomobject]@{ schemaVersion = 1; generation = $Generation; snapshot = $Snapshot }
+        if ((Get-UsageJsonWorstCaseByteCount $result) -gt 262144) { return $false }
+        $json = $result | ConvertTo-Json -Depth 16 -Compress -ErrorAction Stop
+        if ([Text.UTF8Encoding]::new($false, $true).GetByteCount($json) -gt 262144) { return $false }
+        return Save-TextAtomically -Path $Path -Text $json
+    }
+    catch { return $false }
+}
+
+function Read-UsageScanResult {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedGeneration
+    )
+
+    try {
+        if ($ExpectedGeneration -cnotmatch '^[0-9a-f]{32}$' -or -not [IO.Path]::IsPathRooted($Path)) { return $null }
+        $file = [IO.FileInfo]::new([IO.Path]::GetFullPath($Path))
+        if (-not $file.Exists -or $file.Length -lt 1 -or $file.Length -gt 262144 -or
+            ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
+        $bytes = [IO.File]::ReadAllBytes($file.FullName)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return $null }
+        $json = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $result = $json | ConvertFrom-Json -ErrorAction Stop
+        if ($result -isnot [pscustomobject] -or
+            (@($result.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'generation,schemaVersion,snapshot' -or
+            $result.schemaVersion -is [bool] -or $result.schemaVersion -isnot [System.ValueType] -or
+            [decimal]$result.schemaVersion -ne 1 -or $result.generation -isnot [string] -or
+            $result.generation -cne $ExpectedGeneration -or $result.snapshot -isnot [pscustomobject]) { return $null }
+        $snapshot = $result.snapshot
+        if (-not (Test-UsageScanSnapshot $snapshot)) { return $null }
+        return $snapshot
+    }
+    catch { return $null }
+}
+
+function Apply-UsageSnapshotPersistence {
+    param([Parameter(Mandatory)]$Snapshot)
+
+    if ($Snapshot.Classification -cnotin 'complete', 'partial' -or $null -eq $Snapshot.State) { return $Snapshot }
+    $sessions = $Snapshot.State.PSObject.Properties['SessionTokenSnapshots']
+    if ($null -eq $sessions) { return $Snapshot }
+    $persisted = $false
+    $cacheTotals = Update-CumulativeCacheTokens @($sessions.Value) -Persisted ([ref]$persisted)
+    if (-not $persisted) { return $null }
+    if ($null -ne $cacheTotals) {
+        if ($null -eq $Snapshot.State.TokenDetails) { $Snapshot.State.TokenDetails = [pscustomobject]@{} }
+        foreach ($name in 'CacheHitTokens', 'CacheMissTokens', 'CacheHitPercent', 'CacheMissPercent') {
+            $Snapshot.State.TokenDetails | Add-Member -NotePropertyName $name -NotePropertyValue $cacheTotals.$name -Force
+        }
+    }
+    return $Snapshot
+}
+
+function Remove-StaleUsageWorkerChannels {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+
+    try {
+        $rootDirectory = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($Root))
+        if (-not $rootDirectory.Exists -or ($rootDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $directoryEnumerator = $rootDirectory.EnumerateDirectories().GetEnumerator()
+        try {
+            # ponytail: 128 channels x 16 artifacts bounds startup work; raise only if one day can legitimately exceed it.
+            $directoryCount = 0
+            while ($directoryCount -lt 128 -and $directoryEnumerator.MoveNext()) {
+                $directoryCount++
+                $directory = [IO.DirectoryInfo]$directoryEnumerator.Current
+                try {
+                    if ($directory.Name -cnotmatch '^CodexUsageWidget-scan-[0-9a-f]{32}$' -or
+                        ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        ($NowUtc.ToUniversalTime() - $directory.LastWriteTimeUtc).TotalHours -le 24) { continue }
+                    $acl = $directory.GetAccessControl()
+                    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
+                    if ($owner -cne $currentSid -or -not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+                        $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                        $rules[0].IdentityReference.Value -cne $currentSid -or
+                        ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                            [Security.AccessControl.FileSystemRights]::FullControl) { continue }
+
+                    $files = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+                    $entryEnumerator = $directory.EnumerateFileSystemInfos().GetEnumerator()
+                    $trusted = $true
+                    try {
+                        $entryCount = 0
+                        while ($entryEnumerator.MoveNext()) {
+                            $entryCount++
+                            $entry = [IO.FileSystemInfo]$entryEnumerator.Current
+                            if ($entryCount -gt 16 -or $entry -isnot [IO.FileInfo] -or
+                                ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                                $entry.Name -cnotmatch '^(?:ready|result\.json)(?:\.[0-9a-f]{32}\.(?:tmp|bak))?$') {
+                                $trusted = $false
+                                break
+                            }
+                            $files.Add([IO.FileInfo]$entry)
+                        }
+                    }
+                    finally { if ($null -ne $entryEnumerator) { $entryEnumerator.Dispose() } }
+                    if (-not $trusted) { continue }
+                    foreach ($file in $files) { $file.Delete() }
+                    $directory.Delete($false)
+                }
+                catch { }
+            }
+        }
+        finally { if ($null -ne $directoryEnumerator) { $directoryEnumerator.Dispose() } }
+    }
+    catch { }
+}
+
+function New-UsageWorkerJob {
+    if ($null -eq ('CodexUsageWorkerJobNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class CodexUsageWorkerJobNative {
+    const uint KillOnJobClose = 0x00002000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicLimits {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IoCounters {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ExtendedLimits {
+        public BasicLimits BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, uint length);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    public static IntPtr CreateKillOnClose() {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Win32Exception();
+        ExtendedLimits limits = new ExtendedLimits();
+        limits.BasicLimitInformation.LimitFlags = KillOnJobClose;
+        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(ExtendedLimits)))) {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new Win32Exception(error);
+        }
+        return job;
+    }
+
+    public static void Assign(IntPtr job, IntPtr process) {
+        if (!AssignProcessToJobObject(job, process)) throw new Win32Exception();
+    }
+
+    public static void Close(IntPtr job) {
+        if (job != IntPtr.Zero && !CloseHandle(job)) throw new Win32Exception();
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return [CodexUsageWorkerJobNative]::CreateKillOnClose()
+}
+
+function New-UsageWorkerDeadline {
+    $callbackType = 'CodexUsageWorkerDeadlineCallback' -as [type]
+    if ($null -eq $callbackType) {
+        # ponytail: emit one native callback instead of loading the C# compiler into every short-lived worker.
+        $assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
+            [Reflection.AssemblyName]::new('CodexUsageWorkerDeadlineAssembly'),
+            [Reflection.Emit.AssemblyBuilderAccess]::Run)
+        $module = $assembly.DefineDynamicModule('CodexUsageWorkerDeadlineModule')
+        $builder = $module.DefineType('CodexUsageWorkerDeadlineCallback',
+            [Reflection.TypeAttributes]::Public -bor [Reflection.TypeAttributes]::Abstract -bor [Reflection.TypeAttributes]::Sealed)
+        $method = $builder.DefineMethod('Exit',
+            [Reflection.MethodAttributes]::Public -bor [Reflection.MethodAttributes]::Static,
+            [void], [type[]]@([object]))
+        $il = $method.GetILGenerator()
+        $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_2)
+        $il.Emit([Reflection.Emit.OpCodes]::Call, [Environment].GetMethod('Exit', [type[]]@([int])))
+        $il.Emit([Reflection.Emit.OpCodes]::Ret)
+        $callbackType = $builder.CreateType()
+    }
+    $callback = [Threading.TimerCallback][Delegate]::CreateDelegate(
+        [Threading.TimerCallback], $callbackType.GetMethod('Exit'))
+    return [Threading.Timer]::new($callback, $null, 12000, [Threading.Timeout]::Infinite)
+}
+
+function Invoke-UsageScanWorker {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    $workerStage = 'startup'
+    try {
+        [Console]::InputEncoding = [Text.Encoding]::ASCII
+        $workerDataDirectory = $env:CODEX_WIDGET_DATA_DIRECTORY
+        if ([string]::IsNullOrWhiteSpace($workerDataDirectory)) { throw 'Invalid scan-worker arguments.' }
+        while ($true) {
+            $workerStage = 'request'
+            $workerGeneration = [Console]::In.ReadLine()
+            if ($null -eq $workerGeneration) { return 0 }
+            $workerDeadline = $null
+            try {
+                $workerStage = 'generation'
+                if ($workerGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Invalid scan-worker arguments.' }
+                $workerStage = 'channel'
+                $workerRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($env:LOCALAPPDATA, 'CodexUsageWidget', 'worker'))
+                $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
+                if (-not $workerDirectory.Exists -or ($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Invalid scan output directory.'
+                }
+                $channelPath = [IO.Path]::GetFullPath([IO.Path]::Combine($workerRoot, 'CodexUsageWidget-scan-' + $workerGeneration))
+                $channel = [IO.DirectoryInfo]::new($channelPath)
+                if (-not $channel.Exists -or ($channel.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Invalid scan channel directory.'
+                }
+                $expectedOutput = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'result.json'))
+                $readyPath = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'ready'))
+                if ([IO.File]::Exists($expectedOutput) -or [IO.Directory]::Exists($expectedOutput) -or
+                    [IO.File]::Exists($readyPath) -or [IO.Directory]::Exists($readyPath)) { throw 'Invalid scan output path.' }
+                $workerStage = 'ready'
+                if (-not (Save-TextAtomically -Path $readyPath -Text '')) { throw 'Scan request could not be acknowledged.' }
+                $workerStage = 'deadline'
+                $workerDeadline = New-UsageWorkerDeadline
+                $workerStage = 'resolve'
+                $dataDirectory = Resolve-CodexDataDirectory $workerDataDirectory $null $null
+                if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
+                $workerStage = 'snapshot'
+                $snapshot = Get-CodexUsageSnapshot -DataDirectory $dataDirectory -ReadOnly
+                $workerStage = 'write'
+                if (-not (Write-UsageScanResult -Snapshot $snapshot -Generation $workerGeneration -Path $expectedOutput)) {
+                    throw 'Scan result could not be saved.'
+                }
+            }
+            finally { if ($null -ne $workerDeadline) { $workerDeadline.Dispose() } }
+        }
+    }
+    catch {
+        $workerDetail = if ($workerStage -ceq 'deadline') {
+            ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Substring(0, [math]::Min(300, ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Length))
+        }
+        else { '' }
+        [Console]::Error.WriteLine(('scan-worker:{0}:{1}:{2}' -f $workerStage, $_.Exception.GetType().Name, $workerDetail))
+        return 2
+    }
+}
+
+function Get-UsageWorkerScriptText {
+    if ($null -ne $script:UsageWorkerScriptText) { return $script:UsageWorkerScriptText }
+    $functionNames = @(
+        'Get-TokenNumber', 'Get-TokenPercent', 'ConvertTo-LimitWindow', 'ConvertTo-UsageState',
+        'Get-EventTokenDetails', 'ConvertTo-ObservedAt', 'Get-EventRateLimits', 'Read-TaskNameIndex',
+        'Get-ActiveTaskCandidates', 'Read-SessionEvents', 'Get-NewestUsageState',
+        'ConvertTo-CodexDataDirectoryPath', 'Resolve-CodexDataDirectory', 'Get-BoundedSessionFiles',
+        'Get-CodexUsageState', 'Get-CodexUsageDiagnostic', 'Get-CodexUsageSnapshot',
+        'Test-UsageScanSnapshot', 'Get-UsageJsonWorstCaseByteCount', 'Save-TextAtomically',
+        'Write-UsageScanResult', 'New-UsageWorkerDeadline', 'Invoke-UsageScanWorker'
+    )
+    $builder = [Text.StringBuilder]::new("param([switch]`$ScanWorker)`r`n")
+    foreach ($name in $functionNames) {
+        $command = Get-Command $name -CommandType Function -ErrorAction Stop
+        [void]$builder.Append("function $name {`r`n").Append($command.Definition).Append("`r`n}`r`n")
+    }
+    [void]$builder.Append("if (-not `$ScanWorker) { exit 2 }`r`nexit (Invoke-UsageScanWorker)`r`n")
+    $text = $builder.ToString()
+    if ([Text.UTF8Encoding]::new($false, $true).GetByteCount($text) -gt 262144) { throw 'Usage worker script is too large.' }
+    $script:UsageWorkerScriptText = $text
+    return $script:UsageWorkerScriptText
+}
+
+function Add-UsageWorkerProcessToJob {
+    param(
+        [Parameter(Mandatory)][IntPtr]$Handle,
+        [Parameter(Mandatory)][Diagnostics.Process]$Process
+    )
+
+    if ($Handle -eq [IntPtr]::Zero -or $Process.HasExited) { throw 'Invalid worker job assignment.' }
+    [CodexUsageWorkerJobNative]::Assign($Handle, $Process.Handle)
+}
+
+function Close-UsageWorkerJob {
+    param([Parameter(Mandatory)][IntPtr]$Handle)
+
+    if ($Handle -ne [IntPtr]::Zero) { [CodexUsageWorkerJobNative]::Close($Handle) }
+}
+
+function Stop-UsageWorkerProcess {
+    param([Parameter(Mandatory)][Diagnostics.Process]$Process)
+
+    $exited = $false
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill()
+            [void]$Process.WaitForExit(2000)
+        }
+        $exited = $Process.HasExited
+    }
+    catch { }
+    try { $Process.Dispose() } catch { }
+    return $exited
+}
+
+function Start-UsageScanProcess {
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$DataDirectory,
+        [Parameter(Mandatory)][string]$Generation,
+        [IntPtr]$WorkerJobHandle = [IntPtr]::Zero
+    )
+
+    if ($Generation -cnotmatch '^[0-9a-f]{32}$' -or $ScriptPath.IndexOf('"') -ge 0 -or
+        $DataDirectory.IndexOf('"') -ge 0) { throw 'Invalid scan launch arguments.' }
+    $scriptFile = [IO.FileInfo]::new([IO.Path]::GetFullPath($ScriptPath))
+    $dataPath = ConvertTo-CodexDataDirectoryPath $DataDirectory
+    if (-not $scriptFile.Exists -or ($scriptFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $null -eq $dataPath) { throw 'Invalid scan launch path.' }
+    $workerRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'worker'))
+    [void][IO.Directory]::CreateDirectory($workerRoot)
+    $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
+    if (($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Invalid scan output directory.' }
+    $channelPath = Join-Path $workerRoot ('CodexUsageWidget-scan-' + $Generation)
+    if ([IO.Directory]::Exists($channelPath) -or [IO.File]::Exists($channelPath)) { throw 'Scan output already exists.' }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.Name,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow)
+    [void]$security.AddAccessRule($rule)
+    [void][IO.Directory]::CreateDirectory($channelPath, $security)
+    $outputPath = Join-Path $channelPath 'result.json'
+    $workerScriptPath = Join-Path $workerRoot 'scan-worker.ps1'
+    if ([IO.File]::Exists($workerScriptPath) -and
+        (([IO.FileInfo]$workerScriptPath).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+        throw 'Invalid usage worker script path.'
+    }
+    $workerScriptText = Get-UsageWorkerScriptText
+    $workerScriptCurrent = $false
+    try {
+        $workerScriptCurrent = [IO.File]::Exists($workerScriptPath) -and
+            [IO.File]::ReadAllText($workerScriptPath, [Text.UTF8Encoding]::new($false, $true)) -ceq $workerScriptText
+    }
+    catch { }
+    if (-not $workerScriptCurrent -and -not (Save-TextAtomically -Path $workerScriptPath -Text $workerScriptText)) {
+        try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+        throw 'Usage worker script could not be created.'
+    }
+
+    # ponytail: refreshes are serialized by the caller, so one host needs no queue or lock.
+    $workerHost = $script:UsageWorkerHost
+    $reuseHost = $false
+    if ($null -ne $workerHost) {
+        try {
+            $reuseHost = -not $workerHost.Process.HasExited -and $workerHost.DataDirectory -ieq $dataPath -and
+                $workerHost.ScriptPath -ieq $scriptFile.FullName -and $workerHost.WorkerJobHandle -eq $WorkerJobHandle
+        }
+        catch { $reuseHost = $false }
+        if (-not $reuseHost) {
+            $script:UsageWorkerHost = $null
+            if ($workerHost.Process -is [Diagnostics.Process]) { [void](Stop-UsageWorkerProcess -Process $workerHost.Process) }
+        }
+    }
+    if (-not $reuseHost) {
+        $compactPowerShell = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not [IO.File]::Exists($compactPowerShell)) { $compactPowerShell = Join-Path $PSHOME 'powershell.exe' }
+        $startInfo = [Diagnostics.ProcessStartInfo]::new($compactPowerShell)
+        $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -Mta -ExecutionPolicy Bypass -File "' + $workerScriptPath + '" -ScanWorker'
+        $startInfo.WorkingDirectory = $scriptFile.DirectoryName
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $previousDataDirectory = [Environment]::GetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', [EnvironmentVariableTarget]::Process)
+        $previousLaunchInputEncoding = [Console]::InputEncoding
+        try {
+            [Environment]::SetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', $dataPath, [EnvironmentVariableTarget]::Process)
+            [Console]::InputEncoding = [Text.Encoding]::ASCII
+            $process = [Diagnostics.Process]::Start($startInfo)
+        }
+        catch {
+            try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+            throw
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', $previousDataDirectory, [EnvironmentVariableTarget]::Process)
+            [Console]::InputEncoding = $previousLaunchInputEncoding
+        }
+        if ($null -eq $process) {
+            try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+            throw 'Scan worker did not start.'
+        }
+        if ($WorkerJobHandle -ne [IntPtr]::Zero) {
+            try { Add-UsageWorkerProcessToJob -Handle $WorkerJobHandle -Process $process }
+            catch {
+                [void](Stop-UsageWorkerProcess -Process $process)
+                try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+                throw
+            }
+        }
+        $script:UsageWorkerHost = [pscustomobject]@{
+            Process = $process
+            DataDirectory = $dataPath
+            ScriptPath = $scriptFile.FullName
+            WorkerJobHandle = $WorkerJobHandle
+        }
+    }
+    else { $process = $workerHost.Process }
+    $requestedAt = [datetime]::UtcNow
+    $previousInputEncoding = [Console]::InputEncoding
+    try {
+        if ($process.HasExited) { throw 'Scan worker exited before receiving a request.' }
+        [Console]::InputEncoding = [Text.Encoding]::ASCII
+        $process.StandardInput.WriteLine($Generation)
+        $process.StandardInput.Flush()
+    }
+    catch {
+        if ($null -ne $script:UsageWorkerHost -and [object]::ReferenceEquals($script:UsageWorkerHost.Process, $process)) {
+            $script:UsageWorkerHost = $null
+        }
+        [void](Stop-UsageWorkerProcess -Process $process)
+        try { [IO.Directory]::Delete($channelPath, $true) } catch { }
+        throw
+    }
+    finally { [Console]::InputEncoding = $previousInputEncoding }
+    return [pscustomobject]@{
+        Process = $process
+        Generation = $Generation
+        OutputPath = $outputPath
+        ChannelDirectory = $channelPath
+        ReadyPath = (Join-Path $channelPath 'ready')
+        RequestedAtUtc = $requestedAt
+        StartedAtUtc = $null
+    }
+}
+
+function Receive-UsageScanProcess {
+    param(
+        [Parameter(Mandatory)]$Job,
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    )
+
+    $process = $Job.PSObject.Properties['Process'].Value
+    $generation = $Job.PSObject.Properties['Generation'].Value
+    $outputPath = $Job.PSObject.Properties['OutputPath'].Value
+    $channelPath = $Job.PSObject.Properties['ChannelDirectory'].Value
+    $startedAtProperty = $Job.PSObject.Properties['StartedAtUtc']
+    $startedAt = if ($null -ne $startedAtProperty) { $startedAtProperty.Value } else { $null }
+    $readyProperty = $Job.PSObject.Properties['ReadyPath']
+    $requestedProperty = $Job.PSObject.Properties['RequestedAtUtc']
+    if ($process -isnot [Diagnostics.Process] -or $generation -isnot [string] -or
+        $outputPath -isnot [string] -or $channelPath -isnot [string] -or $null -eq $startedAtProperty -or
+        $null -eq $readyProperty -or $readyProperty.Value -isnot [string] -or
+        $null -eq $requestedProperty -or $requestedProperty.Value -isnot [datetime] -or
+        ($null -ne $startedAt -and $startedAt -isnot [datetime])) {
+        return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false }
+    }
+    $readyPath = $readyProperty.Value
+    try {
+        $expectedReadyPath = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'ready'))
+        if (-not $expectedReadyPath.Equals([IO.Path]::GetFullPath($readyPath), [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false }
+        }
+    }
+    catch { return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false } }
+    try {
+        $hasExited = $process.HasExited
+        $hasResult = [IO.File]::Exists($outputPath)
+    }
+    catch { return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false } }
+    if ($null -eq $startedAt -and [IO.File]::Exists($readyPath)) {
+        $startedAt = [datetime]::UtcNow
+        $startedAtProperty.Value = $startedAt
+    }
+    # ponytail: cold PowerShell startup gets one fixed budget; per-scan limits remain ten and twelve seconds.
+    $startupTimedOut = $null -eq $startedAt -and -not $hasExited -and
+        ([datetime]::UtcNow - $requestedProperty.Value.ToUniversalTime()).TotalSeconds -ge 30
+    if ($null -eq $startedAt -and -not $hasExited -and -not $startupTimedOut) {
+        return [pscustomobject]@{ Status = 'pending'; Snapshot = $null; ProcessExited = $false }
+    }
+    if (-not $hasResult -and -not $hasExited -and
+        -not $startupTimedOut -and ([datetime]::UtcNow - $startedAt.ToUniversalTime()).TotalSeconds -lt $TimeoutSeconds) {
+        return [pscustomobject]@{ Status = 'pending'; Snapshot = $null; ProcessExited = $false }
+    }
+
+    $timedOut = $startupTimedOut -or (-not $hasResult -and -not $hasExited)
+    $snapshot = $null
+    if (-not $timedOut -and $hasResult -and -not $hasExited) {
+        $snapshot = Read-UsageScanResult -Path $outputPath -ExpectedGeneration $generation
+    }
+    $stopProcess = $timedOut -or $hasExited -or $null -eq $snapshot
+    if ($stopProcess) {
+        if ($null -ne $script:UsageWorkerHost -and [object]::ReferenceEquals($script:UsageWorkerHost.Process, $process)) {
+            $script:UsageWorkerHost = $null
+        }
+        $hasExited = Stop-UsageWorkerProcess -Process $process
+    }
+    try { if ($null -ne $readyPath -and [IO.File]::Exists($readyPath)) { [IO.File]::Delete($readyPath) } } catch { }
+    try { if ([IO.File]::Exists($outputPath)) { [IO.File]::Delete($outputPath) } } catch { }
+    try { if ([IO.Directory]::Exists($channelPath)) { [IO.Directory]::Delete($channelPath, $false) } } catch { }
+    $status = if ($timedOut) { 'timeout' } elseif ($null -ne $snapshot) { 'completed' } else { 'failed' }
+    return [pscustomobject]@{ Status = $status; Snapshot = $snapshot; ProcessExited = $hasExited }
 }
 
 function Save-TextAtomically {
@@ -659,10 +1610,10 @@ function Save-TextAtomically {
         [void][System.IO.Directory]::CreateDirectory($directory)
         $fileId = [guid]::NewGuid().ToString('N')
         $fileName = [System.IO.Path]::GetFileName($Path)
-        $temporaryPath = Join-Path $directory ($fileName + '.' + $fileId + '.tmp')
+        $temporaryPath = [IO.Path]::Combine($directory, $fileName + '.' + $fileId + '.tmp')
         [System.IO.File]::WriteAllText($temporaryPath, $Text, [System.Text.UTF8Encoding]::new($false))
         if ([System.IO.File]::Exists($Path)) {
-            $backupPath = Join-Path $directory ($fileName + '.' + $fileId + '.bak')
+            $backupPath = [IO.Path]::Combine($directory, $fileName + '.' + $fileId + '.bak')
             [System.IO.File]::Replace($temporaryPath, $Path, $backupPath)
             $temporaryPath = $null
             $saved = $true
@@ -703,7 +1654,9 @@ function Get-WidgetLanguageCodes { @('zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR'
 function Get-WidgetRequiredLanguageKeys {
     @(
         'app.title', 'app.alreadyRunning',
-        'menu.showWidget', 'menu.showDetails', 'menu.hideDetails', 'menu.language', 'menu.exit',
+        'menu.showWidget', 'menu.hideWidget', 'menu.showDetails', 'menu.hideDetails', 'menu.language', 'menu.theme',
+        'menu.chooseDirectory', 'menu.resetState', 'menu.enableReminders', 'menu.remindersDenied',
+        'menu.exit', 'action.cancel', 'action.reset',
         'language.zh-CN', 'language.zh-TW', 'language.en-US', 'language.ja-JP', 'language.ko-KR',
         'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura', 'theme.aurora', 'theme.mica', 'theme.sunset', 'theme.lime',
         'detail.title', 'detail.remaining', 'detail.observed', 'detail.status',
@@ -711,8 +1664,10 @@ function Get-WidgetRequiredLanguageKeys {
         'task.noTokenData', 'task.activePrefix',
         'token.total', 'token.context', 'token.contextUsage', 'token.composition', 'token.input', 'token.output', 'token.reasoningShare',
         'cache.hit', 'cache.miss', 'cache.taskHit', 'cache.taskMiss', 'cache.localHit', 'cache.localMiss',
-        'status.waitingObservation', 'status.observationNormal', 'status.sufficient', 'status.attention', 'status.critical', 'status.waiting', 'status.unavailable', 'status.noData',
-        'diagnostic.missingDirectory', 'diagnostic.emptyDirectory', 'diagnostic.readFailed', 'diagnostic.noValidEvent', 'diagnostic.unavailable',
+        'status.waitingObservation', 'status.observationNormal', 'status.sufficient', 'status.attention', 'status.critical', 'status.waiting',
+        'status.unavailable', 'status.noData', 'status.partial', 'status.stale', 'status.unsupported', 'status.error',
+        'observed.recent', 'observed.older', 'demo.badge', 'reset.title', 'reset.body',
+        'diagnostic.missingDirectory', 'diagnostic.emptyDirectory', 'diagnostic.readFailed', 'diagnostic.persistenceFailed', 'diagnostic.noValidEvent', 'diagnostic.unavailable',
         'limit.unknown', 'limit.days', 'limit.hours', 'limit.minutes',
         'countdown.daysHours', 'countdown.hoursMinutes', 'countdown.minutes', 'countdown.waiting',
         'number.tenThousand', 'number.hundredMillion', 'number.thousand', 'number.million', 'number.billion',
@@ -851,49 +1806,59 @@ function Get-WidgetText {
 }
 
 function Update-CumulativeCacheTokens {
-    param([object[]]$Sessions)
+    param([object[]]$Sessions, [ref]$Persisted)
+
+    if ($null -ne $Persisted) { $Persisted.Value = $false }
 
     $toCounter = {
         param([AllowNull()]$Value)
-        if ($null -eq $Value -or $Value -is [bool] -or $Value -isnot [System.ValueType]) { return $null }
-        try { $number = [double]$Value } catch { return $null }
-        if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt 0 -or
-            $number -ne [math]::Truncate($number) -or $number -gt [long]::MaxValue) { return $null }
-        return [long]$number
+        return Get-TokenNumber ([pscustomobject]@{ Value = $Value }) 'Value'
     }
 
     if ($null -eq $script:CacheTokenLedger) {
         $knownSessions = @{}
+        $storeStatus = 'missing'
         try {
             $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
             if ([System.IO.File]::Exists($path)) {
                 $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+                if ($stored -isnot [pscustomobject]) { throw 'Cache ledger root must be an object.' }
                 $storedSessions = $stored.PSObject.Properties['Sessions']
                 if ($null -eq $storedSessions) { throw 'Missing sessions.' }
                 $loaded = 0
                 foreach ($item in @($storedSessions.Value)) {
-                    if ($loaded++ -ge 10000) { break }
+                    if ($loaded++ -ge 10000) { throw 'Too many stored sessions.' }
                     $idProperty = $item.PSObject.Properties['Id']
                     $hitProperty = $item.PSObject.Properties['CacheHitTokens']
                     $missProperty = $item.PSObject.Properties['CacheMissTokens']
                     if ($null -eq $idProperty -or $idProperty.Value -isnot [string] -or
                         $idProperty.Value -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
-                        $null -eq $hitProperty -or $null -eq $missProperty) { continue }
+                        $null -eq $hitProperty -or $null -eq $missProperty) { throw 'Invalid stored session.' }
                     $hit = & $toCounter $hitProperty.Value
                     $miss = & $toCounter $missProperty.Value
-                    if ($null -eq $hit -or $null -eq $miss) { continue }
+                    if ($null -eq $hit -or $null -eq $miss) { throw 'Invalid stored counters.' }
                     $knownSessions[$idProperty.Value] = [pscustomobject]@{
                         CacheHitTokens  = $hit
                         CacheMissTokens = $miss
                     }
                 }
+                $storeStatus = 'valid'
             }
         }
-        catch { $knownSessions = @{} }
-        # ponytail: the single persistent refresh worker owns this ledger; add locking only if refreshes become concurrent.
-        $script:CacheTokenLedger = [pscustomobject]@{ Sessions = $knownSessions; Dirty = $false }
+        catch { $knownSessions = @{}; $storeStatus = 'invalid' }
+        # ponytail: the UI process is the only persistent-state writer; add locking only if that ownership changes.
+        $script:CacheTokenLedger = [pscustomobject]@{ Sessions = $knownSessions; Dirty = $false; StoreStatus = $storeStatus }
     }
 
+    $candidateSessions = @{}
+    foreach ($id in $script:CacheTokenLedger.Sessions.Keys) {
+        $tokens = $script:CacheTokenLedger.Sessions[$id]
+        $candidateSessions[$id] = [pscustomobject]@{
+            CacheHitTokens = [long]$tokens.CacheHitTokens
+            CacheMissTokens = [long]$tokens.CacheMissTokens
+        }
+    }
+    $dirty = $false
     foreach ($session in @($Sessions)) {
         if ($null -eq $session) { continue }
         $idProperty = $session.PSObject.Properties['Id']
@@ -906,23 +1871,24 @@ function Update-CumulativeCacheTokens {
         $miss = & $toCounter $missProperty.Value
         if ($null -eq $hit -or $null -eq $miss) { continue }
 
-        $previous = $script:CacheTokenLedger.Sessions[$idProperty.Value]
+        $previous = $candidateSessions[$idProperty.Value]
         $nextHit = if ($null -eq $previous -or $hit -gt $previous.CacheHitTokens) { $hit } else { [long]$previous.CacheHitTokens }
         $nextMiss = if ($null -eq $previous -or $miss -gt $previous.CacheMissTokens) { $miss } else { [long]$previous.CacheMissTokens }
         if ($null -eq $previous -or $nextHit -ne $previous.CacheHitTokens -or $nextMiss -ne $previous.CacheMissTokens) {
-            $script:CacheTokenLedger.Sessions[$idProperty.Value] = [pscustomobject]@{
+            $candidateSessions[$idProperty.Value] = [pscustomobject]@{
                 CacheHitTokens  = $nextHit
                 CacheMissTokens = $nextMiss
             }
-            $script:CacheTokenLedger.Dirty = $true
+            $dirty = $true
         }
     }
 
-    if ($script:CacheTokenLedger.Dirty) {
+    if ($dirty) {
+        if ($script:CacheTokenLedger.StoreStatus -ceq 'invalid') { return $null }
         try {
             $storedSessions = @(
-                foreach ($id in @($script:CacheTokenLedger.Sessions.Keys | Sort-Object)) {
-                    $tokens = $script:CacheTokenLedger.Sessions[$id]
+                foreach ($id in @($candidateSessions.Keys | Sort-Object)) {
+                    $tokens = $candidateSessions[$id]
                     [pscustomobject]@{
                         Id              = $id
                         CacheHitTokens  = [long]$tokens.CacheHitTokens
@@ -932,18 +1898,25 @@ function Update-CumulativeCacheTokens {
             )
             $json = [pscustomobject]@{ Sessions = $storedSessions } | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop
             $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
-            if (Save-TextAtomically -Path $path -Text $json) { $script:CacheTokenLedger.Dirty = $false }
+            if (-not (Save-TextAtomically -Path $path -Text $json)) { return $null }
         }
-        catch { }
+        catch { return $null }
+        $script:CacheTokenLedger.Sessions = $candidateSessions
+        $script:CacheTokenLedger.Dirty = $false
+        $script:CacheTokenLedger.StoreStatus = 'valid'
     }
+    if ($null -ne $Persisted) { $Persisted.Value = $true }
 
     if ($script:CacheTokenLedger.Sessions.Count -eq 0) { return $null }
-    $cacheHitTokens = 0.0
-    $cacheMissTokens = 0.0
+    $cacheHitTokens = [decimal]0
+    $cacheMissTokens = [decimal]0
     foreach ($tokens in $script:CacheTokenLedger.Sessions.Values) {
-        $cacheHitTokens += [double]$tokens.CacheHitTokens
-        $cacheMissTokens += [double]$tokens.CacheMissTokens
+        $cacheHitTokens += [decimal]$tokens.CacheHitTokens
+        $cacheMissTokens += [decimal]$tokens.CacheMissTokens
     }
+    if ($cacheHitTokens -gt [long]::MaxValue -or $cacheMissTokens -gt [long]::MaxValue) { return $null }
+    $cacheHitTokens = [long]$cacheHitTokens
+    $cacheMissTokens = [long]$cacheMissTokens
     $cacheHitPercent = Get-TokenPercent $cacheHitTokens ($cacheHitTokens + $cacheMissTokens)
     return [pscustomobject]@{
         CacheHitTokens  = $cacheHitTokens
@@ -960,11 +1933,14 @@ function Get-ReminderGateState {
 
     # ponytail: Prune expired keys on startup load; prune every write only if measured month-long residency grows the file.
     $sentKeys = @()
+    $storeStatus = 'missing'
     try {
         $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'reminders.json'
         if ([System.IO.File]::Exists($path)) {
             $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+            if ($stored -isnot [pscustomobject]) { throw 'Reminder root must be an object.' }
             $sentKeysProperty = $stored.PSObject.Properties['SentKeys']
+            if ($null -eq $sentKeysProperty) { throw 'Missing reminder keys.' }
             if ($null -ne $sentKeysProperty) {
                 $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                 foreach ($value in @($sentKeysProperty.Value)) {
@@ -976,20 +1952,24 @@ function Get-ReminderGateState {
                     if ($sentKeys -notcontains $key) { $sentKeys += $key }
                 }
             }
+            $storeStatus = 'valid'
         }
     }
-    catch { $sentKeys = @() }
+    catch { $sentKeys = @(); $storeStatus = 'invalid' }
 
-    $script:ReminderGateCache = [pscustomobject]@{ SentKeys = $sentKeys }
+    $script:ReminderGateCache = [pscustomobject]@{ SentKeys = $sentKeys; StoreStatus = $storeStatus }
     return $script:ReminderGateCache
 }
 
 function Save-ReminderGateState {
     param([Parameter(Mandatory)]$State)
 
+    if ($State.PSObject.Properties['StoreStatus'].Value -ceq 'invalid') { return $false }
     $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'reminders.json'
     $json = [pscustomobject]@{ SentKeys = @($State.SentKeys) } | ConvertTo-Json -Compress
-    return Save-TextAtomically -Path $path -Text $json
+    $saved = Save-TextAtomically -Path $path -Text $json
+    if ($saved) { $State.StoreStatus = 'valid' }
+    return $saved
 }
 
 function Register-UsageReminderThreshold {
@@ -1020,8 +2000,10 @@ function Register-UsageReminderThreshold {
     $key = '{0}|{1}|{2}' -f $name, $resetSeconds, $Threshold
     $gate = Get-ReminderGateState
     if ($remainingPercent -gt $Threshold -or $gate.SentKeys -contains $key) { return $false }
-    $gate.SentKeys = @($gate.SentKeys) + $key
-    [void](Save-ReminderGateState $gate)
+    $candidate = [pscustomobject]@{ SentKeys = @($gate.SentKeys) + $key; StoreStatus = $gate.StoreStatus }
+    if (-not (Save-ReminderGateState $candidate)) { return $false }
+    $gate.SentKeys = @($candidate.SentKeys)
+    $gate.StoreStatus = $candidate.StoreStatus
     return $true
 }
 
@@ -1039,39 +2021,56 @@ function Get-WidgetThemes {
 }
 
 function Get-WidgetPreferences {
-    $preferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 0; CodexDataDirectory = $null; Language = $null }
+    $preferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 0; CodexDataDirectory = $null; Language = $null; StoreStatus = 'missing' }
+    $script:PreferenceStoreStatus = 'missing'
     try {
         $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'preferences.json'
         if (-not [System.IO.File]::Exists($path)) { return $preferences }
         $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+        if ($stored -isnot [pscustomobject]) { throw 'Preference root must be an object.' }
+        $status = 'valid'
         foreach ($name in 'Left', 'Top') {
             $property = $stored.PSObject.Properties[$name]
-            if ($null -eq $property -or $property.Value -is [bool] -or $property.Value -isnot [System.ValueType]) { continue }
-            try { $value = [double]$property.Value } catch { continue }
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            if ($property.Value -is [bool] -or $property.Value -isnot [System.ValueType]) { $status = 'invalid'; continue }
+            try { $value = [double]$property.Value } catch { $status = 'invalid'; continue }
             if (-not [double]::IsNaN($value) -and -not [double]::IsInfinity($value)) { $preferences.$name = $value }
+            else { $status = 'invalid' }
         }
         $monitor = $stored.PSObject.Properties['Monitor']
-        if ($null -ne $monitor -and $monitor.Value -is [string] -and $monitor.Value.Length -le 256 -and -not [string]::IsNullOrWhiteSpace($monitor.Value)) {
-            $preferences.Monitor = $monitor.Value
+        if ($null -ne $monitor -and $null -ne $monitor.Value) {
+            if ($monitor.Value -is [string] -and $monitor.Value.Length -le 256 -and -not [string]::IsNullOrWhiteSpace($monitor.Value)) {
+                $preferences.Monitor = $monitor.Value
+            }
+            else { $status = 'invalid' }
         }
         $codexDataDirectory = $stored.PSObject.Properties['CodexDataDirectory']
-        if ($null -ne $codexDataDirectory) {
+        if ($null -ne $codexDataDirectory -and $null -ne $codexDataDirectory.Value) {
             $preferences.CodexDataDirectory = ConvertTo-CodexDataDirectoryPath $codexDataDirectory.Value
+            if ($null -eq $preferences.CodexDataDirectory) { $status = 'invalid' }
         }
         $language = $stored.PSObject.Properties['Language']
-        if ($null -ne $language -and $language.Value -is [string] -and @(Get-WidgetLanguageCodes) -ccontains $language.Value) {
-            $preferences.Language = $language.Value
+        if ($null -ne $language -and $null -ne $language.Value) {
+            if ($language.Value -is [string] -and @(Get-WidgetLanguageCodes) -ccontains $language.Value) { $preferences.Language = $language.Value }
+            else { $status = 'invalid' }
         }
         $themeCount = @(Get-WidgetThemes).Count
         $theme = $stored.PSObject.Properties['Theme']
-        if ($null -ne $theme -and $theme.Value -isnot [bool] -and $theme.Value -is [System.ValueType]) {
+        if ($null -ne $theme -and $null -ne $theme.Value -and $theme.Value -isnot [bool] -and $theme.Value -is [System.ValueType]) {
             try { $themeValue = [double]$theme.Value } catch { $themeValue = -1 }
             if (-not [double]::IsNaN($themeValue) -and -not [double]::IsInfinity($themeValue) -and $themeValue -eq [Math]::Floor($themeValue) -and $themeValue -ge 0 -and $themeValue -lt $themeCount) {
                 $preferences.Theme = [int]$themeValue
             }
+            else { $status = 'invalid' }
         }
+        elseif ($null -ne $theme -and $null -ne $theme.Value) { $status = 'invalid' }
+        $preferences.StoreStatus = $status
+        $script:PreferenceStoreStatus = $status
     }
-    catch { }
+    catch {
+        $preferences.StoreStatus = 'invalid'
+        $script:PreferenceStoreStatus = 'invalid'
+    }
     return $preferences
 }
 
@@ -1085,6 +2084,8 @@ function Save-WidgetPreferences {
         [AllowNull()][string]$Language = $null
     )
 
+    if ($script:IsDemoMode) { return $true }
+    if ($script:PreferenceStoreStatus -ceq 'invalid') { return $false }
     if ($Left -is [bool] -or $Left -isnot [System.ValueType] -or
         $Top -is [bool] -or $Top -isnot [System.ValueType] -or
         $Theme -is [bool] -or $Theme -isnot [System.ValueType] -or
@@ -1109,7 +2110,47 @@ function Save-WidgetPreferences {
         CodexDataDirectory = $codexDataDirectoryPath
         Language = $Language
     } | ConvertTo-Json -Compress
-    return Save-TextAtomically -Path $path -Text $json
+    $saved = Save-TextAtomically -Path $path -Text $json
+    if ($saved) { $script:PreferenceStoreStatus = 'valid' }
+    return $saved
+}
+
+function Reset-WidgetLocalState {
+    param([Parameter(Mandatory)][string]$Language)
+
+    if (@(Get-WidgetLanguageCodes) -cnotcontains $Language) { return $false }
+    $root = Join-Path $env:LOCALAPPDATA 'CodexUsageWidget'
+    $defaults = @(
+        @('preferences.json', ([pscustomobject]@{
+            Left = $null; Top = $null; Monitor = $null; Theme = 7
+            CodexDataDirectory = $null; Language = $Language
+        } | ConvertTo-Json -Compress)),
+        @('cache-token-ledger.json', '{"Sessions":[]}'),
+        @('reminders.json', '{"SentKeys":[]}')
+    )
+    foreach ($item in $defaults) {
+        if (-not (Save-TextAtomically -Path (Join-Path $root $item[0]) -Text $item[1])) { return $false }
+    }
+    $script:PreferenceStoreStatus = 'valid'
+    $script:CacheTokenLedger = [pscustomobject]@{ Sessions = @{}; Dirty = $false; StoreStatus = 'valid' }
+    $script:ReminderGateCache = [pscustomobject]@{ SentKeys = @(); StoreStatus = 'valid' }
+    return $true
+}
+
+function Test-WidgetDragThreshold {
+    param([double]$StartX, [double]$StartY, [double]$CurrentX, [double]$CurrentY)
+    return [math]::Max([math]::Abs($CurrentX - $StartX), [math]::Abs($CurrentY - $StartY)) -ge 4
+}
+
+function Toggle-DetailPopup {
+    param([switch]$HideIfOpen)
+
+    if ($script:DetailPopup.IsOpen) {
+        if (-not $HideIfOpen -and -not $script:DetailPinned) { $script:DetailPinned = $true; return }
+        $script:DetailPinned = $false
+        Hide-DetailPopup -Immediate
+    }
+    else { Show-DetailPopup }
 }
 
 function Get-SnappedWidgetPosition {
@@ -1420,7 +2461,7 @@ function Format-ResetCountdown {
     if ($null -eq $State) { return '—' }
     $current = Get-CurrentLimitState -State $State -Now $Now
     if ($null -eq $current) { return Get-WidgetText 'countdown.waiting' }
-    $remaining = ([datetime]$current.ResetAt) - $Now
+    $remaining = ([datetime]$current.ResetAt).ToUniversalTime() - $Now.ToUniversalTime()
     if ($remaining.TotalDays -ge 1) {
         return Get-WidgetText 'countdown.daysHours' @([math]::Floor($remaining.TotalDays), $remaining.Hours)
     }
@@ -1437,6 +2478,7 @@ function Format-UsageDiagnostic {
         'missing_directory' { return Get-WidgetText 'diagnostic.missingDirectory' }
         'empty_directory'   { return Get-WidgetText 'diagnostic.emptyDirectory' }
         'read_failed'       { return Get-WidgetText 'diagnostic.readFailed' }
+        'persistence_failed' { return Get-WidgetText 'diagnostic.persistenceFailed' }
         'no_valid_event'    { return Get-WidgetText 'diagnostic.noValidEvent' }
         default             { return Get-WidgetText 'diagnostic.unavailable' }
     }
@@ -1448,7 +2490,7 @@ function Get-WidgetVisibleStrings {
 
 function Apply-WidgetLanguage {
     foreach ($binding in @(
-        @('DetailTitleText', 'detail.title'), @('RemainingLabelText', 'detail.remaining'),
+        @('DetailTitleText', 'detail.title'), @('DemoBadgeText', 'demo.badge'), @('RemainingLabelText', 'detail.remaining'),
         @('ObservedLabelText', 'detail.observed'), @('StatusLabelText', 'detail.status'),
         @('ActivityTitleText', 'activity.title'), @('ActivityWindowText', 'activity.window30m'),
         @('TaskNoDataText', 'task.noTokenData'), @('CumulativeLabelText', 'token.total'),
@@ -1468,6 +2510,9 @@ function Apply-WidgetLanguage {
         [System.Windows.Automation.AutomationProperties]::SetName($script:CircleHost, (Get-WidgetText 'accessibility.ringName'))
         [System.Windows.Automation.AutomationProperties]::SetHelpText($script:CircleHost, (Get-WidgetText 'accessibility.ringHelp'))
     }
+    if ($null -ne $script:DemoBadge) {
+        $script:DemoBadge.Visibility = if ($script:IsDemoMode) { 'Visible' } else { 'Collapsed' }
+    }
     if ($null -ne $script:NotifyIcon) { $script:NotifyIcon.Text = Get-WidgetText 'app.title' }
     if ($null -ne $script:TrayShowItem) { $script:TrayShowItem.Text = Get-WidgetText 'menu.showWidget' }
     if ($null -ne $script:TrayExitItem) { $script:TrayExitItem.Text = Get-WidgetText 'menu.exit' }
@@ -1475,6 +2520,9 @@ function Apply-WidgetLanguage {
         $script:DetailMenuItem.Header = Get-WidgetText $(if ($null -ne $script:DetailPopup -and $script:DetailPopup.IsOpen) { 'menu.hideDetails' } else { 'menu.showDetails' })
     }
     if ($null -ne $script:LanguageMenuItem) { $script:LanguageMenuItem.Header = Get-WidgetText 'menu.language' }
+    if ($null -ne $script:ChooseDataDirectoryMenuItem) { $script:ChooseDataDirectoryMenuItem.Header = Get-WidgetText 'menu.chooseDirectory' }
+    if ($null -ne $script:ReminderMenuItem) { $script:ReminderMenuItem.Header = Get-WidgetText 'menu.enableReminders' }
+    if ($null -ne $script:ResetStateMenuItem) { $script:ResetStateMenuItem.Header = Get-WidgetText 'menu.resetState' }
     if ($null -ne $script:ExitMenuItem) { $script:ExitMenuItem.Header = Get-WidgetText 'menu.exit' }
     $themes = @(Get-WidgetThemes)
     foreach ($item in @($script:ThemeMenuItems)) {
@@ -1665,6 +2713,10 @@ function Set-WidgetAppearance {
     $script:OutputAccentFill.Background = $endBrush
     $script:DetailAccentGlow.Background = $gradientBrush
     $script:DetailStatusText.Foreground = $gradientBrush
+    if ($null -ne $script:DemoBadge) {
+        $script:DemoBadge.Background = $softBrush
+        $script:DemoBadgeText.Foreground = $gradientBrush
+    }
     Set-ActiveTaskRowAppearance -Row $script:ActiveTaskRow -Selected ($null -ne $script:ActiveTaskRow) -HighContrast $HighContrast
 }
 
@@ -1684,7 +2736,7 @@ function Show-ActiveTaskDetails {
     Set-WidgetTokenDetails $Task.TokenDetails
     Set-DetailVisibility $script:TaskNoDataText ($null -eq $Task.TokenDetails)
     Set-DetailVisibility $script:TaskDetailsPanel $true
-    if ($null -ne $script:DetailPopup -and $script:DetailPopup.IsOpen) { Show-DetailPopup }
+    if ($null -ne $script:DetailPopup -and $script:DetailPopup.IsOpen) { Show-DetailPopup -FromHover }
 }
 
 function Hide-ActiveTaskDetails {
@@ -1695,7 +2747,7 @@ function Hide-ActiveTaskDetails {
     Set-WidgetTokenDetails $null
     Set-DetailVisibility $script:TaskNoDataText $false
     Set-DetailVisibility $script:TaskDetailsPanel $false
-    if ($null -ne $script:DetailPopup -and $script:DetailPopup.IsOpen) { Show-DetailPopup }
+    if ($null -ne $script:DetailPopup -and $script:DetailPopup.IsOpen) { Show-DetailPopup -FromHover }
 }
 
 function Set-ActiveTaskList {
@@ -1799,7 +2851,9 @@ function Set-WidgetState {
 
     $observedProperty = if ($null -ne $usageState) { $usageState.PSObject.Properties['ObservedAt'] } else { $null }
     $observedText = if ($null -ne $observedProperty -and $observedProperty.Value -is [datetime]) {
-        ([datetime]$observedProperty.Value).ToString('g', $script:CurrentLanguageCulture)
+        $observedValue = [datetime]$observedProperty.Value
+        if ($observedValue.Kind -eq [DateTimeKind]::Utc) { $observedValue = $observedValue.ToLocalTime() }
+        $observedValue.ToString('g', $script:CurrentLanguageCulture)
     } else { $null }
     $diagnosticText = $null
     if ($null -ne $script:LastUsageDiagnostic) {
@@ -1866,10 +2920,21 @@ function Set-WidgetState {
             $script:LastShimmerObservationKey = $observationKey
             Start-ShimmerAnimation
         }
-        $triggered20 = Register-UsageReminderThreshold -State $currentLimit -Threshold 20
-        if ($triggered20) { Show-UsageReminder -State $currentLimit }
-        $triggered10 = Register-UsageReminderThreshold -State $currentLimit -Threshold 10
-        if ($triggered10) { Show-UsageReminder -State $currentLimit }
+        $reminderObservationIsFresh = $false
+        try {
+            $reminderNow = [DateTimeOffset]::UtcNow
+            $reminderObservedAt = ([DateTimeOffset]$usageState.ObservedAt).ToUniversalTime()
+            $reminderObservationIsFresh = $reminderObservedAt -le $reminderNow -and
+                $reminderObservedAt -ge $reminderNow.AddMinutes(-30)
+        }
+        catch { }
+        if (-not $script:IsDemoMode -and $script:RemindersEnabled -and
+            $script:LastUsageClassification -ceq 'complete' -and $reminderObservationIsFresh) {
+            $triggered20 = Register-UsageReminderThreshold -State $currentLimit -Threshold 20
+            if ($triggered20) { Show-UsageReminder -State $currentLimit }
+            $triggered10 = Register-UsageReminderThreshold -State $currentLimit -Threshold 10
+            if ($triggered10) { Show-UsageReminder -State $currentLimit }
+        }
     }
     [System.Windows.Automation.AutomationProperties]::SetName(
         $script:CircleHost, $automationName)
@@ -2061,6 +3126,20 @@ function Get-WidgetXaml {
                                     Margin="14,0,0,0"
                                     Orientation="Horizontal"
                                     VerticalAlignment="Center">
+                                    <Border
+                                        x:Name="DemoBadge"
+                                        Margin="0,0,8,0"
+                                        Padding="7,3"
+                                        CornerRadius="8"
+                                        Background="#207BFFE0"
+                                        Visibility="Collapsed">
+                                        <TextBlock
+                                            x:Name="DemoBadgeText"
+                                            Text=""
+                                            FontSize="10"
+                                            FontWeight="SemiBold"
+                                            Foreground="#FF7BFFE0"/>
+                                    </Border>
                                     <Ellipse
                                         x:Name="DetailAccentDot"
                                         Width="6"
@@ -2355,8 +3434,25 @@ if ($SelfTest) {
     Assert-Widget ((Resolve-WidgetLanguageCode 'bad-code' ([cultureinfo]'en-US')) -ceq 'en-US') 'an invalid saved language should be ignored.'
     Assert-Widget ((Resolve-WidgetLanguageCode 'JA-jp' ([cultureinfo]'en-US')) -ceq 'en-US') 'saved language codes should be case-sensitive.'
 
+    $demoStarted = Get-Date
+    $demoSnapshot = Get-DemoUsageSnapshot -Root $PSScriptRoot
+    $demoFinished = Get-Date
+    $demoLimit = Get-CurrentLimitState -State $demoSnapshot.State -Now (Get-Date)
+    Assert-Widget ($demoSnapshot.Classification -ceq 'complete' -and $null -eq $demoSnapshot.Diagnostic -and
+        $null -ne $demoLimit -and [double]$demoLimit.RemainingPercent -eq 55) 'demo mode should parse the shared reviewed fixture through the production parser.'
+    Assert-Widget ($demoSnapshot.State.TokenDetails.CacheHitTokens -eq 800 -and
+        $demoSnapshot.State.TokenDetails.CacheMissTokens -eq 200 -and
+        @($demoSnapshot.State.ActiveTasks).Count -eq 0) 'demo mode should expose deterministic anonymous token data without real tasks.'
+    Assert-Widget ([datetime]$demoSnapshot.State.ObservedAt -ge $demoStarted.AddMinutes(-1) -and
+        [datetime]$demoSnapshot.State.ObservedAt -le $demoFinished.AddMinutes(-1) -and
+        [datetime]$demoLimit.ResetAt -ge $demoStarted.AddHours(5).AddMinutes(19) -and
+        [datetime]$demoLimit.ResetAt -le $demoFinished.AddHours(5).AddMinutes(19)) 'demo dates should stay recent and human-scale.'
+    $demoDefinition = (Get-Command Get-DemoUsageSnapshot -CommandType Function -ErrorAction Stop).Definition
+    Assert-Widget (-not $demoDefinition.Contains('CODEX_HOME') -and -not $demoDefinition.Contains('USERPROFILE') -and
+        -not $demoDefinition.Contains('Get-CodexUsageState') -and -not $demoDefinition.Contains('Update-CumulativeCacheTokens')) 'demo mode should not read real Codex data or update the cumulative ledger.'
+
     $requiredLanguageKeys = @(Get-WidgetRequiredLanguageKeys)
-    Assert-Widget ($requiredLanguageKeys.Count -eq 100 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 100) 'the required language-key catalog should contain exactly 100 unique keys.'
+    Assert-Widget ($requiredLanguageKeys.Count -eq 118 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 118) 'the required language-key catalog should contain exactly 118 unique keys.'
     $temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     $temporaryLocaleRoot = Join-Path $temporaryParent ('CodexUsageWidget-Locale-' + [guid]::NewGuid().ToString('N'))
     $temporaryLocales = Join-Path $temporaryLocaleRoot 'locales'
@@ -2444,11 +3540,11 @@ if ($SelfTest) {
     Assert-Widget ((Get-WidgetText 'countdown.daysHours' @(2, 3)) -ceq '2 天 3 小时后重置') 'localized placeholders should format with the active culture.'
     $englishStrings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\en-US.json')) | ConvertFrom-Json -ErrorAction Stop).strings
     $englishKeys = @($englishStrings.PSObject.Properties.Name | Sort-Object)
-    Assert-Widget ($englishKeys.Count -eq 100 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 100 keys.'
+    Assert-Widget ($englishKeys.Count -eq 118 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 118 keys.'
     foreach ($code in $languageCodes) {
         $strings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot ('locales\' + $code + '.json'))) | ConvertFrom-Json -ErrorAction Stop).strings
         $keys = @($strings.PSObject.Properties.Name | Sort-Object)
-        Assert-Widget ($keys.Count -eq 100 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 100 keys as English.')
+        Assert-Widget ($keys.Count -eq 118 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 118 keys as English.')
         foreach ($key in $requiredLanguageKeys) {
             Assert-Widget (-not [string]::IsNullOrWhiteSpace([string]$strings.$key)) ($code + ' raw JSON should contain nonblank text for ' + $key + '.')
             $englishPlaceholders = @([regex]::Matches($englishStrings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
@@ -2464,6 +3560,8 @@ if ($SelfTest) {
         $widgetXaml -match 'AutomationProperties.HelpText=""' -and $widgetXaml -notmatch '[\p{IsCJKUnifiedIdeographs}]') 'XAML should keep the exact multilingual font fallback and contain no localized text.'
     Assert-Widget ($widgetXaml -match 'x:Name="CircleHost"\s+Width="82"\s+Height="82"') 'the circle host should be 82 by 82.'
     Assert-Widget ($widgetXaml -match 'x:Name="DetailPopup"') 'the detail popup should exist.'
+    Assert-Widget ($widgetXaml -match 'x:Name="DemoBadge"(?s:.*?)Visibility="Collapsed"' -and
+        $widgetXaml -match 'x:Name="DemoBadgeText"') 'the localized demo badge should exist and remain hidden during normal use.'
     Assert-Widget ($widgetXaml -match 'x:Name="TokenDetailsPanel"') 'the token section should have one collapsible container.'
     Assert-Widget ($widgetXaml -match 'x:Name="ActiveTaskList"' -and
         $widgetXaml -match 'x:Name="TaskDetailsPanel"' -and
@@ -2496,7 +3594,7 @@ if ($SelfTest) {
     Assert-Widget ($activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bx:Name="ActivityTitleText")(?=[^>]*\bFontSize="15")[^>]*>' -and
         $activityHeadingGrid -match '(?s)<TextBlock\b(?=[^>]*\bx:Name="ActivityWindowText")(?=[^>]*\bGrid.Column="1")(?=[^>]*\bFontSize="11")(?=[^>]*\bHorizontalAlignment="Right")[^>]*>') 'the ordinary activity title line should retain its right-aligned 11-pixel time range.'
     $staticFontContracts = @(
-        @('ActivityTitleText', 15), @('ActivityWindowText', 11), @('RemainingLabelText', 12),
+        @('ActivityTitleText', 15), @('ActivityWindowText', 11), @('DemoBadgeText', 10), @('RemainingLabelText', 12),
         @('ObservedLabelText', 11), @('StatusLabelText', 11), @('CumulativeLabelText', 12), @('ContextLabelText', 12),
         @('ContextPercentLabelText', 11), @('CompositionLabelText', 11), @('TaskCacheHitLabelText', 11),
         @('TaskCacheMissLabelText', 11), @('ReasoningLabelText', 11),
@@ -2543,7 +3641,7 @@ if ($SelfTest) {
     foreach ($controlName in 'DetailCard', 'RingValue', 'GlowRing', 'RemainingText', 'CircleHost', 'LimitWindowText',
         'ObservedText', 'ObservedDiagnosticText', 'DetailStatusText', 'UsageStatusText', 'RemainingDetailText',
         'RemainingDetailUnitText',
-        'DetailTitleText', 'RemainingLabelText', 'ObservedLabelText', 'StatusLabelText',
+        'DetailTitleText', 'DemoBadge', 'DemoBadgeText', 'RemainingLabelText', 'ObservedLabelText', 'StatusLabelText',
         'ActivityTitleText', 'ActivityWindowText',
         'TokenDetailsPanel', 'ActiveTaskEmptyText', 'ActiveTaskList', 'TaskDetailsPanel', 'TaskTitleText',
         'TaskNoDataText', 'CumulativeRow', 'ContextRow', 'ContextPercentRow', 'CompositionRow',
@@ -2560,7 +3658,7 @@ if ($SelfTest) {
         Assert-Widget ($null -ne (Get-Variable -Name $controlName -Scope Script -ValueOnly)) ('renderer control should bind: ' + $controlName)
     }
     $namedFontContracts = @(
-        @('DetailTitleText', 18), @('RemainingLabelText', 12), @('ObservedLabelText', 11), @('StatusLabelText', 11),
+        @('DetailTitleText', 18), @('DemoBadgeText', 10), @('RemainingLabelText', 12), @('ObservedLabelText', 11), @('StatusLabelText', 11),
         @('ActivityTitleText', 15), @('ActivityWindowText', 11),
         @('DetailStatusText', 11), @('LimitWindowText', 15), @('CountdownText', 12),
         @('ObservedText', 12), @('UsageStatusText', 12), @('ObservedDiagnosticText', 11),
@@ -2599,16 +3697,35 @@ if ($SelfTest) {
     $script:DetailAccentBrush = $null
     $script:DetailAccentSoftBrush = $null
     $script:TaskDetailHideTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:RendererReminderCalls = 0
     $rendererReminderDefinition = (Get-Command Register-UsageReminderThreshold -CommandType Function -ErrorAction Stop).Definition
     function Set-RingPercent { param([double]$Percent) $script:RendererRingPercent = $Percent }
     function Start-ShimmerAnimation { }
-    function Register-UsageReminderThreshold { param($State, $Threshold) return $false }
+    function Register-UsageReminderThreshold { param($State, $Threshold) $script:RendererReminderCalls++; return $false }
     function Show-UsageReminder { param($State) }
-    function Show-DetailPopup { }
+    function Show-DetailPopup { $script:DetailPinned = $true; $script:DetailPopup.IsOpen = $true }
+    function Hide-DetailPopup { param([switch]$Immediate) $script:DetailPopup.IsOpen = $false }
+    $script:DetailPopup = [pscustomobject]@{ IsOpen = $true }
+    $script:DetailPinned = $false
+    Toggle-DetailPopup
+    Assert-Widget ($script:DetailPopup.IsOpen -and $script:DetailPinned) 'clicking a hover-open detail card should pin it without closing.'
+    Toggle-DetailPopup
+    Assert-Widget (-not $script:DetailPopup.IsOpen -and -not $script:DetailPinned) 'clicking a pinned detail card should close and unpin it.'
+    Toggle-DetailPopup
+    Assert-Widget ($script:DetailPopup.IsOpen -and $script:DetailPinned) 'clicking a closed detail card should open it pinned.'
+    $script:DetailPinned = $false
+    Toggle-DetailPopup -HideIfOpen
+    Assert-Widget (-not $script:DetailPopup.IsOpen -and -not $script:DetailPinned) 'the explicit hide-details menu action should close a hover-open card.'
+    $script:DetailPopup = $null
+    $script:IsDemoMode = $true
     Apply-WidgetLanguage
     Assert-Widget ($script:DetailTitleText.Text -ceq '用量详情' -and
+        $script:DemoBadgeText.Text -ceq '演示数据' -and $script:DemoBadge.Visibility -eq 'Visible' -and
         $script:RemainingLabelText.Text -ceq '剩余用量' -and
         $script:TaskNoDataText.Text -ceq '该任务暂无令牌数据') 'the shared language application should populate named static labels.'
+    $script:IsDemoMode = $false
+    Apply-WidgetLanguage
+    Assert-Widget ($script:DemoBadge.Visibility -eq 'Collapsed') 'normal mode should hide the demo badge.'
     Assert-Widget ($script:NotifyIcon.Text -ceq '用量小组件' -and $script:TrayShowItem.Text -ceq '显示小组件' -and
         $script:TrayExitItem.Text -ceq '退出小组件' -and $script:LanguageMenuItem.Header -ceq '语言' -and
         $script:ThemeMenuItems[0].Header -ceq '冰川青' -and $script:LanguageMenuItems[2].Header -ceq '英语') 'the shared language application should populate tray and context menus.'
@@ -2644,6 +3761,21 @@ if ($SelfTest) {
         )
         TaskNamesAvailable = $true
     }
+    $script:IsDemoMode = $true
+    Set-WidgetState $rendererState
+    Assert-Widget ($script:RendererReminderCalls -eq 0) 'demo rendering should not register or send reminders.'
+    $script:IsDemoMode = $false
+    $script:RemindersEnabled = $true
+    $script:LastUsageClassification = 'partial'
+    Set-WidgetState $rendererState
+    Assert-Widget ($script:RendererReminderCalls -eq 0) 'partial observations should not register reminders.'
+    $script:LastUsageClassification = 'complete'
+    Set-WidgetState $rendererState
+    Assert-Widget ($script:RendererReminderCalls -eq 0) 'observations older than thirty minutes should not register reminders.'
+    $rendererState.ObservedAt = [datetime]::UtcNow
+    Set-WidgetState $rendererState
+    Assert-Widget ($script:RendererReminderCalls -eq 2) 'normal rendering should retain both reminder thresholds.'
+    $rendererState.ObservedAt = $rendererObservedAt
     Set-WidgetState $rendererState
     Assert-Widget ($script:RemainingText.Text -eq '39%' -and $script:RemainingDetailText.Text -eq '39' -and
         $script:RemainingDetailUnitText.Text -eq '%' -and $script:RemainingDetailUnitText.Visibility -eq 'Visible' -and
@@ -2790,11 +3922,12 @@ if ($SelfTest) {
         $script:RemainingDetailUnitText.Foreground,
         $script:DetailAccentGlow.Background, $script:DetailAccentDot.Fill,
         $script:TaskDetailAccentLine.Background, $script:ContextAccentFill.Background,
-        $script:DetailStatusText.Foreground, $selectedRow.Child.Foreground) {
+        $script:DetailStatusText.Foreground, $script:DemoBadgeText.Foreground, $selectedRow.Child.Foreground) {
         Assert-Widget ([object]::ReferenceEquals($actualBrush, $themeBrush)) 'theme appearance should share one accent brush across real controls.'
     }
     Assert-Widget ($script:InputAccentFill.Background.Color.ToString() -eq '#FF7CFFB2' -and
         $script:OutputAccentFill.Background.Color.ToString() -eq '#FF38D989' -and
+        [object]::ReferenceEquals($script:DemoBadge.Background, $script:DetailAccentSoftBrush) -and
         [object]::ReferenceEquals($selectedRow.Background, $script:DetailAccentSoftBrush) -and
         [object]::ReferenceEquals($selectedRow.BorderBrush, $themeBrush) -and
         -not [object]::ReferenceEquals($script:TaskTitleText.Foreground, $themeBrush)) 'theme appearance should color bars and the selected task capsule without tinting the detail title.'
@@ -2839,11 +3972,12 @@ if ($SelfTest) {
         $script:DetailAccentGlow.Background,
         $script:DetailAccentDot.Fill, $script:TaskDetailAccentLine.Background,
         $script:ContextAccentFill.Background, $script:DetailStatusText.Foreground,
-        $selectedRow.Child.Foreground) {
+        $script:DemoBadgeText.Foreground, $selectedRow.Child.Foreground) {
         Assert-Widget ([object]::ReferenceEquals($actualBrush, $highlightBrush)) 'high contrast should share the system highlight brush across real controls.'
     }
     Assert-Widget ([object]::ReferenceEquals($script:InputAccentFill.Background, $highlightBrush) -and
         [object]::ReferenceEquals($script:OutputAccentFill.Background, $grayTextBrush) -and
+        [object]::ReferenceEquals($script:DemoBadge.Background, [System.Windows.Media.Brushes]::Transparent) -and
         [object]::ReferenceEquals($selectedRow.Background, [System.Windows.Media.Brushes]::Transparent) -and
         [object]::ReferenceEquals($selectedRow.BorderBrush, $highlightBrush)) 'high contrast should use system composition colors and a transparent selected row.'
 
@@ -3010,6 +4144,20 @@ if ($SelfTest) {
     $runtimeStart = $sourceText.LastIndexOf($runtimeMarker, [StringComparison]::Ordinal)
     $runtimeSource = if ($runtimeStart -ge 0) { $sourceText.Substring($runtimeStart) } else { '' }
     Assert-Widget ($runtimeSource.Length -gt 0) 'runtime source should follow the self-test return guard.'
+    Assert-Widget ($sourceText -match '(?m)^\s*\[switch\]\$Demo[,\r\n]') 'the public PowerShell entry point should expose -Demo.'
+    Assert-Widget ($runtimeSource.Contains("'Local\CodexUsageWidget.Demo.SingleInstance'") -and
+        $runtimeSource.Contains('if ($Demo -and $ScanWorker) { exit 2 }')) 'demo mode should use an independent instance identity and reject worker combinations.'
+    Assert-Widget ($runtimeSource.Contains('if (-not $script:IsDemoMode) {') -and
+        $runtimeSource.Contains('if ($Demo) {')) 'demo runtime should isolate persistence, reminders, and refresh workers.'
+    foreach ($menuVariable in 'ChooseDataDirectoryMenuItem', 'ReminderMenuItem', 'ResetStateMenuItem') {
+        Assert-Widget ($runtimeSource.Contains('$script:' + $menuVariable)) ('Windows context menus should expose: ' + $menuVariable)
+    }
+    Assert-Widget ($runtimeSource.Contains('Reset-WidgetLocalState') -and
+        $runtimeSource.Contains('Show-CodexDataDirectoryPicker')) 'Windows maintenance menus should use the shared reset and directory boundaries.'
+    Assert-Widget ($runtimeSource.Contains('$script:CircleHost.Add_MouseMove({') -and
+        $runtimeSource.Contains('$script:CircleHost.Add_MouseLeftButtonUp({') -and
+        $runtimeSource.Contains('Test-WidgetDragThreshold')) 'pointer interaction should separate a four-point drag from an ordinary click.'
+    Assert-Widget ($runtimeSource.Contains('$script:DetailPinned')) 'detail hover, click, and Escape behavior should share a pinned-state flag.'
     Assert-Widget ($runtimeSource.Contains('-UiCulture ([cultureinfo]::CurrentUICulture)')) 'startup localization should evaluate the current UI culture before argument binding.'
     Assert-Widget ($runtimeSource.Contains('if ($null -eq $script:WidgetPreferences.Language) { $script:WidgetPreferences.Language = $script:CurrentLanguageCode }')) 'startup should default only a null language preference to the active fallback language.'
     $pickerFunctionName = 'Show-CodexDataDirectoryPicker'
@@ -3021,7 +4169,8 @@ if ($SelfTest) {
     $refreshStart = $runtimeSource.IndexOf('function Start-UsageRefresh', [StringComparison]::Ordinal)
     $refreshEnd = $runtimeSource.IndexOf('function Complete-UsageRefresh', $refreshStart, [StringComparison]::Ordinal)
     $refreshSource = if ($refreshStart -ge 0 -and $refreshEnd -gt $refreshStart) { $runtimeSource.Substring($refreshStart, $refreshEnd - $refreshStart) } else { '' }
-    Assert-Widget ($refreshSource.Contains("AddParameter('DataDirectory'")) 'the background refresh should receive the resolved data directory.'
+    Assert-Widget ($refreshSource.Contains('Start-UsageScanProcess') -and
+        $refreshSource.Contains('-DataDirectory $script:CodexDataDirectory')) 'the isolated background refresh should receive the resolved data directory.'
     $timerStart = $runtimeSource.IndexOf('$script:WidgetTimer.Add_Tick({', [StringComparison]::Ordinal)
     $timerEnd = $runtimeSource.IndexOf('$script:WidgetTimer.Start()', $timerStart, [StringComparison]::Ordinal)
     $timerSource = if ($timerStart -ge 0 -and $timerEnd -gt $timerStart) { $runtimeSource.Substring($timerStart, $timerEnd - $timerStart) } else { '' }
@@ -3029,6 +4178,8 @@ if ($SelfTest) {
     foreach ($runtimeBinding in @(
         '$script:RemainingDetailUnitText = $script:WidgetWindow.FindName(''RemainingDetailUnitText'')',
         '$script:DetailTitleText = $script:WidgetWindow.FindName(''DetailTitleText'')',
+        '$script:DemoBadge = $script:WidgetWindow.FindName(''DemoBadge'')',
+        '$script:DemoBadgeText = $script:WidgetWindow.FindName(''DemoBadgeText'')',
         '$script:RemainingLabelText = $script:WidgetWindow.FindName(''RemainingLabelText'')',
         '$script:ObservedLabelText = $script:WidgetWindow.FindName(''ObservedLabelText'')',
         '$script:StatusLabelText = $script:WidgetWindow.FindName(''StatusLabelText'')',
@@ -3055,17 +4206,19 @@ if ($SelfTest) {
     Assert-Widget (-not $positionSource.Contains('Add_Completed')) 'position animation should not depend on an asynchronous completion callback.'
     foreach ($contract in ('Get-Detail' + 'PopupPosition'), ('Set-Widget' + 'Appearance'), ('Start-Shimmer' + 'Animation'),
         ('SetProcessDpiAwareness' + 'Context'), ('Focus' + 'Ring'), 'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura',
-        ('FromMilliseconds' + '(250)'), ('FromMilliseconds' + '(150)'),
+        ('FromMilliseconds' + '(180)'), ('FromMilliseconds' + '(250)'),
         ('[System.Windows.Input.Key]' + '::System'), ('[System.Windows.Input.Keyboard]' + '::Modifiers')) {
         Assert-Widget ($sourceText.Contains($contract)) ('interaction contract should contain: ' + $contract)
     }
+    Assert-Widget ($runtimeSource.Contains('$script:HoverShowTimer.Interval = [TimeSpan]::FromMilliseconds(180)')) 'hover details should open after 180 ms.'
+    Assert-Widget ($runtimeSource.Contains('$script:HoverHideTimer.Interval = [TimeSpan]::FromMilliseconds(250)')) 'detail hover leave should keep a 250 ms pointer bridge.'
     $cancelHideName = 'Cancel-DetailPopup' + 'Hide'
     Assert-Widget ($sourceText.Contains(('function ' + $cancelHideName))) 'popup hover entry should share one fade-cancellation function.'
     $circleEnterSource = [regex]::Match($sourceText, '(?s)\$script:CircleHost\.Add_MouseEnter\(\{(.*?)\}\)').Groups[1].Value
     $cardEnterSource = [regex]::Match($sourceText, '(?s)\$script:DetailCard\.Add_MouseEnter\(\{(.*?)\}\)').Groups[1].Value
     Assert-Widget ($circleEnterSource.Contains($cancelHideName) -and $cardEnterSource.Contains($cancelHideName)) 'both hover-entry paths should cancel an active detail fade.'
     $hideStart = $sourceText.IndexOf(('function Hide-' + 'DetailPopup'), [StringComparison]::Ordinal)
-    $hideEnd = $sourceText.IndexOf(('function Toggle-' + 'DetailPopup'), $hideStart, [StringComparison]::Ordinal)
+    $hideEnd = $sourceText.IndexOf(('function Show-' + 'UsageReminder'), $hideStart, [StringComparison]::Ordinal)
     $hideDefinition = if ($hideStart -ge 0 -and $hideEnd -gt $hideStart) { $sourceText.Substring($hideStart, $hideEnd - $hideStart) } else { '' }
     Assert-Widget ($hideDefinition -match 'CircleHost\.IsMouseOver' -and $hideDefinition -match 'DetailCard\.IsMouseOver') 'fade completion should recheck both hover targets before closing.'
     $showStart = $sourceText.IndexOf(('function Show-' + 'DetailPopup'), [StringComparison]::Ordinal)
@@ -3240,11 +4393,12 @@ if ($SelfTest) {
     Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = $true }) 'value')) 'boolean token values should be rejected.'
     Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = '1' }) 'value')) 'non-numeric token values should be rejected.'
     Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = [double]::NaN }) 'value') -and $null -eq (Get-TokenNumber ([pscustomobject]@{ value = [double]::PositiveInfinity }) 'value') -and $null -eq (Get-TokenNumber ([pscustomobject]@{ value = -1 }) 'value')) 'non-finite and negative token values should be rejected.'
-    Assert-Widget ((Get-TokenNumber ([pscustomobject]@{ value = 0 }) 'value') -eq 0 -and (Get-TokenNumber ([pscustomobject]@{ value = 12.5 }) 'value') -eq 12.5) 'finite non-negative token values should be accepted.'
+    Assert-Widget ((Get-TokenNumber ([pscustomobject]@{ value = 0 }) 'value') -eq 0 -and (Get-TokenNumber ([pscustomobject]@{ value = [long]::MaxValue }) 'value') -eq [long]::MaxValue) 'signed 64-bit token values should be accepted exactly.'
+    Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = 12.5 }) 'value') -and $null -eq (Get-TokenNumber ([pscustomobject]@{ value = [decimal]::MaxValue }) 'value')) 'fractional and overflowing token values should be rejected.'
     Assert-Widget ($null -eq (Get-TokenPercent $null 10) -and $null -eq (Get-TokenPercent 1 0)) 'token percentages need a value and positive denominator.'
     Assert-Widget ($null -eq (Get-TokenPercent -1 10) -and $null -eq (Get-TokenPercent ([double]::NaN) 10)) 'token percentages should reject negative and non-finite numerators.'
     Assert-Widget ($null -eq (Get-TokenPercent 1 -10) -and $null -eq (Get-TokenPercent 1 ([double]::PositiveInfinity))) 'token percentages should reject negative and non-finite denominators.'
-    Assert-Widget ((Get-TokenPercent 5e307 1e308) -eq 50.0) 'token percentages should divide before multiplying to avoid overflow.'
+    Assert-Widget ((Get-TokenPercent ([long]::MaxValue - 1) ([long]::MaxValue)) -eq 100.0) 'token percentages should divide before multiplying and round without overflowing.'
     Assert-Widget ((Get-TokenPercent 1 3) -eq 33.3 -and (Get-TokenPercent 200 100) -eq 100) 'token percentages should round and clamp.'
 
     $tokenDetails = Get-EventTokenDetails $fixtureEvent
@@ -3344,7 +4498,7 @@ if ($SelfTest) {
     $newerLimits.secondary.used_percent = 42
     $newer = [pscustomobject]@{ timestamp = [DateTimeOffset]::UtcNow.AddSeconds(-10).ToString('o'); payload = [pscustomobject]@{ info = $fixtureEvent.payload.info; rate_limits = $newerLimits } }
     $newest = Get-NewestUsageState -Events @($older, $newer)
-    Assert-Widget ($newest.LimitWindows[1].UsedPercent -eq 42 -and $newest.ObservedAt -gt $older.timestamp -and $null -ne $newest.TokenDetails) 'newest valid rate-limit event should attach observation and token details.'
+    Assert-Widget ($newest.LimitWindows[1].UsedPercent -eq 42 -and $newest.ObservedAt -gt (ConvertTo-ObservedAt $older.timestamp) -and $null -ne $newest.TokenDetails) 'newest valid rate-limit event should attach observation and token details.'
     Assert-Widget ($newest.PSObject.Properties.Name -notcontains 'IsStale') 'newest state should not expose stale state.'
 
     $deep = [pscustomobject]@{}
@@ -3554,6 +4708,8 @@ if ($SelfTest) {
         Assert-Widget ($null -eq $refreshFailure.State -and $refreshFailure.Diagnostic -eq 'read_failed') 'a non-terminating worker error should reject an otherwise valid snapshot.'
         $malformedRefresh = Resolve-UsageRefreshResult -Snapshot ([pscustomobject]@{ Value = 1 }) -ErrorCount 0
         Assert-Widget ($null -eq $malformedRefresh.State -and $malformedRefresh.Diagnostic -eq 'read_failed') 'a malformed worker result should become a safe read failure.'
+        $persistenceFailure = Resolve-UsageRefreshResult -Snapshot $null -ErrorCount 1 -FailureDiagnostic 'persistence_failed'
+        Assert-Widget ($null -eq $persistenceFailure.State -and $persistenceFailure.Diagnostic -eq 'persistence_failed') 'a failed parent write should remain distinct from a worker read failure.'
         $validRefresh = Resolve-UsageRefreshResult -Snapshot $snapshot -ErrorCount 0
         Assert-Widget ($validRefresh.State -eq $snapshot.State -and $null -eq $validRefresh.Diagnostic) 'a valid state with no diagnostic should be preserved.'
         foreach ($diagnostic in 'missing_directory', 'empty_directory', 'read_failed', 'no_valid_event') {
@@ -3561,80 +4717,6 @@ if ($SelfTest) {
             Assert-Widget ($null -eq $diagnosticRefresh.State -and $diagnosticRefresh.Diagnostic -eq $diagnostic) 'a safe null-state diagnostic should be preserved.'
         }
 
-        $workerNames = @(Get-UsageWorkerFunctionNames)
-        Assert-Widget ($workerNames -contains 'ConvertTo-LimitWindow' -and $workerNames -contains 'Get-TokenPercent' -and $workerNames -contains 'Get-CodexUsageSnapshot') 'the worker list should contain the complete data pipeline.'
-        $incompleteState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-        foreach ($functionName in @($workerNames | Where-Object { $_ -ne 'Get-CodexUsageState' })) {
-            $definition = (Get-Command -Name $functionName -CommandType Function -ErrorAction Stop).Definition
-            $incompleteState.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition))
-        }
-        $incompleteRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($incompleteState)
-        $incompleteRunspace.Open()
-        $incompleteWorker = [System.Management.Automation.PowerShell]::Create()
-        $incompleteWorker.Runspace = $incompleteRunspace
-        try {
-            [void]$incompleteWorker.AddCommand('Get-CodexUsageSnapshot')
-            [void]$incompleteWorker.Invoke()
-            Assert-Widget ($incompleteWorker.HadErrors) 'omitting a real worker dependency should make the invocation fail.'
-        }
-        finally {
-            $incompleteWorker.Dispose()
-            $incompleteRunspace.Dispose()
-        }
-
-        $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-        foreach ($functionName in $workerNames) {
-            $definition = (Get-Command -Name $functionName -CommandType Function -ErrorAction Stop).Definition
-            $initialState.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition))
-        }
-        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
-        $runspace.Open()
-        $worker = [System.Management.Automation.PowerShell]::Create()
-        $worker.Runspace = $runspace
-        try {
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $workerSnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -ne $workerSnapshot.State -and $null -eq $workerSnapshot.Diagnostic) 'restoring the production worker list should execute a valid snapshot without command errors.'
-
-            [System.IO.File]::Delete($fallbackFile)
-            $worker.Commands.Clear()
-            $worker.Streams.Error.Clear()
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $emptySnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $emptySnapshot.State -and $emptySnapshot.Diagnostic -eq 'empty_directory') 'the worker snapshot should distinguish an empty directory.'
-
-            [System.IO.Directory]::Delete($sessionDirectory)
-            $worker.Commands.Clear()
-            $worker.Streams.Error.Clear()
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $missingSnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $missingSnapshot.State -and $missingSnapshot.Diagnostic -eq 'missing_directory') 'the worker snapshot should distinguish a missing directory.'
-
-            [System.IO.Directory]::CreateDirectory($sessionDirectory) | Out-Null
-            [System.IO.File]::WriteAllText($fallbackFile, '{bad json')
-            $worker.Commands.Clear()
-            $worker.Streams.Error.Clear()
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $invalidSnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $invalidSnapshot.State -and $invalidSnapshot.Diagnostic -eq 'no_valid_event') 'the worker snapshot should distinguish invalid events.'
-
-            [System.IO.File]::WriteAllText($fallbackFile, $eventLine)
-            $lockedSession = [System.IO.File]::Open($fallbackFile, 'Open', 'Read', 'None')
-            try {
-                $worker.Commands.Clear()
-                $worker.Streams.Error.Clear()
-                [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-                $failedSnapshot = @($worker.Invoke())[-1]
-                Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $failedSnapshot.State -and $failedSnapshot.Diagnostic -eq 'read_failed') 'the worker snapshot should distinguish a session read failure.'
-            }
-            finally {
-                $lockedSession.Dispose()
-            }
-        }
-        finally {
-            $worker.Dispose()
-            $runspace.Dispose()
-        }
     }
     finally {
         $env:USERPROFILE = $savedProfile
@@ -3741,8 +4823,8 @@ if ($SelfTest) {
         $env:LOCALAPPDATA = $blockedLocalAppData
         $script:ReminderGateCache = $null
         $primaryReminder.ResetAt = $primaryCycleTime.AddHours(4)
-        Assert-Widget (Register-UsageReminderThreshold -State $primaryReminder -Threshold 20) 'persistence failure should still allow an in-memory trigger.'
-        Assert-Widget (-not (Register-UsageReminderThreshold -State $primaryReminder -Threshold 20)) 'persistence failure should still suppress in-memory repeats.'
+        Assert-Widget (-not (Register-UsageReminderThreshold -State $primaryReminder -Threshold 20)) 'persistence failure should reject an unsaved trigger.'
+        Assert-Widget (@($script:ReminderGateCache.SentKeys).Count -eq 0) 'persistence failure should leave the in-memory reminder gate unchanged.'
 
         $env:LOCALAPPDATA = $testLocalAppData
         $preferenceCodexRoot = Join-Path $testLocalAppData 'chosen-codex'
@@ -3755,6 +4837,12 @@ if ($SelfTest) {
         $preferencesPath = Join-Path $testLocalAppData 'CodexUsageWidget\preferences.json'
         $storedPreferences = [System.IO.File]::ReadAllText($preferencesPath) | ConvertFrom-Json
         Assert-Widget ((@($storedPreferences.PSObject.Properties.Name | Sort-Object) -join ',') -eq 'CodexDataDirectory,Language,Left,Monitor,Theme,Top') 'preferences should persist only the six whitelisted properties.'
+        $preferencesBeforeDemo = [System.IO.File]::ReadAllBytes($preferencesPath)
+        $script:IsDemoMode = $true
+        Assert-Widget (Save-WidgetPreferences -Left 1 -Top 2 -Monitor 'demo' -Theme 0 -Language 'en-US') 'demo preference changes should remain in memory.'
+        $script:IsDemoMode = $false
+        Assert-Widget ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($preferencesPath)) -ceq
+            [Convert]::ToBase64String($preferencesBeforeDemo)) 'demo mode should not change the preference file.'
 
         $fallbackLocaleRoot = Join-Path $testLocalAppData 'fallback-locale-root'
         $fallbackLocales = Join-Path $fallbackLocaleRoot 'locales'
@@ -3834,6 +4922,9 @@ if ($SelfTest) {
         Assert-Widget ($snap.Left -eq -1921 -and $snap.Edge -eq 'Left') 'negative-coordinate work areas should snap correctly.'
         $snap = Get-SnappedWidgetPosition 10 10 100 100 82 $workArea
         Assert-Widget ($snap.Left -eq -1 -and $snap.Top -eq 10 -and $snap.Edge -eq 'Left') 'equal distances should use stable left-before-top ordering.'
+        Assert-Widget (-not (Test-WidgetDragThreshold 10 20 13.9 23.9)) 'pointer movement below four points should remain a click.'
+        Assert-Widget (Test-WidgetDragThreshold 10 20 14 20) 'four horizontal points should begin a drag.'
+        Assert-Widget (Test-WidgetDragThreshold 10 20 10 24) 'four vertical points should begin a drag.'
     }
     finally {
         $script:ReminderGateCache = $null
@@ -3849,8 +4940,22 @@ if ($SelfTest) {
 }
 
 if ($SelfTest) { return }
+if ($Demo -and $ScanWorker) { exit 2 }
 
-$script:WidgetPreferences = Get-WidgetPreferences
+if ($ScanWorker) { exit (Invoke-UsageScanWorker) }
+
+$script:WidgetPreferences = if ($Demo) {
+    [pscustomobject]@{
+        Left = $null
+        Top = $null
+        Monitor = $null
+        Theme = 7
+        CodexDataDirectory = $null
+        Language = $null
+        StoreStatus = 'missing'
+    }
+}
+else { Get-WidgetPreferences }
 try {
     Initialize-WidgetLocalization -Root $PSScriptRoot `
         -SavedLanguage $script:WidgetPreferences.Language `
@@ -3905,8 +5010,9 @@ catch {
 }
 
 $createdNew = $false
+$instanceName = if ($Demo) { 'Local\CodexUsageWidget.Demo.SingleInstance' } else { 'Local\CodexUsageWidget.SingleInstance' }
 try {
-    $script:InstanceMutex = [System.Threading.Mutex]::new($true, 'Local\CodexUsageWidget.SingleInstance', [ref]$createdNew)
+    $script:InstanceMutex = [System.Threading.Mutex]::new($true, $instanceName, [ref]$createdNew)
     $script:OwnsInstanceMutex = $createdNew
 }
 catch {
@@ -3962,6 +5068,8 @@ $script:ObservedDiagnosticText = $script:WidgetWindow.FindName('ObservedDiagnost
 $script:DetailStatusText = $script:WidgetWindow.FindName('DetailStatusText')
 $script:UsageStatusText = $script:WidgetWindow.FindName('UsageStatusText')
 $script:DetailTitleText = $script:WidgetWindow.FindName('DetailTitleText')
+$script:DemoBadge = $script:WidgetWindow.FindName('DemoBadge')
+$script:DemoBadgeText = $script:WidgetWindow.FindName('DemoBadgeText')
 $script:RemainingLabelText = $script:WidgetWindow.FindName('RemainingLabelText')
 $script:ObservedLabelText = $script:WidgetWindow.FindName('ObservedLabelText')
 $script:StatusLabelText = $script:WidgetWindow.FindName('StatusLabelText')
@@ -4020,11 +5128,14 @@ $script:DetailAccentBrush = $null
 $script:DetailAccentSoftBrush = $null
 $script:LastUsageState = $null
 $script:LastUsageDiagnostic = $null
+$script:LastUsageClassification = 'empty'
 $script:RefreshTicks = 0
 $script:WidgetTimer = $null
-$script:UsageRunspace = $null
-$script:UsagePowerShell = $null
-$script:UsageAsyncResult = $null
+$script:UsageJob = $null
+$script:UsageWorkerHost = $null
+$script:UsageWorkerJobHandle = [IntPtr]::Zero
+$script:UsageFailureCount = 0
+$script:UsageNextAttemptAtUtc = [datetime]::MinValue
 $script:PendingUsageState = $null
 $script:NotifyIcon = $null
 $script:TrayMenu = $null
@@ -4035,6 +5146,9 @@ $script:ThemeMenuItems = @()
 $script:LanguageMenuItems = @()
 $script:DetailMenuItem = $null
 $script:LanguageMenuItem = $null
+$script:ChooseDataDirectoryMenuItem = $null
+$script:ReminderMenuItem = $null
+$script:ResetStateMenuItem = $null
 $script:ExitMenuItem = $null
 $script:WidgetContextMenu = $null
 $script:PercentAnimationTimer = $null
@@ -4046,6 +5160,11 @@ $script:ActiveTaskRow = $null
 $script:ActiveTaskId = $null
 $script:HasShownHoverShimmer = $false
 $script:LastShimmerObservationKey = $null
+$script:RemindersEnabled = $false
+$script:DetailPinned = $false
+$script:PointerDown = $false
+$script:PointerDragging = $false
+$script:PointerStart = $null
 
 try {
     $script:NotifyIcon = [System.Windows.Forms.NotifyIcon]::new()
@@ -4301,6 +5420,8 @@ function Set-WidgetTheme {
 function Show-DetailPopup {
     param([switch]$FromHover)
 
+    if (-not $FromHover) { $script:DetailPinned = $true }
+
     $screen = Get-WidgetScreen
     $area = Get-ScreenWorkArea $screen
     $availableWidth = [Math]::Max(1, [Math]::Min(310, $area.Width - 16))
@@ -4351,6 +5472,7 @@ function Cancel-DetailPopupHide {
 function Hide-DetailPopup {
     param([switch]$Immediate)
 
+    if ($script:DetailPinned -and -not $Immediate) { return }
     if (-not $script:DetailPopup.IsOpen) {
         Hide-ActiveTaskDetails
         return
@@ -4377,10 +5499,6 @@ function Hide-DetailPopup {
     }
 }
 
-function Toggle-DetailPopup {
-    if ($script:DetailPopup.IsOpen) { Hide-DetailPopup } else { Show-DetailPopup }
-}
-
 function Show-UsageReminder {
     param([Parameter(Mandatory)]$State)
 
@@ -4388,6 +5506,7 @@ function Show-UsageReminder {
     try {
         $remaining = [double]$State.RemainingPercent
         $resetAt = [datetime]$State.ResetAt
+        if ($resetAt.Kind -eq [DateTimeKind]::Utc) { $resetAt = $resetAt.ToLocalTime() }
         $script:NotifyIcon.ShowBalloonTip(
             5000,
             (Get-WidgetText 'reminder.title' @($remaining)),
@@ -4430,54 +5549,66 @@ function Show-CodexDataDirectoryPicker {
 }
 
 function Initialize-UsageWorker {
-    $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    foreach ($functionName in Get-UsageWorkerFunctionNames) {
-        $definition = (Get-Command -Name $functionName -CommandType Function -ErrorAction Stop).Definition
-        $entry = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition)
-        $initialState.Commands.Add($entry)
+    $workerRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'worker'
+    [void][IO.Directory]::CreateDirectory($workerRoot)
+    if (([IO.DirectoryInfo]$workerRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'The usage worker directory is a reparse point.'
     }
-
-    $script:UsageRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
-    $script:UsageRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-    $script:UsageRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-    $script:UsageRunspace.Open()
-    $script:UsagePowerShell = [System.Management.Automation.PowerShell]::Create()
-    $script:UsagePowerShell.Runspace = $script:UsageRunspace
+    Remove-StaleUsageWorkerChannels -Root $workerRoot
+    if ($script:UsageWorkerJobHandle -eq [IntPtr]::Zero) { $script:UsageWorkerJobHandle = New-UsageWorkerJob }
 }
 
 function Start-UsageRefresh {
-    if ($null -eq $script:UsagePowerShell -or $null -ne $script:UsageAsyncResult) { return $false }
+    if ($null -ne $script:UsageJob -or [datetime]::UtcNow -lt $script:UsageNextAttemptAtUtc) { return $false }
 
     try {
         $script:CodexDataDirectory = Resolve-CodexDataDirectory `
             $script:WidgetPreferences.CodexDataDirectory $env:CODEX_HOME $env:USERPROFILE
-        $script:UsagePowerShell.Commands.Clear()
-        $script:UsagePowerShell.Streams.Error.Clear()
-        [void]$script:UsagePowerShell.AddCommand('Get-CodexUsageSnapshot')
-        [void]$script:UsagePowerShell.AddParameter('DataDirectory', $script:CodexDataDirectory)
-        $script:UsageAsyncResult = $script:UsagePowerShell.BeginInvoke()
+        if ($null -eq $script:CodexDataDirectory) { throw 'The Codex data directory is unavailable.' }
+        $generation = [guid]::NewGuid().ToString('N')
+        $script:UsageJob = Start-UsageScanProcess -ScriptPath $PSCommandPath `
+            -DataDirectory $script:CodexDataDirectory -Generation $generation `
+            -WorkerJobHandle $script:UsageWorkerJobHandle
         return $true
     }
     catch {
-        $script:UsageAsyncResult = $null
+        $script:UsageJob = $null
+        $script:UsageFailureCount++
+        $delay = @(1, 5, 15, 30)[[math]::Min($script:UsageFailureCount - 1, 3)]
+        $script:UsageNextAttemptAtUtc = [datetime]::UtcNow.AddSeconds($delay)
         return $false
     }
 }
 
 function Complete-UsageRefresh {
-    if ($null -eq $script:UsageAsyncResult -or -not $script:UsageAsyncResult.IsCompleted) { return }
+    if ($null -eq $script:UsageJob) { return }
 
-    $completed = $script:UsageAsyncResult
-    $script:UsageAsyncResult = $null
-    $snapshot = $null
-    $errorCount = 0
-    try {
-        $results = $script:UsagePowerShell.EndInvoke($completed)
-        if ($null -ne $results -and $results.Count -gt 0) { $snapshot = $results[$results.Count - 1] }
+    $received = Receive-UsageScanProcess -Job $script:UsageJob -TimeoutSeconds 10
+    if ($received.Status -ceq 'pending') { return }
+    $snapshot = $received.Snapshot
+    $script:UsageJob = $null
+
+    $failureDiagnostic = 'read_failed'
+    if ($null -ne $snapshot) {
+        $persistedSnapshot = Apply-UsageSnapshotPersistence $snapshot
+        if ($null -eq $persistedSnapshot) {
+            $snapshot = $null
+            $failureDiagnostic = 'persistence_failed'
+        }
+        else { $snapshot = $persistedSnapshot }
     }
-    catch { $errorCount = 1 }
-    $errorCount += $script:UsagePowerShell.Streams.Error.Count
-    $refreshResult = Resolve-UsageRefreshResult -Snapshot $snapshot -ErrorCount $errorCount
+    if ($null -ne $snapshot) {
+        $script:UsageFailureCount = 0
+        $script:UsageNextAttemptAtUtc = [datetime]::MinValue
+        $script:LastUsageClassification = $snapshot.Classification
+    }
+    else {
+        $script:UsageFailureCount++
+        $delay = @(1, 5, 15, 30)[[math]::Min($script:UsageFailureCount - 1, 3)]
+        $script:UsageNextAttemptAtUtc = [datetime]::UtcNow.AddSeconds($delay)
+        $script:LastUsageClassification = 'error'
+    }
+    $refreshResult = Resolve-UsageRefreshResult -Snapshot $snapshot -ErrorCount $(if ($null -eq $snapshot) { 1 } else { 0 }) -FailureDiagnostic $failureDiagnostic
 
     $script:LastUsageDiagnostic = $refreshResult.Diagnostic
     $script:PendingUsageState = $refreshResult.State
@@ -4494,20 +5625,28 @@ function Complete-UsageRefresh {
 }
 
 function Stop-UsageWorker {
-    if ($null -ne $script:UsagePowerShell) {
-        if ($null -ne $script:UsageAsyncResult) {
-            try { $script:UsagePowerShell.Stop() } catch { }
-            try { $script:UsagePowerShell.EndInvoke($script:UsageAsyncResult) | Out-Null } catch { }
-            $script:UsageAsyncResult = $null
-        }
-        try { $script:UsagePowerShell.Dispose() } catch { }
-        $script:UsagePowerShell = $null
+    $job = $script:UsageJob
+    $workerHost = $script:UsageWorkerHost
+    $script:UsageJob = $null
+    $script:UsageWorkerHost = $null
+    $process = if ($null -ne $workerHost -and $workerHost.Process -is [Diagnostics.Process]) { $workerHost.Process }
+        elseif ($null -ne $job -and $job.Process -is [Diagnostics.Process]) { $job.Process }
+        else { $null }
+    if ($null -ne $process) { [void](Stop-UsageWorkerProcess -Process $process) }
+    if ($null -ne $job) {
+        try { if ($null -ne $job.ReadyPath -and [IO.File]::Exists($job.ReadyPath)) { [IO.File]::Delete($job.ReadyPath) } } catch { }
+        try { if ([IO.File]::Exists($job.OutputPath)) { [IO.File]::Delete($job.OutputPath) } } catch { }
+        try { if ([IO.Directory]::Exists($job.ChannelDirectory)) { [IO.Directory]::Delete($job.ChannelDirectory, $false) } } catch { }
     }
-    if ($null -ne $script:UsageRunspace) {
-        try { $script:UsageRunspace.Close() } catch { }
-        try { $script:UsageRunspace.Dispose() } catch { }
-        $script:UsageRunspace = $null
+    if ($script:UsageWorkerJobHandle -ne [IntPtr]::Zero) {
+        try { Close-UsageWorkerJob -Handle $script:UsageWorkerJobHandle } catch { }
+        $script:UsageWorkerJobHandle = [IntPtr]::Zero
     }
+    try {
+        $workerScriptPath = Join-Path (Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'worker') 'scan-worker.ps1'
+        if ([IO.File]::Exists($workerScriptPath)) { [IO.File]::Delete($workerScriptPath) }
+    }
+    catch { }
     $script:PendingUsageState = $null
 }
 
@@ -4549,13 +5688,13 @@ function Stop-WidgetResources {
 }
 
 $script:HoverShowTimer = [System.Windows.Threading.DispatcherTimer]::new()
-$script:HoverShowTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:HoverShowTimer.Interval = [TimeSpan]::FromMilliseconds(180)
 $script:HoverShowTimer.Add_Tick({
     $script:HoverShowTimer.Stop()
     if ($script:CircleHost.IsMouseOver -or $script:DetailCard.IsMouseOver) { Show-DetailPopup -FromHover }
 })
 $script:HoverHideTimer = [System.Windows.Threading.DispatcherTimer]::new()
-$script:HoverHideTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$script:HoverHideTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $script:HoverHideTimer.Add_Tick({
     $script:HoverHideTimer.Stop()
     if (-not $script:CircleHost.IsMouseOver -and -not $script:DetailCard.IsMouseOver) { Hide-DetailPopup }
@@ -4579,7 +5718,7 @@ $script:TaskDetailsPanel.Add_MouseLeave({
 $script:WidgetContextMenu = [System.Windows.Controls.ContextMenu]::new()
 $script:DetailMenuItem = [System.Windows.Controls.MenuItem]::new()
 $script:DetailMenuItem.Header = Get-WidgetText 'menu.showDetails'
-$script:DetailMenuItem.Add_Click({ Toggle-DetailPopup })
+$script:DetailMenuItem.Add_Click({ Toggle-DetailPopup -HideIfOpen })
 [void]$script:WidgetContextMenu.Items.Add($script:DetailMenuItem)
 $script:LanguageMenuItem = [System.Windows.Controls.MenuItem]::new()
 $script:LanguageMenuItem.Header = Get-WidgetText 'menu.language'
@@ -4612,6 +5751,79 @@ foreach ($theme in @(Get-WidgetThemes)) {
     $themeIndex++
 }
 [void]$script:WidgetContextMenu.Items.Add([System.Windows.Controls.Separator]::new())
+$script:ChooseDataDirectoryMenuItem = [System.Windows.Controls.MenuItem]::new()
+$script:ChooseDataDirectoryMenuItem.Header = Get-WidgetText 'menu.chooseDirectory'
+$script:ChooseDataDirectoryMenuItem.IsEnabled = -not $script:IsDemoMode
+$script:ChooseDataDirectoryMenuItem.Add_Click({
+    $selected = Show-CodexDataDirectoryPicker
+    if ($null -eq $selected) { return }
+    $screen = Get-WidgetScreen
+    $left = if ($null -ne $script:WidgetPreferences.Left) { $script:WidgetPreferences.Left } else { $script:WidgetWindow.Left }
+    $top = if ($null -ne $script:WidgetPreferences.Top) { $script:WidgetPreferences.Top } else { $script:WidgetWindow.Top }
+    if (-not (Save-WidgetPreferences -Left $left -Top $top -Monitor $screen.DeviceName `
+        -Theme $script:WidgetPreferences.Theme -CodexDataDirectory $selected -Language $script:WidgetPreferences.Language)) {
+        [void][System.Windows.Forms.MessageBox]::Show((Get-WidgetText 'diagnostic.persistenceFailed'), (Get-WidgetText 'app.title'))
+        return
+    }
+    Stop-UsageWorker
+    $script:WidgetPreferences.Left = $left
+    $script:WidgetPreferences.Top = $top
+    $script:WidgetPreferences.Monitor = $screen.DeviceName
+    $script:WidgetPreferences.CodexDataDirectory = $selected
+    $script:CodexDataDirectory = $selected
+    $script:LastUsageState = $null
+    $script:LastUsageDiagnostic = $null
+    $script:LastUsageClassification = 'empty'
+    $script:UsageFailureCount = 0
+    $script:UsageNextAttemptAtUtc = [datetime]::MinValue
+    Set-WidgetState -State $null
+    Initialize-UsageWorker
+    [void](Start-UsageRefresh)
+})
+[void]$script:WidgetContextMenu.Items.Add($script:ChooseDataDirectoryMenuItem)
+$script:ReminderMenuItem = [System.Windows.Controls.MenuItem]::new()
+$script:ReminderMenuItem.Header = Get-WidgetText 'menu.enableReminders'
+$script:ReminderMenuItem.IsCheckable = $true
+$script:ReminderMenuItem.IsEnabled = -not $script:IsDemoMode
+$script:ReminderMenuItem.Add_Click({
+    if ($script:IsDemoMode) { return }
+    $script:RemindersEnabled = $true
+    $script:ReminderMenuItem.IsChecked = $true
+    $script:ReminderMenuItem.IsEnabled = $false
+})
+[void]$script:WidgetContextMenu.Items.Add($script:ReminderMenuItem)
+$script:ResetStateMenuItem = [System.Windows.Controls.MenuItem]::new()
+$script:ResetStateMenuItem.Header = Get-WidgetText 'menu.resetState'
+$script:ResetStateMenuItem.IsEnabled = -not $script:IsDemoMode
+$script:ResetStateMenuItem.Add_Click({
+    $confirmed = [System.Windows.Forms.MessageBox]::Show(
+        (Get-WidgetText 'reset.body'), (Get-WidgetText 'reset.title'),
+        [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($confirmed -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $language = Resolve-WidgetLanguageCode $null ([cultureinfo]::CurrentUICulture)
+    if (-not (Reset-WidgetLocalState -Language $language)) {
+        [void][System.Windows.Forms.MessageBox]::Show((Get-WidgetText 'diagnostic.persistenceFailed'), (Get-WidgetText 'app.title'))
+        return
+    }
+    Stop-UsageWorker
+    $script:WidgetPreferences = Get-WidgetPreferences
+    $script:RemindersEnabled = $false
+    $script:ReminderMenuItem.IsChecked = $false
+    $script:ReminderMenuItem.IsEnabled = $true
+    $script:LastUsageState = $null
+    $script:LastUsageClassification = 'empty'
+    $script:CodexDataDirectory = Resolve-CodexDataDirectory $null $env:CODEX_HOME $env:USERPROFILE
+    $script:LastUsageDiagnostic = if ($null -eq $script:CodexDataDirectory) { 'missing_directory' } else { $null }
+    Set-WidgetLanguage -Code $language
+    Set-WidgetTheme -Theme 7
+    Set-WidgetState -State $null
+    $script:UsageFailureCount = 0
+    $script:UsageNextAttemptAtUtc = [datetime]::MinValue
+    Initialize-UsageWorker
+    [void](Start-UsageRefresh)
+})
+[void]$script:WidgetContextMenu.Items.Add($script:ResetStateMenuItem)
+[void]$script:WidgetContextMenu.Items.Add([System.Windows.Controls.Separator]::new())
 $script:ExitMenuItem = [System.Windows.Controls.MenuItem]::new()
 $script:ExitMenuItem.Header = Get-WidgetText 'menu.exit'
 $script:ExitMenuItem.Add_Click({ $script:WidgetWindow.Close() })
@@ -4620,6 +5832,8 @@ $script:WidgetContextMenu.Add_Opened({
     $script:DetailMenuItem.Header = Get-WidgetText $(if ($script:DetailPopup.IsOpen) { 'menu.hideDetails' } else { 'menu.showDetails' })
     foreach ($item in $script:LanguageMenuItems) { $item.IsChecked = ([string]$item.Tag -ceq $script:CurrentLanguageCode) }
     foreach ($item in $script:ThemeMenuItems) { $item.IsChecked = ([int]$item.Tag -eq $script:WidgetPreferences.Theme) }
+    $script:ReminderMenuItem.IsChecked = $script:RemindersEnabled
+    $script:ReminderMenuItem.IsEnabled = -not $script:IsDemoMode -and -not $script:RemindersEnabled
 })
 $script:CircleHost.ContextMenu = $script:WidgetContextMenu
 Apply-WidgetLanguage
@@ -4648,16 +5862,51 @@ $script:CircleHost.Add_MouseLeftButtonDown({
     if ($eventArgs.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
         $script:HoverShowTimer.Stop()
         $script:HoverHideTimer.Stop()
-        Hide-DetailPopup -Immediate
         [void]$script:CircleHost.Focus()
-        Clear-WidgetPositionAnimation
+        $script:PointerStart = $eventArgs.GetPosition($script:CircleHost)
+        $script:PointerDown = $true
+        $script:PointerDragging = $false
+        [void]$script:CircleHost.CaptureMouse()
         $eventArgs.Handled = $true
+    }
+})
+$script:CircleHost.Add_MouseMove({
+    param($sender, $eventArgs)
+    if (-not $script:PointerDown) { return }
+    if ($eventArgs.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) {
+        $script:PointerDown = $false
+        $script:CircleHost.ReleaseMouseCapture()
+        return
+    }
+    $current = $eventArgs.GetPosition($script:CircleHost)
+    if (-not $script:PointerDragging -and
+        (Test-WidgetDragThreshold $script:PointerStart.X $script:PointerStart.Y $current.X $current.Y)) {
+        $script:PointerDragging = $true
+        $script:DetailPinned = $false
+        Hide-DetailPopup -Immediate
+        $script:CircleHost.ReleaseMouseCapture()
+        Clear-WidgetPositionAnimation
         try {
             $script:WidgetWindow.DragMove()
             Snap-And-SaveWidgetPosition
         }
         catch { }
+        finally {
+            $script:PointerDown = $false
+            $script:PointerDragging = $false
+        }
+        $eventArgs.Handled = $true
     }
+})
+$script:CircleHost.Add_MouseLeftButtonUp({
+    param($sender, $eventArgs)
+    if (-not $script:PointerDown) { return }
+    $wasDragging = $script:PointerDragging
+    $script:PointerDown = $false
+    $script:PointerDragging = $false
+    $script:CircleHost.ReleaseMouseCapture()
+    if (-not $wasDragging) { Toggle-DetailPopup }
+    $eventArgs.Handled = $true
 })
 $script:CircleHost.Add_KeyDown({
     param($sender, $eventArgs)
@@ -4666,7 +5915,8 @@ $script:CircleHost.Add_KeyDown({
         $eventArgs.Handled = $true
     }
     elseif ($eventArgs.Key -eq [System.Windows.Input.Key]::Escape) {
-        Hide-DetailPopup
+        $script:DetailPinned = $false
+        Hide-DetailPopup -Immediate
         $eventArgs.Handled = $true
     }
     elseif (($eventArgs.Key -eq [System.Windows.Input.Key]::System -and $eventArgs.SystemKey -eq [System.Windows.Input.Key]::F10) -and
@@ -4685,35 +5935,53 @@ $script:WidgetWindow.Add_Closed({
     Stop-WidgetResources
 })
 
-$script:CodexDataDirectory = Resolve-CodexDataDirectory `
-    $script:WidgetPreferences.CodexDataDirectory $env:CODEX_HOME $env:USERPROFILE
-if ($null -eq $script:CodexDataDirectory) {
-    $selectedCodexDataDirectory = Show-CodexDataDirectoryPicker
-    if ($null -ne $selectedCodexDataDirectory) {
-        $script:CodexDataDirectory = $selectedCodexDataDirectory
-        $script:WidgetPreferences.CodexDataDirectory = $selectedCodexDataDirectory
+$script:CodexDataDirectory = $null
+if ($Demo) {
+    try {
+        $demoSnapshot = Get-DemoUsageSnapshot -Root $PSScriptRoot
+        $script:LastUsageClassification = $demoSnapshot.Classification
+        $script:LastUsageDiagnostic = $demoSnapshot.Diagnostic
+        Set-WidgetState -State $demoSnapshot.State
+    }
+    catch {
+        Stop-WidgetResources
+        Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'diagnostic.noValidEvent') (Get-WidgetText 'fatal.restoreFix')
+        return
     }
 }
+else {
+    $script:CodexDataDirectory = Resolve-CodexDataDirectory `
+        $script:WidgetPreferences.CodexDataDirectory $env:CODEX_HOME $env:USERPROFILE
+    if ($null -eq $script:CodexDataDirectory) {
+        $selectedCodexDataDirectory = Show-CodexDataDirectoryPicker
+        if ($null -ne $selectedCodexDataDirectory) {
+            $script:CodexDataDirectory = $selectedCodexDataDirectory
+            $script:WidgetPreferences.CodexDataDirectory = $selectedCodexDataDirectory
+        }
+    }
 
-Set-WidgetState -State $null
-try {
-    Initialize-UsageWorker
-    if (-not (Start-UsageRefresh)) { throw 'The usage worker did not start.' }
-}
-catch {
-    Stop-WidgetResources
-    Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.workerCause') (Get-WidgetText 'fatal.restoreFix')
-    return
+    Set-WidgetState -State $null
+    try {
+        Initialize-UsageWorker
+        if (-not (Start-UsageRefresh)) { throw 'The usage worker did not start.' }
+    }
+    catch {
+        Stop-WidgetResources
+        Show-WidgetFatalError (Get-WidgetText 'fatal.startProblem') (Get-WidgetText 'fatal.workerCause') (Get-WidgetText 'fatal.restoreFix')
+        return
+    }
 }
 $script:WidgetTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:WidgetTimer.Interval = [TimeSpan]::FromSeconds(1)
 $script:WidgetTimer.Add_Tick({
-    Complete-UsageRefresh
-    Update-WidgetCountdown
-    $script:RefreshTicks++
-    if ($script:RefreshTicks -ge 15) {
-        if (Start-UsageRefresh) { $script:RefreshTicks = 0 }
+    if (-not $script:IsDemoMode) {
+        Complete-UsageRefresh
+        $script:RefreshTicks++
+        if ($script:RefreshTicks -ge 15) {
+            if (Start-UsageRefresh) { $script:RefreshTicks = 0 }
+        }
     }
+    Update-WidgetCountdown
 })
 $script:WidgetTimer.Start()
 try {

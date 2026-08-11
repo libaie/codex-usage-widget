@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "sourceKind": "local-session-observation",
+  "cases": [
+    {
+      "id": "precision-and-tightest-window",
+      "input": "inputs/precision-and-tightest-window.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "secondary", "remainingPercent": "39.0", "cumulativeTokens": "9007199254741093",
+        "cacheHitTokens": "9007199254740000", "cacheMissTokens": "993", "contextTokens": "400", "contextLimit": "800",
+        "contextPercent": "50.0", "inputPercent": "75.0", "outputPercent": "25.0", "reasoningOutputPercent": "25.0",
+        "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 2 }
+      }
+    },
+    {
+      "id": "demo",
+      "input": "inputs/demo.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "55.0", "cumulativeTokens": "1200", "cacheHitTokens": "800",
+        "cacheMissTokens": "200", "contextTokens": "100", "contextLimit": "200", "contextPercent": "50.0",
+        "inputPercent": "75.0", "outputPercent": "25.0", "reasoningOutputPercent": "20.0", "observedAt": 1786406400000,
+        "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "partial",
+      "input": "inputs/partial.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 1 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "partial", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "30.0", "cumulativeTokens": null, "cacheHitTokens": null,
+        "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 1, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "unsupported",
+      "input": "inputs/unsupported.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 2, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "unsupported", "freshness": "current",
+        "selectedWindow": null, "remainingPercent": null, "cumulativeTokens": null, "cacheHitTokens": null, "cacheMissTokens": null,
+        "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null, "outputPercent": null,
+        "reasoningOutputPercent": null, "observedAt": null, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 1, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 0 }
+      }
+    },
+    {
+      "id": "all-malformed",
+      "input": "inputs/all-malformed.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 0, "malformedJsonLines": 1 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "error", "freshness": "current",
+        "selectedWindow": null, "remainingPercent": null, "cumulativeTokens": null, "cacheHitTokens": null, "cacheMissTokens": null,
+        "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null, "outputPercent": null,
+        "reasoningOutputPercent": null, "observedAt": null, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 0, "malformedLineCount": 1, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 0 }
+      }
+    },
+    {
+      "id": "empty",
+      "input": "inputs/empty.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 0, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "empty", "freshness": "current",
+        "selectedWindow": null, "remainingPercent": null, "cumulativeTokens": null, "cacheHitTokens": null, "cacheMissTokens": null,
+        "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null, "outputPercent": null,
+        "reasoningOutputPercent": null, "observedAt": null, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 0, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 0 }
+      }
+    },
+    {
+      "id": "reset-boundary",
+      "input": "inputs/reset-boundary.jsonl",
+      "nowUtc": "2026-08-11T00:00:00.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": null, "remainingPercent": null, "cumulativeTokens": null, "cacheHitTokens": null, "cacheMissTokens": null,
+        "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null, "outputPercent": null,
+        "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "overflow",
+      "input": "inputs/overflow.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "partial", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "50.0", "cumulativeTokens": null, "cacheHitTokens": null,
+        "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "cache-order",
+      "input": "inputs/cache-order.jsonl",
+      "nowUtc": "2026-08-11T00:03:00.000Z",
+      "fixtureStats": { "validJsonLines": 6, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "partial", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "49.0", "cumulativeTokens": "1000", "cacheHitTokens": "1000",
+        "cacheMissTokens": "0", "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406460000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 4, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "dst-safe-integer",
+      "input": "inputs/dst-safe-integer.jsonl",
+      "nowUtc": "2026-03-08T10:00:02.000Z",
+      "fixtureStats": { "validJsonLines": 2, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "88.0", "cumulativeTokens": "9007199254740992",
+        "cacheHitTokens": "9007199254740992", "cacheMissTokens": "0", "contextTokens": null, "contextLimit": null,
+        "contextPercent": null, "inputPercent": null, "outputPercent": null, "reasoningOutputPercent": null,
+        "observedAt": 1772964001000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 2, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "int64-max",
+      "input": "inputs/int64-max.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "99.0", "cumulativeTokens": "9223372036854775807",
+        "cacheHitTokens": "9223372036854775807", "cacheMissTokens": "0", "contextTokens": null, "contextLimit": null,
+        "contextPercent": null, "inputPercent": null, "outputPercent": null, "reasoningOutputPercent": null,
+        "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "same-timestamp-tie",
+      "input": "inputs/same-timestamp-tie.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "50.0", "cumulativeTokens": null, "cacheHitTokens": null,
+        "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 2 }
+      }
+    },
+    {
+      "id": "late-old-cycle",
+      "input": "inputs/late-old-cycle.jsonl",
+      "nowUtc": "2026-08-11T00:01:01.000Z",
+      "fixtureStats": { "validJsonLines": 3, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "60.0", "cumulativeTokens": null, "cacheHitTokens": null,
+        "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 3, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "limit-id-fallback",
+      "input": "inputs/limit-id-fallback.jsonl",
+      "nowUtc": "2026-08-11T00:01:01.000Z",
+      "fixtureStats": { "validJsonLines": 2, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "60.0", "cumulativeTokens": null, "cacheHitTokens": null,
+        "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406460000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 2, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "read-failure",
+      "scenario": "read-failure",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 0, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "error", "freshness": "current",
+        "selectedWindow": null, "remainingPercent": null, "cumulativeTokens": null, "cacheHitTokens": null, "cacheMissTokens": null,
+        "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null, "outputPercent": null,
+        "reasoningOutputPercent": null, "observedAt": null, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 0, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 1, "candidateFileCount": 1, "limitWindowCount": 0 }
+      }
+    }
+  ]
+}

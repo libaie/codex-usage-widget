@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "themes": [
+    { "id": "glacier", "nameKey": "theme.glacier", "start": "#7BFFE0", "end": "#55CFFF" },
+    { "id": "nebula", "nameKey": "theme.nebula", "start": "#D8A7FF", "end": "#7C8CFF" },
+    { "id": "ocean", "nameKey": "theme.ocean", "start": "#82D9FF", "end": "#4478FF" },
+    { "id": "sakura", "nameKey": "theme.sakura", "start": "#FFB1D8", "end": "#FF719D" },
+    { "id": "aurora", "nameKey": "theme.aurora", "start": "#7CFFB2", "end": "#38D989" },
+    { "id": "mica", "nameKey": "theme.mica", "start": "#F1F5FF", "end": "#9DAAC3" },
+    { "id": "sunset", "nameKey": "theme.sunset", "start": "#FFC28A", "end": "#FF806D" },
+    { "id": "lime", "nameKey": "theme.lime", "start": "#DCFF7C", "end": "#7DDB66" }
+  ],
+  "status": {
+    "warning": "#FFC857",
+    "critical": "#FF5E6C"
+  }
+}

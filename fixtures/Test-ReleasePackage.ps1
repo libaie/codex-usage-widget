@@ -10,10 +10,12 @@ $tempPathPattern = '(?i)AppData[\\/]+Local[\\/]+Temp'
 
 $commonRuntimePaths = @(
     'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs',
-    'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md',
+    'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md', 'DESIGN.md',
+    'docs\releasing.md', 'docs\releases\v1.1.0.md',
     'locales\en-US.json', 'locales\zh-CN.json', 'locales\zh-TW.json',
     'locales\ja-JP.json', 'locales\ko-KR.json',
     'assets\screenshots\widget-ring.png', 'assets\screenshots\widget-details.png',
+    'assets\screenshots\widget-ring-macos.png', 'assets\screenshots\widget-details-macos.png',
     'fixtures\rate-limits.jsonl', 'fixtures\Test-Launcher.ps1', 'fixtures\Test-ReleasePackage.ps1'
 )
 
@@ -59,8 +61,27 @@ if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage 'package root i
 $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
     $requiredPaths += @(
-        'SECURITY.md', 'CONTRIBUTING.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md',
-        'assets\social-preview.png'
+        'SECURITY.md', 'docs\qa-v1.1.0.md',
+        'assets\social-preview.png', 'fixtures\Test-Contract.ps1', 'fixtures\Test-WindowsDataBoundary.ps1',
+        'fixtures\Test-WorkerStability.ps1', 'fixtures\Test-Bootstrap.ps1',
+        'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\expected-state.json',
+        'fixtures\contract\v1\theme-catalog.json',
+        'fixtures\contract\v1\inputs\all-malformed.jsonl', 'fixtures\contract\v1\inputs\cache-order.jsonl',
+        'fixtures\contract\v1\inputs\dst-safe-integer.jsonl', 'fixtures\contract\v1\inputs\int64-max.jsonl',
+        'fixtures\contract\v1\inputs\demo.jsonl', 'fixtures\contract\v1\inputs\empty.jsonl',
+        'fixtures\contract\v1\inputs\late-old-cycle.jsonl', 'fixtures\contract\v1\inputs\limit-id-fallback.jsonl',
+        'fixtures\contract\v1\inputs\overflow.jsonl', 'fixtures\contract\v1\inputs\partial.jsonl',
+        'fixtures\contract\v1\inputs\precision-and-tightest-window.jsonl',
+        'fixtures\contract\v1\inputs\reset-boundary.jsonl', 'fixtures\contract\v1\inputs\unsupported.jsonl',
+        'fixtures\contract\v1\inputs\same-timestamp-tie.jsonl',
+        'scripts\Build-Windows.ps1', 'windows\Bootstrap\Program.cs',
+        'macos\CodexUsageWidget.xcodeproj\project.pbxproj',
+        'macos\CodexUsageWidget.xcodeproj\xcshareddata\xcschemes\CodexUsageWidget.xcscheme',
+        'macos\CodexUsageWidget\Info.plist', 'macos\CodexUsageWidget\App\main.swift',
+        'macos\CodexUsageWidget\Core\UsageCore.swift', 'macos\CodexUsageWidget\UI\WidgetUI.swift',
+        'macos\CodexUsageWidgetTests\CoreTests.swift', 'macos\CodexUsageWidgetTests\UIContractTests.swift',
+        'macos\CodexUsageWidgetUITests\WidgetUITests.swift',
+        '.github\workflows\ci.yml'
     )
 }
 
@@ -116,9 +137,13 @@ if (-not $RuntimeArchive) {
 
 $commonReadmeRequirements = @(
     'Start-CodexUsageWidget.vbs', 'zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR', 'LICENSE',
-    'assets/screenshots/widget-ring.png', 'assets/screenshots/widget-details.png'
+    'assets/screenshots/widget-ring.png', 'assets/screenshots/widget-details.png',
+    'assets/screenshots/widget-ring-macos.png', 'assets/screenshots/widget-details-macos.png',
+    'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-windows.zip',
+    'CodexUsageWidget-v1.1.0-macos.dmg', 'CONTRIBUTING.md', 'DESIGN.md', 'docs/releasing.md',
+    'docs/releases/v1.1.0.md', '-Demo', '--demo', 'Developer ID'
 )
-$zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x793E, 0x533A, 0x9879, 0x76EE) -join '')
+$zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
 $zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +
     ([char[]](0x5B98, 0x65B9, 0x9879, 0x76EE) -join '')
 $zhLocalSessionObservations = ([char[]](0x672C, 0x673A, 0x4F1A, 0x8BDD, 0x89C2, 0x6D4B) -join '')
@@ -127,7 +152,7 @@ $zhNotOfficialBillingOrAccountData = ([char[]](
 ) -join '')
 $readmeRequirements = @{
     'README.md' = @(
-        'README.zh-CN.md', 'independent community project', 'not an official OpenAI or Codex project',
+        'README.zh-CN.md', 'independent personal project', 'not an official OpenAI or Codex project',
         'local session observations', 'not official billing or account data'
     )
     'README.zh-CN.md' = @(
@@ -176,9 +201,22 @@ foreach ($readmePath in $readmeRequirements.Keys) {
 }
 
 if (-not $RuntimeArchive) {
-    $releaseNotesContent = [IO.File]::ReadAllText((Join-Path $package 'docs\releases\v1.0.0.md'))
-    if ([regex]::Matches($releaseNotesContent, 'reminders\.json', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -lt 2) {
-        Fail-ReleasePackage 'missing English or Chinese reminders.json privacy details in file: docs\releases\v1.0.0.md'
+    $documentationRequirements = @{
+        'CONTRIBUTING.md' = @('Test-Contract.ps1', 'Build-Windows.ps1', 'xcodebuild', '-Demo', '--demo', 'CODE_SIGNING_ALLOWED=NO')
+        'DESIGN.md' = @('local-session-observation', '-ScanWorker', '--scan-worker', 'cache-token-ledger.json')
+        'docs\releasing.md' = @('Developer ID Application', 'notar', 'Gatekeeper', 'manifest', 'CodexUsageWidget-v1.1.0-macos.dmg')
+        'docs\releases\v1.1.0.md' = @('Windows', 'macOS', 'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-macos.dmg', 'Developer ID')
+        'docs\qa-v1.1.0.md' = @('32/32', 'P9 E2E', 'Test-WorkerStability.ps1', '-Demo', '--demo')
+        'CHANGELOG.md' = @('## 1.1.0', 'macOS', '-Demo', '--demo')
+        '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest', 'Test-Bootstrap.ps1')
+    }
+    foreach ($documentationPath in $documentationRequirements.Keys) {
+        $documentationContent = [IO.File]::ReadAllText((Join-Path $package $documentationPath))
+        foreach ($requiredText in $documentationRequirements[$documentationPath]) {
+            if ($documentationContent.IndexOf($requiredText, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                Fail-ReleasePackage "missing '$requiredText' in file: $documentationPath"
+            }
+        }
     }
 }
 
