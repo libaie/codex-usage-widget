@@ -1258,7 +1258,11 @@ function Invoke-UsageScanWorker {
         }
     }
     catch {
-        [Console]::Error.WriteLine(('scan-worker:{0}:{1}' -f $workerStage, $_.Exception.GetType().Name))
+        $workerDetail = if ($workerStage -ceq 'deadline') {
+            ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Substring(0, [math]::Min(300, ([string]$_.Exception.Message -replace '[\r\n]+', ' ').Length))
+        }
+        else { '' }
+        [Console]::Error.WriteLine(('scan-worker:{0}:{1}:{2}' -f $workerStage, $_.Exception.GetType().Name, $workerDetail))
         return 2
     }
 }
