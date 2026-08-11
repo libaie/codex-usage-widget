@@ -1136,7 +1136,8 @@ function Get-WidgetLanguageCodes { @('zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR'
 function Get-WidgetRequiredLanguageKeys {
     @(
         'app.title', 'app.alreadyRunning',
-        'menu.showWidget', 'menu.showDetails', 'menu.hideDetails', 'menu.language', 'menu.exit',
+        'menu.showWidget', 'menu.hideWidget', 'menu.showDetails', 'menu.hideDetails', 'menu.language', 'menu.theme',
+        'menu.chooseDirectory', 'menu.resetState', 'menu.exit', 'action.cancel', 'action.reset',
         'language.zh-CN', 'language.zh-TW', 'language.en-US', 'language.ja-JP', 'language.ko-KR',
         'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura', 'theme.aurora', 'theme.mica', 'theme.sunset', 'theme.lime',
         'detail.title', 'detail.remaining', 'detail.observed', 'detail.status',
@@ -1144,7 +1145,9 @@ function Get-WidgetRequiredLanguageKeys {
         'task.noTokenData', 'task.activePrefix',
         'token.total', 'token.context', 'token.contextUsage', 'token.composition', 'token.input', 'token.output', 'token.reasoningShare',
         'cache.hit', 'cache.miss', 'cache.taskHit', 'cache.taskMiss', 'cache.localHit', 'cache.localMiss',
-        'status.waitingObservation', 'status.observationNormal', 'status.sufficient', 'status.attention', 'status.critical', 'status.waiting', 'status.unavailable', 'status.noData',
+        'status.waitingObservation', 'status.observationNormal', 'status.sufficient', 'status.attention', 'status.critical', 'status.waiting',
+        'status.unavailable', 'status.noData', 'status.partial', 'status.stale', 'status.unsupported', 'status.error',
+        'observed.recent', 'observed.older', 'demo.badge', 'reset.title', 'reset.body',
         'diagnostic.missingDirectory', 'diagnostic.emptyDirectory', 'diagnostic.readFailed', 'diagnostic.noValidEvent', 'diagnostic.unavailable',
         'limit.unknown', 'limit.days', 'limit.hours', 'limit.minutes',
         'countdown.daysHours', 'countdown.hoursMinutes', 'countdown.minutes', 'countdown.waiting',
@@ -2823,7 +2826,7 @@ if ($SelfTest) {
     Assert-Widget ((Resolve-WidgetLanguageCode 'JA-jp' ([cultureinfo]'en-US')) -ceq 'en-US') 'saved language codes should be case-sensitive.'
 
     $requiredLanguageKeys = @(Get-WidgetRequiredLanguageKeys)
-    Assert-Widget ($requiredLanguageKeys.Count -eq 100 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 100) 'the required language-key catalog should contain exactly 100 unique keys.'
+    Assert-Widget ($requiredLanguageKeys.Count -eq 115 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 115) 'the required language-key catalog should contain exactly 115 unique keys.'
     $temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     $temporaryLocaleRoot = Join-Path $temporaryParent ('CodexUsageWidget-Locale-' + [guid]::NewGuid().ToString('N'))
     $temporaryLocales = Join-Path $temporaryLocaleRoot 'locales'
@@ -2911,11 +2914,11 @@ if ($SelfTest) {
     Assert-Widget ((Get-WidgetText 'countdown.daysHours' @(2, 3)) -ceq '2 天 3 小时后重置') 'localized placeholders should format with the active culture.'
     $englishStrings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\en-US.json')) | ConvertFrom-Json -ErrorAction Stop).strings
     $englishKeys = @($englishStrings.PSObject.Properties.Name | Sort-Object)
-    Assert-Widget ($englishKeys.Count -eq 100 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 100 keys.'
+    Assert-Widget ($englishKeys.Count -eq 115 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 115 keys.'
     foreach ($code in $languageCodes) {
         $strings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot ('locales\' + $code + '.json'))) | ConvertFrom-Json -ErrorAction Stop).strings
         $keys = @($strings.PSObject.Properties.Name | Sort-Object)
-        Assert-Widget ($keys.Count -eq 100 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 100 keys as English.')
+        Assert-Widget ($keys.Count -eq 115 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 115 keys as English.')
         foreach ($key in $requiredLanguageKeys) {
             Assert-Widget (-not [string]::IsNullOrWhiteSpace([string]$strings.$key)) ($code + ' raw JSON should contain nonblank text for ' + $key + '.')
             $englishPlaceholders = @([regex]::Matches($englishStrings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)
