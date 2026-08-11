@@ -2,7 +2,7 @@
 
 日期：2026-08-11
 
-状态：已批准，等待实施计划
+状态：四轮审查已完成，等待实施；正式发布受 Apple 外部门禁约束
 
 ## 目标
 
@@ -1533,3 +1533,149 @@ open .build/Build/Products/Debug/CodexUsageWidget.app --args --demo
 无新增 DX TODO。发现的五类工作都属于 v1.1.0 可复现开发/发布的必要条件，已进入实施任务。
 
 **Phase 4 complete.** 独立 DX 审查提出 6 个 P1、2 个 P2；Codex CLI 不可用。计划把贡献者 TTHW 从“Windows 5–10 分钟、Mac 不可达”收敛为两端 ≤5 分钟的匿名 demo，并保留无密钥 CI 与真实 Mac 发布边界。
+
+## 最终聚合实施计划
+
+本节是唯一执行入口。前四个 AUTOPLAN 阶段保留为决策证据；其中的 CEO、Design、Engineering 与 DX 任务不得再作为四套并行清单分别实施。下面的 DAG 已去重文件所有权、测试入口与发布顺序。
+
+### 冻结结论
+
+- 功能版本固定为 `1.1.0`，根目录 `VERSION` 是唯一输入；构建、应用元数据、资产名、CHANGELOG、tag 和 Release 必须验证为同一值。
+- Windows 保留现有 PowerShell/WPF 运行核心，只新增一个 C# 单文件引导程序；不用新运行时、包管理器、安装器框架或业务代码副本。
+- macOS 使用一个 `CodexUsageWidget` Xcode app target，以及一个 unit-test target 和一个 UI-test target；`Core/` 与 `UI/` 只是目录边界，不建立 framework 或 Swift Package。
+- 两个平台不共享运行时代码，只共享 schema v1、匿名 fixtures、规范化期望快照与五语言资源契约。
+- 对外不提供 SDK 或通用 CLI。新增的 `-Demo`、`--demo` 与 `--self-test` 只是稳定的贡献/验证入口。
+- 不调用 Web API、不上传数据、不做遥测；用户选择网络文件系统时，只承认操作系统执行的文件 I/O，不承诺“绝对离线”。
+- 源码和未签名内部候选可在没有 Apple 账号时完成；公开 `v1.1.0` 必须等待 Developer ID、公证、Apple Silicon/Rosetta 与真实双显示器验收。
+
+### 权威依赖图
+
+```text
+E0 Apple 账号/证书/真实 Mac（用户与维护者，可从第一天并行） -------------------\
+                                                                              \
+P0 VERSION + schema v1 + 匿名 fixtures + expected -----------------------------+---> P9 签名/公证/真机
+  |                                                                            /           |
+  +--> P1 Windows 数据边界 --> P5 Windows UX + demo ---------------------------/            v
+  +--> P2 Windows EXE -------------------------------------------------------> P8 无密钥候选 --> P10 tag/draft/重下/公开
+  +--> P3 macOS Core -------> P6 macOS UX + demo -----------------------------/
+  +--> P4 无密钥 CI ----------------------------------------------------------/
+                               P5 + P6 ------> P7 文档/本地化/截图 -----------/
+```
+
+可并行窗口只有两处：P0 完成后 P1/P2/P3/P4 可并行；P5 与 P6 可并行。P7、P8、P9、P10 按依赖串行收口。共享文件在同一检查点只允许一个 owner。
+
+### 实施阶段与唯一文件所有权
+
+| 阶段 | 前置 | 唯一 owner 与文件 | 交付结果 | 完成门槛 |
+|---|---|---|---|---|
+| **P0 契约与版本** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端 runner 后续逐字节相等 |
+| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；有界扫描与可恢复 worker | invalid 偏好/账本/提醒原字节不变；累计值不下降；junction 越界访问为 0；10 秒预算后 UI 可继续刷新 |
+| **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
+| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 原生目录发现、解析、状态、账本、提醒；macOS 13+ | 共同快照、三态持久化、symlink containment、固定时钟、超时和单调账本全绿；没有第三方依赖 |
+| **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret | Windows 自检/检查器/EXE 与 Mac test/unsigned Universal build 全绿；日志无私有路径、session 或密钥 |
+| **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、`locales/*.json`、Windows UI 回归 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | 五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
+| **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Resources、UI-test target、`DESIGN.md` | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
+| **P7 文档、本地化与截图** | P5、P6 | Docs owner：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README、CHANGELOG、`docs/releases/v1.1.0.md`、发布截图 | 单一贡献入口、源码地图、平台资产表、升级/回滚、脱敏反馈格式、维护者 runbook | Windows-only、Mac-only、无证书维护者分别按文档完成允许路径；链接/命令/五语言键和字体宽度检查通过 |
+| **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单 | 同一 commit 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 共同契约、架构、隐私、哈希、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
+| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | Developer ID 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | `codesign`、`spctl`、`stapler` 全绿；实际拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
+| **P10 不可变发布** | P9 | Release maintainer + docs owner | annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | tag peeled SHA 等于候选；上传后全部重下验证；最后才公开；工作树、Release 与 README 指向一致 |
+
+### 可复制验证命令
+
+Windows 基线与候选：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\CodexUsageWidget.ps1 -SelfTest
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-ReleasePackage.ps1 -PackageRoot .
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\fixtures\Test-Launcher.ps1 -PackageRoot .
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Windows.ps1
+.\dist\candidate\CodexUsageWidget-v1.1.0-windows.exe --self-test
+```
+
+Windows 匿名 UI：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\CodexUsageWidget.ps1 -Demo
+```
+
+macOS Debug 测试、Universal 构建与匿名 UI：
+
+```bash
+VERSION_VALUE="$(tr -d '\r\n' < VERSION)"
+xcodebuild -project macos/CodexUsageWidget.xcodeproj -scheme CodexUsageWidget -destination 'platform=macOS' -derivedDataPath .build MARKETING_VERSION="$VERSION_VALUE" test
+xcodebuild -project macos/CodexUsageWidget.xcodeproj -scheme CodexUsageWidget -configuration Release -destination 'generic/platform=macOS' -derivedDataPath .build MARKETING_VERSION="$VERSION_VALUE" ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
+lipo -archs .build/Build/Products/Release/CodexUsageWidget.app/Contents/MacOS/CodexUsageWidget
+open .build/Build/Products/Debug/CodexUsageWidget.app --args --demo
+```
+
+正式 Mac 候选只在受保护环境运行：
+
+```bash
+codesign --verify --deep --strict --verbose=2 CodexUsageWidget.app
+spctl --assess --type execute --verbose=2 CodexUsageWidget.app
+xcrun stapler validate CodexUsageWidget-v1.1.0-macos.dmg
+shasum -a 256 -c CodexUsageWidget-v1.1.0-macos.dmg.sha256
+```
+
+任何超时或签名失败都必须非零退出、清理本次精确临时目录并给稳定阶段码；不得在错误中打印证书、secret、完整用户路径或会话内容。现有 launcher 回归不得无限等待，完整进程检查使用固定总预算。
+
+### 契约与回归矩阵
+
+| 边界 | 最小失败样本 | 必须保持的性质 |
+|---|---|---|
+| 解析 | 损坏 JSON、unknown schema、部分可读、全坏目录 | 坏记录不拖垮好记录；partial/unsupported/error/empty 不混淆 |
+| 数值 | `2^53+1`、Int64 overflow、乱序重复缓存记录 | decimal string 无精度丢失；checked addition；累计值不下降、不重计 |
+| 时间 | UTC epoch ms、DST 边界、30 分钟临界点 | 规范化结果不依赖本地时区；UI 再按 locale 格式化 |
+| 路径 | junction/symlink 越界、绝对/`..` ZIP entry、网络路径慢读 | containment 先验证；EXE 拒绝危险 entry；UI 在预算内进入可信陈旧/错误态 |
+| 持久化 | 三份状态文件缺失、有效、截断/无效 | invalid 永不被普通位置/主题/提醒保存覆盖；显式重置前保留原字节 |
+| demo | 本机已有真实 CODEX_HOME 与三份小组件状态 | 只读匿名 fixture；不读写真实状态、不通知、独立实例；退出后 SHA 不变 |
+| 本地化 | 五包缺键、额外键、占位符差异、长文本 | 完整键集/格式可解析；运行时缺可选包原子回退；真实字体无裁切 |
+| 窗口 | 四角/跨屏/热插拔/缩放/菜单栏与 Dock | 始终位于当前 `visibleFrame`；拖拽结束吸附；偏好保留屏幕身份与坐标 |
+| 发布 | tag/SHA 不一致、资产缺失、重下哈希错、公证拒绝 | 不移动 tag、不公开草稿；修复进入新 commit，已公开缺陷用 v1.1.1 |
+
+### 外部 Apple 门禁
+
+E0 不是代码决策，不能由 Codex 代替账号持有人完成，也不阻止 P0–P8：
+
+1. 用户本人加入 Apple Developer Program，完成实名、双重认证、协议与付款。
+2. 在可信 Mac 上创建 CSR，并由账号持有人签发 `Developer ID Application` 证书；证书私钥只留在钥匙串或受保护的 GitHub Environment，不发到聊天、不进仓库。
+3. 配置 `notarytool` 可用的 App Store Connect API key 或 Apple 公证凭据；日志只记录 key ID/issuer 的脱敏标识，不记录私钥。
+4. 准备至少一台 macOS 13+ Apple 芯片 Mac、Rosetta 和真实双显示器；完成 P9 的 UI、通知、Gatekeeper 与吸附记录。
+5. 以上任一项缺失时，允许继续源码、CI 和 unsigned 内部候选，但禁止创建或公开正式 `v1.1.0` tag/Release。
+
+### 正式资产与恢复
+
+公开 Release 的精确资产为：
+
+- `CodexUsageWidget-v1.1.0-windows.exe`
+- `CodexUsageWidget-v1.1.0-windows.exe.sha256`
+- `CodexUsageWidget-v1.1.0-windows.zip`
+- `CodexUsageWidget-v1.1.0-windows.zip.sha256`
+- `CodexUsageWidget-v1.1.0-macos.dmg`
+- `CodexUsageWidget-v1.1.0-macos.dmg.sha256`
+- GitHub 从同一 annotated tag 自动生成的 source archives
+
+候选失败只清理本次精确临时产物，保留当前公开版本和用户状态。公开前发现代码问题时创建新 commit 并重走 P8–P10，不移动既有 tag；公开后发现严重问题时下线受影响二进制、恢复 v1.0.0 推荐入口并发布 v1.1.1，不删除 v1.1.0 的 tag 或审计记录。
+
+### 实施就绪结论
+
+- 产品、架构、交互、统计语义、文件所有权、命令、测试、隐私、升级和发布顺序均已定案。
+- 当前可以从 P0 开始实施，且可以在没有 Apple 账号的情况下完成到 P8。
+- 公开发布仍明确依赖 E0/P9；这是外部执行门禁，不是待选方案。
+- 本计划阶段不推送、不创建 PR、tag 或 Release，也不触碰现有 v1.0.0 用户安装。
+
+## GSTACK REVIEW REPORT
+
+| 审查 | 运行 | 状态 | 结果 |
+|---|---:|---|---|
+| CEO | 1 | CLEAN | SELECTIVE EXPANSION；7 项提议，5 项纳入，2 项延后；0 未决 |
+| Codex Review | 0 | UNAVAILABLE | CLI 访问被拒绝：`[codex-unavailable: access denied]`；不声称跨模型共识 |
+| Engineering | 1 | CLEAN | FULL_REVIEW；9 个 P1、0 个 P0；全部进入权威 DAG |
+| Design | 1 | CLEAN | 7.2/10 → 9.8/10；14 个决策已定案；0 未决 |
+| Developer Experience | 1 | CLEAN | 5.1/10 → 8.8/10；TTHW 从 Windows 5–10 分钟/Mac 不可达到 demo ≤5 分钟、全 gate 10/15 分钟 |
+
+独立 CEO、设计、工程与 DX 声音均已运行；缺失的 `dx-hall-of-fame.md` 已如实降级记录，没有伪造参考内容。四轮审查之间的冲突已按最小方案消解：保留 Windows 稳定核心、Mac 只建一个 app target、共享数据契约而非运行时、使用原生构建入口、正式双平台 Release 保持同步门禁。
+
+最终判定：**CEO + DESIGN + ENGINEERING + DX CLEARED — READY TO IMPLEMENT**。源码实施可立即开始；正式公开发布仅被 Apple 账号/证书、公证和真实 Mac 设备证据阻塞。当前没有需要用户继续选择的产品或工程决策。
+
+NO UNRESOLVED DECISIONS
