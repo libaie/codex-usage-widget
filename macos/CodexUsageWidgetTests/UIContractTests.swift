@@ -108,4 +108,43 @@ final class UIContractTests: XCTestCase {
             ScanWorker.encodePayload(result, generation: generation), generation: generation)
         XCTAssertEqual(decoded.selectedLimit, result.selectedLimit)
     }
+
+    func testHoverPinDragAndEscapeShareOneInteractionStateMachine() {
+        var interaction = WidgetInteractionState()
+        interaction.pointerEnteredRing(at: 0)
+        XCTAssertFalse(interaction.advance(to: 0.179))
+        XCTAssertTrue(interaction.advance(to: 0.180))
+        XCTAssertEqual(interaction.detailMode, .temporary)
+
+        interaction.pointerExitedRing(at: 0.200)
+        interaction.pointerEnteredDetail(at: 0.300)
+        XCTAssertFalse(interaction.advance(to: 0.450))
+        XCTAssertEqual(interaction.detailMode, .temporary)
+        interaction.pointerExitedDetail(at: 0.500)
+        XCTAssertFalse(interaction.advance(to: 0.749))
+        XCTAssertTrue(interaction.advance(to: 0.750))
+        XCTAssertEqual(interaction.detailMode, .closed)
+
+        interaction.pointerEnteredRing(at: 1)
+        interaction.pointerDown(at: CGPoint(x: 10, y: 10))
+        XCTAssertFalse(interaction.pointerMoved(to: CGPoint(x: 13, y: 10)))
+        XCTAssertTrue(interaction.pointerMoved(to: CGPoint(x: 15, y: 10)))
+        XCTAssertTrue(interaction.pointerUp())
+        XCTAssertEqual(interaction.detailMode, .closed)
+
+        interaction.togglePinned()
+        XCTAssertEqual(interaction.detailMode, .pinned)
+        interaction.escape()
+        XCTAssertEqual(interaction.detailMode, .closed)
+    }
+
+    func testDemoUsesTheReviewedFixtureWithoutASeparateParser() throws {
+        let result = try WidgetDemo.load(
+            fixtureURL: repositoryRoot.appendingPathComponent("fixtures/contract/v1/inputs/demo.jsonl"),
+            now: fixedNow
+        )
+        XCTAssertEqual(result.state.remainingPercent, "55.0")
+        XCTAssertEqual(result.selectedLimit?.windowMinutes, 300)
+        XCTAssertTrue(result.sessions.isEmpty)
+    }
 }
