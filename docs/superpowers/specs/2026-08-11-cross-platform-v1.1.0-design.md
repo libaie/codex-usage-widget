@@ -1041,7 +1041,7 @@ C# single-file bootstrap                Xcode build -> Universal .app -> DMG
 
 刷新使用进程隔离而不是尝试强制取消进程内文件 I/O。Windows 每次刷新通过标准库 `System.Diagnostics.Process` 启动隐藏的 Windows PowerShell `-ScanWorker` 子进程（`UseShellExecute=false`、`CreateNoWindow=true`）；macOS 通过 Foundation `Process` 运行同一个应用可执行文件的 `--scan-worker` 模式，不新增 helper target。主进程保留现有平台 UI 与生命周期控制，只有子进程访问 Codex 数据目录。worker 分支必须在 WPF/AppKit、托盘/菜单栏、实例锁、本地化 UI 和持久化状态初始化之前返回，不能为只读扫描加载界面程序集。
 
-扫描子进程严格只读，不得写偏好、累计账本或 `reminders.json`。它只输出 schema v1 的规范化快照与逐会话令牌计数；主进程在校验退出码、结果大小（最大 256 KiB）、schema 和字段边界后，才更新内存状态并作为唯一 writer 原子保存累计账本与提醒。数据目录与结果通道通过子进程环境/私有临时目录传递，不进入命令行或日志；每轮只创建一个精确临时目录，Windows ACL 仅允许当前用户，macOS 权限为 `0700`。成功、失败和超时都只清理本轮目录；启动时只清理应用专属根下、通过名称与所有者校验且超过 24 小时的孤儿目录，不跟随 reparse point/symlink。
+扫描子进程严格只读，不得写偏好、累计账本或 `reminders.json`。它只输出 schema v1 的规范化快照与逐会话令牌计数。生产端先校验字段/集合上限，并按 JSON 最坏转义后的 UTF-8 字节数计算保守上界；超过 256 KiB 时不序列化、不写结果。序列化后再校验精确字节数，只有不超过 256 KiB 才从本轮 `.tmp` 原子落为结果文件。主进程还要独立校验退出码、文件大小、schema 和字段边界，之后才更新内存状态并作为唯一 writer 原子保存累计账本与提醒。数据目录与结果通道通过子进程环境/私有临时目录传递，不进入命令行或日志；每轮只创建一个精确临时目录，Windows ACL 仅允许当前用户，macOS 权限为 `0700`。成功、失败和超时都只清理本轮目录；启动时只清理应用专属根下、通过名称与所有者校验且超过 24 小时的孤儿目录，不跟随 reparse point/symlink。
 
 worker 在第一次目录访问前启动独立的 12 秒自终止看门狗，正常退出时撤销。Windows 使用进程内标准 .NET timer 调用 `Environment.Exit`，macOS 使用独立 Dispatch timer 调用 `_exit`；它们不启动第二个 helper。父进程仍在 10 秒用户预算处主动终止并等待最多 2 秒。这样即使主进程崩溃、被强制结束或睡眠期间消失，阻塞 I/O 的孤儿生命周期也有 12 秒硬上限；看门狗退出码和父超时一样不得产生可提交结果。
 
@@ -1081,7 +1081,7 @@ macos/
 | 任务索引 | 只读最后 1 MiB；最多接受 10,000 行、任务名 500 字符。 |
 | 单次刷新 | 使用单调时钟预算 10 秒；同一时刻只有一个只读扫描子进程。到期立即把 UI 转为 stale/error，精确终止并回收该 PID，下一 tick 创建新子进程且不排队。 |
 | worker 启动 | Windows 空输入 worker 从创建进程到校验空结果的 p95 不超过 750 ms；Mac p95 不超过 300 ms。两端实际 30 文件刷新仍受 2 秒 p95 与 10 秒硬截止共同约束，不能用延长 15 秒刷新间隔掩盖回归。 |
-| 扫描结果 | 子进程结果最大 256 KiB；主进程校验退出码、schema、Int64 字符串、集合上限和稳定排序后才一次提交。无效、截断或超限结果按 `error`，不得更新账本或提醒。 |
+| 扫描结果 | producer 在序列化前按字段/集合和最坏 UTF-8 JSON 转义预算拒绝超限，序列化后复核精确字节；结果文件始终不超过 256 KiB。主进程再次校验大小、退出码、schema、Int64 字符串、集合上限和稳定排序后才一次提交。无效、截断或超限按 `error`，不得更新账本或提醒。 |
 | UI 线程 | 不做目录/文件/JSON I/O；整份不可变 view state 一次提交，自动性能夹具目标小于一帧（16 ms）。 |
 | 正常夹具 | 30 个最大尾读文件的本地刷新 p95 < 2 秒；CI 记录耗时但不上传用户数据。 |
 | 稳态资源 | 15 秒周期连续 120 次刷新：活动 worker 始终 `0..1`，结束宽限后残留子进程和临时目录为 0，父进程 handle/file descriptor 增量不超过 8、private bytes/RSS 相对第 10 次暖机后不增长超过 20 MiB；单个 worker 峰值 RSS 不超过 128 MiB。 |
@@ -1107,7 +1107,7 @@ macos/
 | Windows EXE 同时首次启动 | 引导使用版本级命名锁；只有锁 owner 释放/校验，其他实例等待有界时间后复用完整版本。主程序继续使用现有应用 mutex。 |
 | EXE 释放中终止 | 只留下本次临时目录；下次清理同版本孤儿临时目录，旧完整版本不变。 |
 | 偏好写与退出竞争 | 复用原子写；退出只等待当前小文件写入，不等待新扫描。 |
-| Mac 第二次启动 | 由单应用激活现有实例，不创建第二份账本 writer。 |
+| Mac 第二次启动 | `Info.plist` 设置 `LSMultipleInstancesProhibited=YES`，正常启动激活现有实例；主进程还在 Application Support 应用目录持有生命周期 POSIX 排他锁，直接运行二进制或竞态启动也只有锁 owner 能成为持久化 writer。非 owner 不扫描、不写状态，激活已有实例后退出。 |
 | 睡眠/唤醒 | 唤醒时把睡眠前 worker 视为超时并精确回收；取消陈旧 timer 计算，立即刷新并从绝对 UTC 时间重算。 |
 | 显示器断开 | 下一主线程帧把圆环和详情夹紧到仍存在的 `visibleFrame`，随后才保存有效位置。 |
 | 任务在焦点中消失 | 关闭任务详情，焦点回到圆环或任务列表标题，不指向已释放对象。 |
@@ -1130,6 +1130,7 @@ macos/
 | 提醒权限/去重/点击 | 固定时钟/周期 | restart + `reminders.json` | 拒绝、启用、点击、过期 | 真机通知 |
 | Windows EXE 校验/并发/中断 | 清单自检 | 双进程首次启动、损坏载荷、落位时终止 | 无 cmd、可见错误 | 下载 EXE 启动；内嵌 ZIP SHA 等于公开 ZIP SHA |
 | Mac Universal/签名/公证 | 架构检查 | codesign/notary/staple | Gatekeeper 首启 | Apple Silicon + Rosetta |
+| Mac 单实例 writer | `Info.plist` + 锁状态机 | 同时启动 app 与直接二进制 | 激活已有实例 | 只有一个锁 owner；三状态文件无并发写 |
 | 发布 tag/草稿/重下/回滚 | workflow lint | SHA/ref mismatch、上传中断 | Release 页面资产 | 三资产下载哈希 |
 | 最小启动错误 | 内置资源测试 | 损坏 bootstrap/英语包缺失 | 不依赖外部包的双语错误 | 候选破坏测试 |
 
@@ -1197,6 +1198,7 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 6. **CRITICAL — 测试夹具本身有界。** `Test-Launcher.ps1` 的进程启动、probe 等待、CIM/WMI 查询和清理共享一个固定总预算；查询不可用或超时时必须给稳定环境阶段码、非零退出，并只终止/删除本轮精确 probe 与临时目录。CI 外层保留更大的兜底 timeout，但不能代替夹具内部边界。
 7. **CRITICAL — 进程隔离不能变成资源泄漏。** 最终 worker 必须通过空输入冷启动、30 个最大文件和连续 120 次刷新三档基准；另在阻塞 I/O 中强制结束父进程，worker 必须在创建后 12 秒内自行退出。达到启动、2 秒刷新、CPU/RSS、handle/fd 或残留门槛即失败，不得通过降低刷新频率、隐藏失败输出或改成常驻服务绕过。
 8. **CRITICAL — 调度不能提交过期代次。** 测试在扫描即将完成时切换数据目录，并让旧结果先于终止通知落地；旧代次必须整份丢弃。另让启动连续失败 60 秒，自动尝试不得超过 4 次，UI timer 仍保持响应。
+9. **CRITICAL — 256 KiB 在 producer 端同样是硬边界。** 超长任务名、最大 Unicode 转义膨胀和超量集合必须在序列化或结果落位前失败；私有目录中任何结果/`.tmp` 均不得超过 256 KiB，父端仍独立拒绝手工伪造的超限文件。
 
 所有新增非平凡分支至少落一个能在错误选择时失败的最小检查。业务数值由纯测试承担；真实 UI 自动化只验证平台集成、视觉和辅助功能，避免脆弱重复断言。
 
@@ -1211,9 +1213,11 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 | 刷新调度 | 启动失败后每秒重试、切目录后旧结果晚到 | 每次尝试重置 15 秒周期；目录代次不等则丢弃 | 60 秒启动失败最多 4 次；旧目录结果永不提交。 |
 | 文件读取 | 锁定、慢网络卷、权限丢失 | 终止只读扫描子进程并保留上次可信快照 | 精确 PID 被回收；用户状态不变；下一周期成功且无无界进程。 |
 | 生命周期 | 退出/睡眠与扫描重叠、自然退出撞 deadline | 单终态、精确句柄回收、退出最多等待 2 秒 | 哨兵不受影响；下次启动清理唯一孤儿目录。 |
+| Mac 单实例 | app 与直接二进制竞态启动 | `LSMultipleInstancesProhibited` + 生命周期 POSIX 排他锁；非 owner 激活已有实例后退出 | 双进程测试只有一个 writer，账本/提醒无竞争。 |
 | 父进程异常消失 | 阻塞 worker 失去父计时器 | worker 独立 12 秒看门狗自终止；不提交结果 | 强停父进程后 worker 在硬截止内消失且三状态文件不变。 |
 | 稳态资源 | worker 重叠、进程/目录/handle/fd/RSS 累积 | tick 合并、每轮释放、超限阻断候选 | 120 次刷新满足资源门槛且 0 残留。 |
 | 扫描结果通道 | 截断、超 256 KiB、错误 schema、伪造字段 | 拒绝整份结果；不更新账本或提醒 | 每类坏结果都保持旧快照和三状态文件原字节。 |
+| producer 输出预算 | 超长源字段、JSON 转义膨胀、集合异常 | 序列化前保守字节预算 + 序列化后精确复核；`.tmp` 不落为结果 | 私有目录中不存在大于 256 KiB 的结果或残留临时文件。 |
 | 路径 | junction/symlink 越根 | 拒绝文件，绝不打开 | 越界目标访问计数保持 0。 |
 | 数字 | `2^53+1`、Int64 overflow | 字符串保真 / invalid | Windows 与 Swift 输出逐字节一致；overflow 不环绕。 |
 | 时间 | DST、回拨、`resetAt==now` | UTC 重算、过期过滤 | 固定时钟两端一致。 |
@@ -1254,7 +1258,7 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T2（P1，人工约 2 天 / AI 约 2 小时）— Windows 数据边界 — 修复分类、持久化、路径与预算根因**
   - 来源：发现 1/2/3/5。
   - 文件：`CodexUsageWidget.ps1`、`-SelfTest` 内最小断言。
-  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 在 UI 初始化前分支，结果上限、静默/无副作用和协议校验；大目录/锁定文件超时及自然退出竞态只经原始进程句柄收口一次、无误杀、三状态文件不变且下一 tick 恢复；junction 越界访问为 0；冷启动/30 文件/120 次刷新满足性能与资源门槛。
+  - 验证：invalid 三文件 byte-identical；partial/unsupported/error 不混为 empty；正常/worker/demo 共用解析函数且删除 Runspace 业务函数复制；只读 `-ScanWorker` 在 UI 初始化前分支，producer 最坏 UTF-8 预算/精确字节复核、父端结果上限、静默/无副作用和协议校验；大目录/锁定文件超时及自然退出竞态只经原始进程句柄收口一次、无误杀、三状态文件不变且下一 tick 恢复；junction 越界访问为 0；冷启动/30 文件/120 次刷新满足性能与资源门槛。
 - [ ] **ENG-T3（P1，人工约 2 天 / AI 约 2 小时）— Windows 分发 — 最小单文件 EXE 引导**
   - 来源：CEO-T2、并发/信任边界。
   - 文件：单一 C# 引导源码、一个构建入口、现有 release checker/launcher fixture。
@@ -1262,7 +1266,7 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T4（P1，人工约 4 天 / AI 约 4 小时）— macOS Core — 建立一个 app target 的解析与本地状态**
   - 来源：发现 5/6/7、CEO-T3。
   - 文件：`macos/CodexUsageWidget/Core/*`、`macos/CodexUsageWidgetTests/*`。
-  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 在 AppKit 初始化前分支且静默/只读/无副作用、输出拒绝、超时与自然退出竞态回收和单调账本；冷启动/30 文件/120 次刷新满足性能与资源门槛；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
+  - 验证：`xcodebuild test` 通过全部共同快照、三态持久化、symlink、固定时钟、同一可执行文件 `--scan-worker` 在 AppKit 初始化前分支且静默/只读/无副作用、producer 最坏 UTF-8 预算/精确字节复核、父端输出拒绝、超时与自然退出竞态回收和单调账本；`LSMultipleInstancesProhibited=YES`，app 与直接二进制双启动时只有一个 POSIX 锁 owner/writer；冷启动/30 文件/120 次刷新满足性能与资源门槛；`ENABLE_APP_SANDBOX=NO`、自动发现和手选目录通过；不增加 helper target。
 - [ ] **ENG-T5（P1，人工约 1 天 / AI 约 1 小时）— CI — 建立无密钥双平台构建**
   - 来源：发现 8/9、CEO-T5。
   - 文件：`.github/workflows/*`、版本/资产清单验证。
@@ -1680,9 +1684,9 @@ P0 VERSION + schema v1 + 匿名 fixtures + expected ----------------------------
 | 阶段 | 前置 | 唯一 owner 与文件 | 交付结果 | 完成门槛 |
 |---|---|---|---|---|
 | **P0 契约、版本与语言资源** | 无 | Contract owner：`VERSION`、`fixtures/contract/v1/**`、`expected-state.json`、`theme-catalog.json`、`locales/*.json`、schema/fixture runner | `1.1.0` 单一版本；匿名 demo；Int64/UTC/银行家舍入/null/排序/状态语义；八主题目录；五语言键与占位符固定 | `2^53+1`、overflow、DST、并列、全坏、unknown、partial 样本由人工审阅 expected；两端原生主题目录逐项匹配；五包键集/格式/长度全绿；两端 runner 后续逐字节相等 |
-| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；标准库 `Process` 启动只读隔离扫描；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；worker 在 UI 初始化前分支且静默无副作用；invalid 三文件原字节不变；结果协议有界；累计值不下降；junction 越界访问为 0；deadline/自然退出竞态无误杀且下一 tick 恢复；冷启动、30 文件和 120 次刷新资源门槛全绿 |
+| **P1 Windows 数据边界** | P0 | Windows core owner：`CodexUsageWidget.ps1`，随后把文件移交 P5 | `missing/valid/invalid` 三态；完整/部分/不支持/错误/空分类；标准库 `Process` 启动只读隔离扫描；producer/consumer 双重 256 KiB 边界；主进程唯一持久化；删除 Runspace 业务函数复制 | 正常/worker/demo 共用解析；worker 在 UI 初始化前分支且静默无副作用；producer 最坏 UTF-8 预算、精确字节复核和父端伪造超限拒绝全绿且无大文件残留；invalid 三文件原字节不变；累计值不下降；junction 越界访问为 0；deadline/自然退出竞态无误杀且下一 tick 恢复；冷启动、30 文件和 120 次刷新资源门槛全绿 |
 | **P2 Windows EXE** | P0；最终嵌包等 P1 | Windows distribution owner：`windows/Bootstrap/Program.cs`、`scripts/Build-Windows.ps1`、现有 release/launcher 检查 | 使用系统 C# 编译器的最小单文件 bootstrap；版本目录、清单/SHA、先临时后落位、隐藏启动 | 首次/重复/并发/损坏/中止全过；内嵌 ZIP 与公开 ZIP 字节/解压 SHA 一致；没有可见 CMD/PowerShell；不写用户三份状态文件；EXE `--self-test` 通过 |
-| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、worker 在 AppKit 初始化前分支且静默无副作用、deadline/自然退出竞态无误杀和单调账本全绿；冷启动、30 文件和 120 次刷新资源门槛全绿；没有第三方依赖或 helper target |
+| **P3 macOS Core** | P0 | Mac core owner：`macos/CodexUsageWidget.xcodeproj`、`macos/CodexUsageWidget/Core/**`、unit-test target | 非沙盒 Developer ID 原生目录发现、解析、状态、账本、提醒；同一 app executable 的只读 `--scan-worker`；producer/consumer 双重 256 KiB 边界；系统单实例声明 + 生命周期 POSIX writer 锁；macOS 13+ | `ENABLE_APP_SANDBOX=NO`、`LSMultipleInstancesProhibited=YES`、app/直接二进制双启动仅一个锁 owner、自动/手选目录、共同快照、三态持久化、symlink containment、固定时钟、producer 最坏 UTF-8 预算/精确字节复核、父端超限拒绝、worker 静默无副作用、deadline/自然退出竞态无误杀和单调账本全绿；冷启动、30 文件和 120 次刷新资源门槛全绿；没有第三方依赖或 helper target |
 | **P4 无密钥 CI** | P0 | CI owner：`.github/workflows/ci.yml` 与契约/版本/资产检查 | Windows 与 macOS PR 构建；fork PR 不读取发布 secret；Mac bundle 直接打包根语言文件；平台使用原生验证入口 | Windows 自检/PowerShell 检查器/EXE 与 Mac xcodebuild/lipo/bundle tests 全绿；PR 旧提交可取消，Windows 20 分钟/Mac 30 分钟硬超时；Mac job 不依赖 PowerShell；包内五语言 SHA 与根文件一致；日志无私有路径、session 或密钥 |
 | **P5 Windows UX 与 demo** | P1 | Windows UX owner：`CodexUsageWidget.ps1`、Windows UI 回归；根语言包与主题契约只读 | 六种状态、180/250 ms 交互、拖拽吸附、固定详情、键盘/无障碍、匿名 `-Demo` | Windows 原生主题目录逐项匹配 P0；五语言八主题真实截图；4 点拖拽；Esc/固定；partial/stale；demo 前后用户状态存在性与 SHA 不变 |
 | **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Mac 专属 Resources、根语言包只读引用、UI-test target、`DESIGN.md`；主题契约只读 | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | Mac 原生主题目录逐项匹配 P0；App bundle 五语言 SHA 与根文件一致；VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
