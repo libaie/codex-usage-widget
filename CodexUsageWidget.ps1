@@ -1410,6 +1410,7 @@ function Start-UsageScanProcess {
     if ([IO.Directory]::Exists($channelPath) -or [IO.File]::Exists($channelPath)) { throw 'Scan output already exists.' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
     $security.SetAccessRuleProtection($true, $false)
     $rule = [Security.AccessControl.FileSystemAccessRule]::new(
         $identity.Name,

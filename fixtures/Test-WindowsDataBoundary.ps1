@@ -23,6 +23,7 @@ function Get-FixtureSnapshot([string]$TestRoot, [string]$Package, [string]$Name)
 function New-PrivateWorkerChannel([string]$Path) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
     $security.SetAccessRuleProtection($true, $false)
     [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         $identity.Name,
