@@ -242,6 +242,7 @@ enum UsageContract {
         let hasCodexLimit = candidates.contains {
             ($0.limits["limit_id"] as? String) == "codex" && !$0.windows.isEmpty
         }
+        if candidates.contains(where: { parsedTokenDetails($0.payload).invalid }) { dataIssue = true }
         let selectedCandidates = candidates.filter { candidate in
             let rawLimitID = candidate.limits["limit_id"]
             if hasCodexLimit {
@@ -276,7 +277,6 @@ enum UsageContract {
 
         for (index, candidate) in selectedCandidates.enumerated() {
             let parsed = parsedTokenDetails(candidate.payload)
-            if parsed.invalid { dataIssue = true }
             guard currentCandidateIndices.contains(index), let details = parsed.details else { continue }
             let timestamp = candidate.windows[0].observedAt
             if tokenRank == nil || details.rank > tokenRank! || (details.rank == tokenRank! && timestamp > tokenTimestamp) {
