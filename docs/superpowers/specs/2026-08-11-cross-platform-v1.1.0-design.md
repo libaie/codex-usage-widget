@@ -1199,6 +1199,7 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 7. **CRITICAL — 进程隔离不能变成资源泄漏。** 最终 worker 必须通过空输入冷启动、30 个最大文件和连续 120 次刷新三档基准；另在阻塞 I/O 中强制结束父进程，worker 必须在创建后 12 秒内自行退出。达到启动、2 秒刷新、CPU/RSS、handle/fd 或残留门槛即失败，不得通过降低刷新频率、隐藏失败输出或改成常驻服务绕过。
 8. **CRITICAL — 调度不能提交过期代次。** 测试在扫描即将完成时切换数据目录，并让旧结果先于终止通知落地；旧代次必须整份丢弃。另让启动连续失败 60 秒，自动尝试不得超过 4 次，UI timer 仍保持响应。
 9. **CRITICAL — 256 KiB 在 producer 端同样是硬边界。** 超长任务名、最大 Unicode 转义膨胀和超量集合必须在序列化或结果落位前失败；私有目录中任何结果/`.tmp` 均不得超过 256 KiB，父端仍独立拒绝手工伪造的超限文件。
+10. **CRITICAL — 发布必须消费 P9 的同一不可变候选。** 测试分别替换 artifact ID、artifact digest、manifest SHA、候选 commit、资产名称/大小/SHA 或证据摘要；P10 必须在创建 tag 或上传草稿前失败。P10 不得按 artifact 名称搜索、重新构建或从 workspace 补文件。
 
 所有新增非平凡分支至少落一个能在错误选择时失败的最小检查。业务数值由纯测试承担；真实 UI 自动化只验证平台集成、视觉和辅助功能，避免脆弱重复断言。
 
@@ -1218,6 +1219,7 @@ QA 与候选验收的主输入为 [`../plans/2026-08-11-cross-platform-v1.1.0-te
 | 稳态资源 | worker 重叠、进程/目录/handle/fd/RSS 累积 | tick 合并、每轮释放、超限阻断候选 | 120 次刷新满足资源门槛且 0 残留。 |
 | 扫描结果通道 | 截断、超 256 KiB、错误 schema、伪造字段 | 拒绝整份结果；不更新账本或提醒 | 每类坏结果都保持旧快照和三状态文件原字节。 |
 | producer 输出预算 | 超长源字段、JSON 转义膨胀、集合异常 | 序列化前保守字节预算 + 序列化后精确复核；`.tmp` 不落为结果 | 私有目录中不存在大于 256 KiB 的结果或残留临时文件。 |
+| 发布候选绑定 | P9/P10 间替换 artifact、manifest、资产或证据 | P9 单 artifact + ID/digest/manifest SHA job outputs；P10 只按 ID 下载并逐字段复核 | 任一绑定不一致都在 tag/draft 前失败；不从名称搜索或 workspace 补文件。 |
 | 路径 | junction/symlink 越根 | 拒绝文件，绝不打开 | 越界目标访问计数保持 0。 |
 | 数字 | `2^53+1`、Int64 overflow | 字符串保真 / invalid | Windows 与 Swift 输出逐字节一致；overflow 不环绕。 |
 | 时间 | DST、回拨、`resetAt==now` | UTC 重算、过期过滤 | 固定时钟两端一致。 |
@@ -1282,25 +1284,26 @@ ENG-T1 契约/预期快照（串行冻结）
 - [ ] **ENG-T8（P1，人工约 2 天 + 外部等待 / AI 约 1 小时）— 候选 — 签名、公证与真实设备 gate**
   - 来源：发现 9、CEO-T5。
   - 文件：受保护 release workflow、codesign/notary/staple 脚本、候选清单。
-  - 验证：受保护 job 以输入的完整 commit SHA 做 detached checkout 并重建，`release` 并发组 `cancel-in-progress: false`；Developer ID、notary、Gatekeeper、Apple Silicon、Rosetta、双显示器通过，公证轮询最多 45 分钟。账号/证书缺失或任一 job 超时时保持 BLOCKED，不创建 tag。
+  - 验证：受保护 job 以输入的完整 commit SHA 做 detached checkout 并重建，`release` 并发组 `cancel-in-progress: false`；Developer ID、notary、Gatekeeper、Apple Silicon、Rosetta、双显示器通过，公证轮询最多 45 分钟。P9 生成包含版本、完整 commit SHA、六个资产名称/字节数/SHA-256 和脱敏签名/公证/真机证据的规范 manifest，把 manifest 与六个资产只上传为一个 immutable artifact，并记录 `artifact-id`、artifact digest 与 manifest SHA-256。账号/证书缺失、证据不全或任一 job 超时时保持 BLOCKED，不创建 tag。
 - [ ] **ENG-T9（P1，人工约 1 天 / AI 约 1 小时）— 发布 — 文档、资产与不可变 v1.1.0**
   - 来源：CEO-T6、发现 4/9。
   - 文件：双语 README、`CHANGELOG.md`、release notes、截图和 GitHub Release 元数据。
-  - 验证：从已验证 SHA 创建 tag；核对 tag target；创建草稿；上传 Windows EXE/ZIP、macOS DMG 及 hashes；重下验证后公开。源码由同一 tag 的 GitHub source archives 提供。
+  - 验证：从已验证 SHA 创建 tag；核对 tag target；P10 只按 P9 输出的精确 `artifact-id` 下载一次，复核 artifact digest、manifest SHA-256 及逐资产 name/size/SHA 后创建草稿并原样上传；重下后再次对同一 manifest 验证才公开。源码由同一 tag 的 GitHub source archives 提供。
 
 ### 精确发布与回滚顺序
 
-CI 的普通 PR workflow 只验证无密钥候选，可取消同分支旧提交；受保护 release workflow 必须串行、不得被新 run 自动取消。所有 job 有硬 `timeout-minutes`，公证轮询和 Release 重下也各自有内部截止时间；外层 Actions 超时只作兜底。签名 secret 只在无密钥 P8 结果已绑定完整候选 SHA、进入 `release` environment 并人工批准后注入，步骤输出与上传 artifact 均不得包含凭据。
+CI 的普通 PR workflow 只验证无密钥候选，可取消同分支旧提交；受保护 release workflow 必须串行、不得被新 run 自动取消。所有 job 有硬 `timeout-minutes`，公证轮询和 Release 重下也各自有内部截止时间；外层 Actions 超时只作兜底。签名 secret 只在无密钥 P8 结果已绑定完整候选 SHA、进入 `release` environment 并人工批准后注入，步骤输出与上传 artifact 均不得包含凭据。P9 与 P10 必须是同一受保护 workflow 中有 `needs` 依赖的两个 job：P9 的单一 artifact 上传步骤输出数值 `artifact-id` 与 artifact digest，同时输出 artifact 内 manifest 的 SHA-256；P10 只能使用这组 job outputs 按 ID 下载，禁止按可变名称搜索、重新构建或从 workspace 混入文件。
 
 1. 在干净工作树锁定候选 commit SHA 和 `v1.1.0` 功能版本。
 2. 用完整 SHA detached checkout 构建无密钥候选，运行共同契约、平台测试、隐私、架构和性能检查，并记录不含用户数据的候选清单。
-3. 受保护环境重新 detached checkout 同一 SHA 后重建/签名；Mac 在 45 分钟内部截止内完成 notarize、staple、Gatekeeper；真实 Apple Silicon、Rosetta 和双显示器签核。
-4. 所有 gate 通过后才创建不可变 annotated tag `v1.1.0`，并验证 tag peeled target 等于候选 SHA。
-5. 从该 tag 创建 GitHub **draft** release，上传 EXE、ZIP、DMG 与校验文件。
-6. 从 GitHub 重下全部资产，验证文件名、大小、SHA、Windows 启动、Mac 签名/票据和版本一致。
-7. 只有重下验证成功才公开；源码使用同一 tag 的自动 source archives，不另造不同版本源码包。
-8. 草稿上传或重下发生瞬态失败但代码和六个资产字节均未变时，可在同一 tag 下重试同一已验证资产；只要代码、签名或任一资产字节改变，就使用下一版本号，不强推或移动已创建 tag。
-9. 公开后严重缺陷：下线受影响二进制，把 v1.0.0 恢复为 README 推荐下载，保留 v1.1.0 tag 与审计记录，修复发布 v1.1.1。
+3. 受保护环境重新 detached checkout 同一 SHA 后重建/签名；Mac 在 45 分钟内部截止内完成 notarize、staple、Gatekeeper；真实 Apple Silicon、Rosetta 和双显示器签核。随后生成 canonical UTF-8 `release-manifest.json`：固定 schema、版本、完整 commit SHA、六个资产的名称/字节数/SHA-256，以及不含 secret 的 codesign/notary/staple/Gatekeeper/真机证据摘要与证据文件 SHA-256。
+4. 把 manifest、六个正式资产和允许的证据文件一次上传为单一 immutable artifact；记录上传返回的数值 artifact ID、artifact digest 与 manifest SHA-256。后续 job 只接受这三个 P9 输出，任一缺失或不匹配即阻断。
+5. P10 按精确 artifact ID 下载并复核 artifact digest、manifest SHA-256 和 manifest 内全部字段；通过后才创建不可变 annotated tag `v1.1.0`，并验证 tag peeled target 等于 manifest 的候选 SHA。
+6. 从该 tag 创建 GitHub **draft** release，且只从已验证 artifact 原样上传 EXE、ZIP、DMG 与校验文件；manifest 留作审计 artifact，不新增公开下载资产。
+7. 从 GitHub 重下全部公开资产，按同一 manifest 验证文件名、大小、SHA、Windows 启动、Mac 签名/票据和版本一致。
+8. 只有重下验证成功才公开；源码使用同一 tag 的自动 source archives，不另造不同版本源码包。
+9. 草稿上传或重下发生瞬态失败时，只能重新使用同一 P9 artifact ID；artifact 已过期、不可用，或代码、签名、manifest、证据及任一资产字节改变时，使用下一版本号，不强推或移动已创建 tag。
+10. 公开后严重缺陷：下线受影响二进制，把 v1.0.0 恢复为 README 推荐下载，保留 v1.1.0 tag 与审计记录，修复发布 v1.1.1。
 
 ### NOT in scope（工程）
 
@@ -1692,8 +1695,8 @@ P0 VERSION + schema v1 + 匿名 fixtures + expected ----------------------------
 | **P6 macOS UX 与 demo** | P3 | Mac UX owner：`macos/CodexUsageWidget/UI/**`、Mac 专属 Resources、根语言包只读引用、UI-test target、`DESIGN.md`；主题契约只读 | 与 Windows 同语义的圆环/详情/任务胶囊、菜单栏、提醒、五语言八主题、`--demo` | Mac 原生主题目录逐项匹配 P0；App bundle 五语言 SHA 与根文件一致；VoiceOver、Reduce Motion、通知允许/拒绝/点击、屏幕热插拔、截图无裁切；demo 使用 P0 同一 fixture |
 | **P7 文档、本地化与截图** | P5、P6 | Docs owner：`CONTRIBUTING.md`、`docs/releasing.md`、双语 README、CHANGELOG、`docs/releases/v1.1.0.md`、发布截图 | 单一贡献入口、源码地图、平台资产表、升级/回滚、脱敏反馈格式、维护者 runbook | Windows-only、Mac-only、无证书维护者分别按文档完成允许路径；链接/命令/五语言键和字体宽度检查通过 |
 | **P8 无密钥候选** | P2、P4、P5、P6、P7 | Release candidate owner：构建脚本、精确 allowlist、候选清单、QA 测试计划 | 完整 commit SHA detached checkout 的 Windows ZIP/EXE 与 unsigned Universal Mac 内部产物 | 测试覆盖图 32/32 有自动证据或明确 E2E gate；共同契约、内嵌/公开 ZIP 同源、架构、隐私、哈希、性能稳态、fresh-clone TTHW、重启/回滚全绿；失败不创建 tag |
-| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 同一完整 SHA 重建；非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核 | release 并发不自动取消；签名 secret 只在人工审批后可见；`codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；公证 45 分钟内结束；自动发现、拖拽吸附、通知与首次启动通过；缺任一证据即保持 BLOCKED |
-| **P10 不可变发布** | P9 | Release maintainer + docs owner | annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | tag peeled SHA 等于候选；上传后全部重下验证；最后才公开；瞬态失败只重试逐字节相同资产，任一字节变化则新版本；工作树、Release 与 README 指向一致 |
+| **P9 受保护候选** | P8、E0 | Release maintainer：受保护 `release.yml`、签名/公证步骤、真实设备 QA 记录 | 同一完整 SHA 重建；非沙盒 Developer ID + Hardened Runtime 签名、公证、staple；Apple Silicon/Rosetta/双显示器签核；canonical manifest 与六资产一次上传为单一 immutable artifact | release 并发不自动取消；签名 secret 只在人工审批后可见；`codesign` entitlements 无 App Sandbox、`codesign --verify`、`spctl`、`stapler` 全绿；公证 45 分钟内结束；manifest 固定版本/SHA/name/size/hash/脱敏证据；输出 artifact ID、artifact digest、manifest SHA；缺任一证据即保持 BLOCKED |
+| **P10 不可变发布** | P9 | Release maintainer + docs owner | 按 P9 artifact ID 取得唯一候选；annotated `v1.1.0`、GitHub draft、六个二进制/校验资产、同 tag 源码 | artifact digest、manifest SHA 和 manifest 全字段先匹配；tag peeled SHA 等于 manifest commit；只上传 artifact 内原字节；重下再次按 manifest 验证后才公开；任何候选变化使用新版本；工作树、Release 与 README 指向一致 |
 
 ### 可复制验证命令
 
@@ -1749,7 +1752,7 @@ shasum -a 256 -c CodexUsageWidget-v1.1.0-macos.dmg.sha256
 | 本地化 | 五包缺键、额外键、占位符差异、长文本 | 完整键集/格式可解析；运行时缺可选包原子回退；真实字体无裁切 |
 | 窗口 | 四角/跨屏/热插拔/缩放/菜单栏与 Dock | 始终位于当前 `visibleFrame`；拖拽结束吸附；偏好保留屏幕身份与坐标 |
 | 性能 | 空输入、30 个最大文件、连续 120 次刷新 | worker/UI/CPU/RSS/handle/fd 满足硬门槛；0 重叠、0 残留；不得靠降低刷新频率通过 |
-| 发布 | job 超时、tag/SHA 不一致、资产缺失、重下哈希错、公证拒绝 | release run 不自动取消；不移动 tag、不公开草稿；同字节可重试，任一字节变化进入新版本；已公开缺陷用 v1.1.1 |
+| 发布 | job 超时、artifact ID/digest/manifest 不一致、tag/SHA 不一致、资产缺失、重下哈希错、公证拒绝 | P10 只消费 P9 的精确 artifact；不移动 tag、不公开草稿；同一 artifact 可重试，候选不可用或任一字节变化进入新版本；已公开缺陷用 v1.1.1 |
 
 ### 外部 Apple 门禁
 
@@ -1773,7 +1776,7 @@ E0 不是代码决策，不能由 Codex 代替账号持有人完成，也不阻�
 - `CodexUsageWidget-v1.1.0-macos.dmg.sha256`
 - GitHub 从同一 annotated tag 自动生成的 source archives
 
-候选失败只清理本次精确临时产物，保留当前公开版本和用户状态。tag 创建前发现代码问题时创建新 commit 并重走 P8–P10；tag 创建后只有逐字节相同的已验证资产可以重试，代码、签名或资产任一字节变化都使用下一版本号，不移动既有 tag。公开后发现严重问题时下线受影响二进制、恢复 v1.0.0 推荐入口并发布 v1.1.1，不删除 v1.1.0 的 tag 或审计记录。
+候选失败只清理本次精确临时产物，保留当前公开版本和用户状态。tag 创建前发现代码问题时创建新 commit 并重走 P8–P10；tag 创建后只允许从同一 P9 artifact ID 重试已经 manifest 验证的原字节，artifact 不可用，或代码、签名、manifest、证据、资产任一字节变化时都使用下一版本号，不移动既有 tag。公开后发现严重问题时下线受影响二进制、恢复 v1.0.0 推荐入口并发布 v1.1.1，不删除 v1.1.0 的 tag 或审计记录。
 
 ### 实施就绪结论
 
