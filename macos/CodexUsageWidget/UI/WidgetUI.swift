@@ -753,7 +753,7 @@ struct WidgetRingView: View {
         .buttonStyle(.plain)
         .accessibilityIdentifier("usage-ring")
         .accessibilityLabel(accessibilityText)
-        .accessibilityHelp(model.language.text("accessibility.ringHelp"))
+        .accessibilityHint(model.language.text("accessibility.ringHelp"))
         .onHover(perform: hoverChanged)
         .simultaneousGesture(
             DragGesture(minimumDistance: 4, coordinateSpace: .global)
@@ -860,8 +860,7 @@ struct WidgetDetailView: View {
                     startPoint: .topTrailing,
                     endPoint: .center
                 )
-            },
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            }
         )
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.10)))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
