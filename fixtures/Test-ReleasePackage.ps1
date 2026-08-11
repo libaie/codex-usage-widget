@@ -69,7 +69,7 @@ if (-not $RuntimeArchive) {
         'fixtures\contract\v1\inputs\all-malformed.jsonl', 'fixtures\contract\v1\inputs\cache-order.jsonl',
         'fixtures\contract\v1\inputs\dst-safe-integer.jsonl', 'fixtures\contract\v1\inputs\int64-max.jsonl',
         'fixtures\contract\v1\inputs\demo.jsonl', 'fixtures\contract\v1\inputs\empty.jsonl',
-        'fixtures\contract\v1\inputs\late-old-cycle.jsonl',
+        'fixtures\contract\v1\inputs\late-old-cycle.jsonl', 'fixtures\contract\v1\inputs\limit-id-fallback.jsonl',
         'fixtures\contract\v1\inputs\overflow.jsonl', 'fixtures\contract\v1\inputs\partial.jsonl',
         'fixtures\contract\v1\inputs\precision-and-tightest-window.jsonl',
         'fixtures\contract\v1\inputs\reset-boundary.jsonl', 'fixtures\contract\v1\inputs\unsupported.jsonl',

@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-11T00:00:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":101,"window_minutes":300,"resets_at":4102441200},"secondary":null}}}
+{"timestamp":"2026-08-11T00:01:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":40,"window_minutes":300,"resets_at":4102441200},"secondary":null}}}

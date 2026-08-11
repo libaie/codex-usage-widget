@@ -57,7 +57,7 @@ final class CoreTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         let cases = document["cases"] as! [[String: Any]]
-        XCTAssertEqual(cases.count, 14)
+        XCTAssertEqual(cases.count, 15)
         for fixture in cases {
             let identifier = fixture["id"] as! String
             let now = formatter.date(from: fixture["nowUtc"] as! String)!

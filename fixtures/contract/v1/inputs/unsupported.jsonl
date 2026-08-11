@@ -1,1 +1,2 @@
 {"timestamp":"2026-08-11T00:00:00.000Z","type":"event_msg","payload":{"type":"future_usage","schema_version":2,"future_limits":{}}}
+{"timestamp":"2026-08-11T00:01:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_bengalfox","primary":{"used_percent":99,"window_minutes":300,"resets_at":4102441200},"secondary":null}}}

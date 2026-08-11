@@ -47,13 +47,13 @@
       "id": "unsupported",
       "input": "inputs/unsupported.jsonl",
       "nowUtc": "2026-08-11T00:00:01.000Z",
-      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "fixtureStats": { "validJsonLines": 2, "malformedJsonLines": 0 },
       "expected": {
         "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "unsupported", "freshness": "current",
         "selectedWindow": null, "remainingPercent": null, "cumulativeTokens": null, "cacheHitTokens": null, "cacheMissTokens": null,
         "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null, "outputPercent": null,
         "reasoningOutputPercent": null, "observedAt": null, "tasks": [], "taskNamesAvailable": false,
-        "metrics": { "validEventCount": 0, "malformedLineCount": 0, "unknownEventCount": 1, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 0 }
+        "metrics": { "validEventCount": 1, "malformedLineCount": 0, "unknownEventCount": 1, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 0 }
       }
     },
     {
@@ -172,6 +172,19 @@
         "selectedWindow": "primary", "remainingPercent": "60.0", "cumulativeTokens": null, "cacheHitTokens": null,
         "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
         "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 2, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
+      "id": "limit-id-fallback",
+      "input": "inputs/limit-id-fallback.jsonl",
+      "nowUtc": "2026-08-11T00:01:01.000Z",
+      "fixtureStats": { "validJsonLines": 2, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "60.0", "cumulativeTokens": null, "cacheHitTokens": null,
+        "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406460000, "tasks": [], "taskNamesAvailable": false,
         "metrics": { "validEventCount": 2, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
       }
     },

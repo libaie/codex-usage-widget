@@ -13,7 +13,7 @@ The Windows and macOS implementations consume Codex session JSONL independently 
 - Missing scalar values are `null`; collections are present and use `[]` when empty.
 - Limit windows sort by remaining percentage, primary before secondary on a tie, then reset time and stable identifier.
 - Well-formed records without a rate-limit payload are ignored. Unknown usage schema versions remain unsupported.
-- An explicit `limit_id` of `codex` takes precedence; legacy records without `limit_id` are used only when no explicit `codex` record exists. Other model-specific pools never replace the main Codex limit.
+- An explicit `limit_id` of `codex` takes precedence; legacy records without `limit_id` are used only when no explicit `codex` record produces a valid limit window. Other model-specific pools never replace the main Codex limit.
 - Tasks sort by observation time descending, then identifier using ordinal comparison.
 - `complete`, `partial`, `unsupported`, `error`, and `empty` are distinct outcomes. Partial, stale, unsupported, and error data never trigger reminders.
 
