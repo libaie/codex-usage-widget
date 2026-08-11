@@ -55,15 +55,15 @@ jobs:
       - name: Windows worker stability
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-WorkerStability.ps1 -PackageRoot .
-      - name: Windows launch and release boundaries
+      - name: Windows launcher regression
         shell: powershell
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\fixtures\Test-Launcher.ps1 -PackageRoot .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-ReleasePackage.ps1 -PackageRoot .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-Bootstrap.ps1 -PackageRoot .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\fixtures\Test-Launcher.ps1 -PackageRoot .
+      - name: Windows release package
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-ReleasePackage.ps1 -PackageRoot .
+      - name: Windows bootstrap integration
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-Bootstrap.ps1 -PackageRoot .
       - name: Build Windows artifacts
         shell: powershell
         run: |
