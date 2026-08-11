@@ -196,7 +196,6 @@ enum UsageContract {
         var lastInput: Int64?
         var lastOutput: Int64?
         var lastReasoning: Int64?
-        var observedAt: Int64?
         var dataIssue = false
 
         for rawLine in String(decoding: data, as: UTF8.self).split(whereSeparator: { $0.isNewline }) {
@@ -217,7 +216,6 @@ enum UsageContract {
             metrics.validEventCount += 1
             let timestamp = (event["timestamp"] as? String).flatMap(timestampMilliseconds)
             if timestamp == nil { dataIssue = true }
-            if let timestamp { observedAt = max(observedAt ?? timestamp, timestamp) }
 
             if let limits = payload["rate_limits"] as? [String: Any] {
                 for (name, primary) in [("primary", true), ("secondary", false)] {
@@ -251,7 +249,7 @@ enum UsageContract {
                     if let previous = windows[name] {
                         if parsed.resetAt == previous.resetAt {
                             if parsed.used > previous.used { windows[name] = parsed }
-                        } else if parsed.observedAt >= previous.observedAt {
+                        } else if parsed.resetAt > previous.resetAt {
                             windows[name] = parsed
                         }
                     } else {
@@ -340,7 +338,7 @@ enum UsageContract {
             inputPercent: inputPercent,
             outputPercent: outputPercent,
             reasoningOutputPercent: reasoningOutputPercent,
-            observedAt: observedAt,
+            observedAt: windows.values.map(\.observedAt).max(),
             selectedResetAt: selected?.resetAt,
             selectedWindowMinutes: selected?.windowMinutes,
             metrics: metrics
