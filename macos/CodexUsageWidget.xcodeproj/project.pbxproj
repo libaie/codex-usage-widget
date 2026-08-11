@@ -13,6 +13,8 @@
 		010000000000000000000005 /* UIContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000008 /* UIContractTests.swift */; };
 		010000000000000000000006 /* WidgetUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000009 /* WidgetUI.swift */; };
 		010000000000000000000007 /* WidgetUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000000B /* WidgetUITests.swift */; };
+		010000000000000000000008 /* theme-catalog.json in Resources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000000C /* theme-catalog.json */; };
+		010000000000000000000009 /* demo.jsonl in Resources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000000D /* demo.jsonl */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +46,8 @@
 		020000000000000000000009 /* WidgetUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetUI.swift; sourceTree = "<group>"; };
 		02000000000000000000000A /* CodexUsageWidgetUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexUsageWidgetUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		02000000000000000000000B /* WidgetUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetUITests.swift; sourceTree = "<group>"; };
+		02000000000000000000000C /* theme-catalog.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = theme-catalog.json; path = ../fixtures/contract/v1/theme-catalog.json; sourceTree = SOURCE_ROOT; };
+		02000000000000000000000D /* demo.jsonl */ = {isa = PBXFileReference; lastKnownFileType = text; name = demo.jsonl; path = ../fixtures/contract/v1/inputs/demo.jsonl; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +64,8 @@
 				050000000000000000000005 /* CodexUsageWidgetTests */,
 				050000000000000000000008 /* CodexUsageWidgetUITests */,
 				020000000000000000000004 /* locales */,
+				02000000000000000000000C /* theme-catalog.json */,
+				02000000000000000000000D /* demo.jsonl */,
 				050000000000000000000006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -146,7 +152,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		0D000000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (010000000000000000000003 /* locales in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		0D000000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (010000000000000000000003 /* locales in Resources */, 010000000000000000000008 /* theme-catalog.json in Resources */, 010000000000000000000009 /* demo.jsonl in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
