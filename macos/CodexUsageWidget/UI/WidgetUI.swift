@@ -377,10 +377,11 @@ struct WidgetInteractionState {
 
 enum WidgetDemo {
     static func load(fixtureURL: URL, now: Date) throws -> UsageScanResult {
-        UsageScanResult(
-            state: UsageContract.evaluate(data: try Data(contentsOf: fixtureURL), now: now),
-            sessions: []
-        )
+        var state = UsageContract.evaluate(data: try Data(contentsOf: fixtureURL), now: now)
+        // ponytail: keep the fixture far-future for parser tests and rebase only the demo presentation dates.
+        state.observedAt = Int64((now.addingTimeInterval(-60).timeIntervalSince1970 * 1_000).rounded())
+        state.selectedResetAt = Int64((now.addingTimeInterval(5 * 3_600 + 19 * 60).timeIntervalSince1970 * 1_000).rounded())
+        return UsageScanResult(state: state, sessions: [])
     }
 }
 

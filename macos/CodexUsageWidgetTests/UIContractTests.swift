@@ -145,6 +145,8 @@ final class UIContractTests: XCTestCase {
         )
         XCTAssertEqual(result.state.remainingPercent, "55.0")
         XCTAssertEqual(result.selectedLimit?.windowMinutes, 300)
+        XCTAssertEqual(result.state.observedAt, Int64(fixedNow.addingTimeInterval(-60).timeIntervalSince1970 * 1_000))
+        XCTAssertEqual(result.selectedLimit?.resetAt, Int64(fixedNow.addingTimeInterval(5 * 3_600 + 19 * 60).timeIntervalSince1970 * 1_000))
         XCTAssertTrue(result.sessions.isEmpty)
     }
 }

@@ -815,6 +815,10 @@ function Get-DemoUsageSnapshot {
     if ($readFailed -or $null -eq $state -or $events.Count -ne 1 -or
         $metrics.MalformedLineCount -ne 0 -or $metrics.UnknownEventCount -ne 0 -or
         $metrics.InvalidValueCount -ne 0) { throw 'Invalid demo fixture.' }
+    # ponytail: the fixture stays far-future for stable parser tests; only its demo presentation dates are rebased.
+    $demoNow = Get-Date
+    $state.ObservedAt = $demoNow.AddMinutes(-1)
+    foreach ($window in @($state.LimitWindows)) { $window.ResetAt = $demoNow.AddHours(5).AddMinutes(19) }
     $state | Add-Member -NotePropertyName SessionTokenSnapshots -NotePropertyValue @()
     $state | Add-Member -NotePropertyName ActiveTasks -NotePropertyValue @()
     $state | Add-Member -NotePropertyName TaskNamesAvailable -NotePropertyValue $false
@@ -2876,13 +2880,19 @@ if ($SelfTest) {
     Assert-Widget ((Resolve-WidgetLanguageCode 'bad-code' ([cultureinfo]'en-US')) -ceq 'en-US') 'an invalid saved language should be ignored.'
     Assert-Widget ((Resolve-WidgetLanguageCode 'JA-jp' ([cultureinfo]'en-US')) -ceq 'en-US') 'saved language codes should be case-sensitive.'
 
+    $demoStarted = Get-Date
     $demoSnapshot = Get-DemoUsageSnapshot -Root $PSScriptRoot
+    $demoFinished = Get-Date
     $demoLimit = Get-CurrentLimitState -State $demoSnapshot.State -Now (Get-Date)
     Assert-Widget ($demoSnapshot.Classification -ceq 'complete' -and $null -eq $demoSnapshot.Diagnostic -and
         $null -ne $demoLimit -and [double]$demoLimit.RemainingPercent -eq 55) 'demo mode should parse the shared reviewed fixture through the production parser.'
     Assert-Widget ($demoSnapshot.State.TokenDetails.CacheHitTokens -eq 800 -and
         $demoSnapshot.State.TokenDetails.CacheMissTokens -eq 200 -and
         @($demoSnapshot.State.ActiveTasks).Count -eq 0) 'demo mode should expose deterministic anonymous token data without real tasks.'
+    Assert-Widget ([datetime]$demoSnapshot.State.ObservedAt -ge $demoStarted.AddMinutes(-1) -and
+        [datetime]$demoSnapshot.State.ObservedAt -le $demoFinished.AddMinutes(-1) -and
+        [datetime]$demoLimit.ResetAt -ge $demoStarted.AddHours(5).AddMinutes(19) -and
+        [datetime]$demoLimit.ResetAt -le $demoFinished.AddHours(5).AddMinutes(19)) 'demo dates should stay recent and human-scale.'
     $demoDefinition = (Get-Command Get-DemoUsageSnapshot -CommandType Function -ErrorAction Stop).Definition
     Assert-Widget (-not $demoDefinition.Contains('CODEX_HOME') -and -not $demoDefinition.Contains('USERPROFILE') -and
         -not $demoDefinition.Contains('Get-CodexUsageState') -and -not $demoDefinition.Contains('Update-CumulativeCacheTokens')) 'demo mode should not read real Codex data or update the cumulative ledger.'
