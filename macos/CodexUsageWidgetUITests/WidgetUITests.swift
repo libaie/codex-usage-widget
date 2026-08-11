@@ -24,7 +24,7 @@ final class WidgetUITests: XCTestCase {
     }
 
     private func saveScreenshot(_ element: XCUIElement, name: String) throws {
-        guard let directory = ProcessInfo.processInfo.environment["CODEX_SCREENSHOT_DIR"] else { return }
+        let directory = ProcessInfo.processInfo.environment["CODEX_SCREENSHOT_DIR"] ?? "/tmp/codex-widget-screenshots"
         let output = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(name)
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         try element.screenshot().pngRepresentation.write(to: output, options: .atomic)
