@@ -10,7 +10,7 @@ $tempPathPattern = '(?i)AppData[\\/]+Local[\\/]+Temp'
 
 $commonRuntimePaths = @(
     'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs',
-    'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md',
+    'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md',
     'locales\en-US.json', 'locales\zh-CN.json', 'locales\zh-TW.json',
     'locales\ja-JP.json', 'locales\ko-KR.json',
     'assets\screenshots\widget-ring.png', 'assets\screenshots\widget-details.png',
@@ -60,7 +60,16 @@ $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
     $requiredPaths += @(
         'SECURITY.md', 'CONTRIBUTING.md', 'docs\press-kit.md', 'docs\releases\v1.0.0.md',
-        'assets\social-preview.png'
+        'assets\social-preview.png', 'fixtures\Test-Contract.ps1', 'fixtures\Test-WindowsDataBoundary.ps1',
+        'fixtures\Test-WorkerStability.ps1', 'fixtures\Test-Bootstrap.ps1',
+        'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\expected-state.json',
+        'fixtures\contract\v1\theme-catalog.json',
+        'fixtures\contract\v1\inputs\all-malformed.jsonl', 'fixtures\contract\v1\inputs\cache-order.jsonl',
+        'fixtures\contract\v1\inputs\demo.jsonl', 'fixtures\contract\v1\inputs\empty.jsonl',
+        'fixtures\contract\v1\inputs\overflow.jsonl', 'fixtures\contract\v1\inputs\partial.jsonl',
+        'fixtures\contract\v1\inputs\precision-and-tightest-window.jsonl',
+        'fixtures\contract\v1\inputs\reset-boundary.jsonl', 'fixtures\contract\v1\inputs\unsupported.jsonl',
+        'scripts\Build-Windows.ps1', 'windows\Bootstrap\Program.cs'
     )
 }
 
