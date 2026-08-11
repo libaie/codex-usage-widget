@@ -1,5 +1,9 @@
 ﻿param(
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$ScanWorker,
+    [string]$ScanDataDirectory,
+    [string]$ScanOutputPath,
+    [string]$ScanGeneration
 )
 
 $script:CodexUsageDiagnostic = $null
@@ -10,6 +14,9 @@ $script:OwnsInstanceMutex = $false
 $script:WidgetLanguagePacks = $null
 $script:CurrentLanguageCode = $null
 $script:CurrentLanguageCulture = [cultureinfo]'en-US'
+$script:PreferenceStoreStatus = 'missing'
+$script:CodexUsageClassification = 'empty'
+$script:CodexUsageMetrics = $null
 
 function Stop-InstanceMutex {
     if ($null -eq $script:InstanceMutex) { return }
@@ -89,7 +96,7 @@ function ConvertTo-LimitWindow {
         [double]::IsInfinity($resetValue) -or $resetValue -ne [math]::Truncate($resetValue) -or
         $resetValue -lt [long]::MinValue -or $resetValue -gt [long]::MaxValue) { return $null }
 
-    try { $resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$resetValue).LocalDateTime }
+    try { $resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$resetValue).UtcDateTime }
     catch { return $null }
 
     $values = [ordered]@{
@@ -133,8 +140,9 @@ function Get-CurrentLimitState {
         [Parameter(Mandatory)][datetime]$Now
     )
 
+    $nowUtc = $Now.ToUniversalTime()
     @($State.LimitWindows) |
-        Where-Object { [datetime]$_.ResetAt -gt $Now } |
+        Where-Object { ([datetime]$_.ResetAt).ToUniversalTime() -gt $nowUtc } |
         Sort-Object @{ Expression = 'RemainingPercent'; Ascending = $true },
                     @{ Expression = { if ($_.Name -eq 'primary') { 0 } else { 1 } }; Ascending = $true } |
         Select-Object -First 1
@@ -143,23 +151,38 @@ function Get-CurrentLimitState {
 function Get-TokenNumber {
     param(
         [AllowNull()]$Object,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()][ref]$Invalid
     )
 
     if ($null -eq $Object) { return $null }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     $value = $property.Value
-    if ($null -eq $value -or $value -is [bool] -or $value -isnot [System.ValueType]) { return $null }
+    if ($null -eq $value) { return $null }
+    if ($value -is [bool] -or $value -isnot [System.ValueType]) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
     $typeCode = [Type]::GetTypeCode($value.GetType())
     if ($typeCode -notin [TypeCode]::Byte, [TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::UInt16,
         [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64,
-        [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal) { return $null }
+        [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
     if (($typeCode -eq [TypeCode]::Single -and [math]::Abs([double]$value) -gt 16777215) -or
         ($typeCode -eq [TypeCode]::Double -and ([double]::IsNaN([double]$value) -or
-            [double]::IsInfinity([double]$value) -or [math]::Abs([double]$value) -gt 9007199254740991))) { return $null }
-    try { $number = [decimal]$value } catch { return $null }
-    if ($number -lt 0 -or $number -gt [long]::MaxValue -or $number -ne [decimal]::Truncate($number)) { return $null }
+            [double]::IsInfinity([double]$value) -or [math]::Abs([double]$value) -gt 9007199254740991))) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
+    try { $number = [decimal]$value }
+    catch { if ($null -ne $Invalid) { $Invalid.Value = $true }; return $null }
+    if ($number -lt 0 -or $number -gt [long]::MaxValue -or $number -ne [decimal]::Truncate($number)) {
+        if ($null -ne $Invalid) { $Invalid.Value = $true }
+        return $null
+    }
     return [long]$number
 }
 
@@ -183,7 +206,14 @@ function Get-TokenPercent {
 }
 
 function Get-EventTokenDetails {
-    param([Parameter(Mandatory)]$Event)
+    param(
+        [Parameter(Mandatory)]$Event,
+        [AllowNull()][ref]$InvalidToken
+    )
+
+    if ($null -ne $InvalidToken) { $InvalidToken.Value = $false }
+    $invalidValue = $false
+    $invalidReference = [ref]$invalidValue
 
     $payloadProperty = $Event.PSObject.Properties['payload']
     if ($null -eq $payloadProperty) { return $null }
@@ -194,15 +224,16 @@ function Get-EventTokenDetails {
     $totalUsageProperty = $info.PSObject.Properties['total_token_usage']
     $lastUsageProperty = $info.PSObject.Properties['last_token_usage']
     $total = if ($null -ne $totalUsageProperty) { $totalUsageProperty.Value } else { $null }
-    $cumulative = Get-TokenNumber $total 'total_tokens'
-    $cumulativeInputTokens = Get-TokenNumber $total 'input_tokens'
-    $cumulativeCachedTokens = Get-TokenNumber $total 'cached_input_tokens'
+    $cumulative = Get-TokenNumber $total 'total_tokens' -Invalid $invalidReference
+    $cumulativeInputTokens = Get-TokenNumber $total 'input_tokens' -Invalid $invalidReference
+    $cumulativeCachedTokens = Get-TokenNumber $total 'cached_input_tokens' -Invalid $invalidReference
     $last = if ($null -ne $lastUsageProperty) { $lastUsageProperty.Value } else { $null }
-    $contextLimit = Get-TokenNumber $info 'model_context_window'
-    $contextTokens = Get-TokenNumber $last 'total_tokens'
-    $inputTokens = Get-TokenNumber $last 'input_tokens'
-    $outputTokens = Get-TokenNumber $last 'output_tokens'
-    $reasoningTokens = Get-TokenNumber $last 'reasoning_output_tokens'
+    $contextLimit = Get-TokenNumber $info 'model_context_window' -Invalid $invalidReference
+    $contextTokens = Get-TokenNumber $last 'total_tokens' -Invalid $invalidReference
+    $inputTokens = Get-TokenNumber $last 'input_tokens' -Invalid $invalidReference
+    $outputTokens = Get-TokenNumber $last 'output_tokens' -Invalid $invalidReference
+    $reasoningTokens = Get-TokenNumber $last 'reasoning_output_tokens' -Invalid $invalidReference
+    if ($null -ne $InvalidToken) { $InvalidToken.Value = $invalidValue }
 
     $cacheHitTokens = $null
     $cacheMissTokens = $null
@@ -244,11 +275,11 @@ function ConvertTo-ObservedAt {
     try {
         if ($Timestamp -is [bool]) { return $null }
         if ($Timestamp -is [System.ValueType]) {
-            return [DateTimeOffset]::FromUnixTimeSeconds([long]$Timestamp).LocalDateTime
+            return [DateTimeOffset]::FromUnixTimeSeconds([long]$Timestamp).UtcDateTime
         }
 
         $parsed = [DateTimeOffset]::MinValue
-        if ([DateTimeOffset]::TryParse([string]$Timestamp, [ref]$parsed)) { return $parsed.LocalDateTime }
+        if ([DateTimeOffset]::TryParse([string]$Timestamp, [ref]$parsed)) { return $parsed.UtcDateTime }
     }
     catch { }
 
@@ -275,16 +306,27 @@ function Get-EventRateLimits {
 }
 
 function Read-TaskNameIndex {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateRange(1, 4194304)][long]$MaxBytes = 1048576,
+        [ValidateRange(1, 50000)][int]$MaxLines = 10000,
+        [AllowNull()][ref]$BytesRead
+    )
 
+    if ($null -ne $BytesRead) { $BytesRead.Value = 0L }
     if (-not [System.IO.File]::Exists($Path)) { return $null }
     $names = @{}
     try {
         $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
         try {
+            $start = [math]::Max(0, $stream.Length - $MaxBytes)
+            if ($start -gt 0) { [void]$stream.Seek($start, [IO.SeekOrigin]::Begin) }
+            if ($null -ne $BytesRead) { $BytesRead.Value = $stream.Length - $start }
             $reader = [System.IO.StreamReader]::new($stream)
             try {
-                while (($line = $reader.ReadLine()) -ne $null) {
+                if ($start -gt 0) { [void]$reader.ReadLine() }
+                $lineCount = 0
+                while ($lineCount++ -lt $MaxLines -and ($line = $reader.ReadLine()) -ne $null) {
                     if ($line.IndexOf('thread_name', [StringComparison]::Ordinal) -lt 0) { continue }
                     try {
                         $row = $line | ConvertFrom-Json -ErrorAction Stop
@@ -343,10 +385,20 @@ function Read-SessionEvents {
     param(
         [Parameter(Mandatory)][string]$Path,
         [long]$TailBytes = 0,
-        [ref]$ReadFailed
+        [ref]$ReadFailed,
+        [ref]$Metrics
     )
 
     if ($null -ne $ReadFailed) { $ReadFailed.Value = $false }
+    $readMetrics = [pscustomobject]@{
+        CandidateLineCount = 0
+        UsageEventCount = 0
+        MalformedLineCount = 0
+        UnknownEventCount = 0
+        ReadFailureCount = 0
+        InvalidValueCount = 0
+    }
+    if ($null -ne $Metrics) { $Metrics.Value = $readMetrics }
     $events = New-Object 'System.Collections.Generic.List[object]'
     try {
         $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
@@ -357,8 +409,23 @@ function Read-SessionEvents {
             try {
                 if ($truncated) { [void]$reader.ReadLine() } # discard the partial first JSONL record
                 while (($line = $reader.ReadLine()) -ne $null) {
-                    if ($line.IndexOf('rate_limits', [System.StringComparison]::Ordinal) -lt 0) { continue }
-                    try { $events.Add(($line | ConvertFrom-Json -ErrorAction Stop)) } catch { }
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    try { $event = $line | ConvertFrom-Json -ErrorAction Stop }
+                    catch { $readMetrics.MalformedLineCount++; continue }
+                    $payloadProperty = $event.PSObject.Properties['payload']
+                    $schemaProperty = if ($null -ne $payloadProperty) { $payloadProperty.Value.PSObject.Properties['schema_version'] } else { $null }
+                    if ($null -ne $schemaProperty -and $schemaProperty.Value -ne 1) {
+                        $readMetrics.CandidateLineCount++
+                        $readMetrics.UnknownEventCount++
+                        continue
+                    }
+                    if ($null -eq (Get-EventRateLimits $event)) { continue }
+                    $readMetrics.CandidateLineCount++
+                    $readMetrics.UsageEventCount++
+                    $invalidToken = $false
+                    [void](Get-EventTokenDetails -Event $event -InvalidToken ([ref]$invalidToken))
+                    if ($invalidToken) { $readMetrics.InvalidValueCount++ }
+                    $events.Add($event)
                 }
             }
             finally { $reader.Dispose() }
@@ -367,6 +434,7 @@ function Read-SessionEvents {
     }
     catch {
         if ($null -ne $ReadFailed) { $ReadFailed.Value = $true }
+        $readMetrics.ReadFailureCount++
     }
     return $events.ToArray()
 }
@@ -378,6 +446,7 @@ function Get-NewestUsageState {
     )
 
     $newest = $null
+    $allStates = New-Object 'System.Collections.Generic.List[object]'
     $matchingStates = New-Object 'System.Collections.Generic.List[object]'
     $legacyStates = New-Object 'System.Collections.Generic.List[object]'
     $filterByLimit = $PSBoundParameters.ContainsKey('LimitId')
@@ -406,6 +475,7 @@ function Get-NewestUsageState {
             $state = ConvertTo-UsageState -Json $json
             $state | Add-Member -NotePropertyName TokenDetails -NotePropertyValue (Get-EventTokenDetails $event)
             $state | Add-Member -NotePropertyName ObservedAt -NotePropertyValue $timestamp
+            $allStates.Add($state)
             if ($filterByLimit) {
                 if ($isLegacyLimit) { $legacyStates.Add($state) }
                 else { $matchingStates.Add($state) }
@@ -414,7 +484,22 @@ function Get-NewestUsageState {
         }
         catch { }
     }
-    if (-not $filterByLimit) { return $newest }
+    if (-not $filterByLimit) {
+        if ($null -eq $newest) { return $null }
+        $tokenSource = $allStates.ToArray() |
+            Where-Object { $null -ne $_.TokenDetails } |
+            Sort-Object @{ Expression = {
+                    if ($null -ne $_.TokenDetails.CacheHitTokens -and $null -ne $_.TokenDetails.CacheMissTokens) {
+                        return [decimal]$_.TokenDetails.CacheHitTokens + [decimal]$_.TokenDetails.CacheMissTokens
+                    }
+                    if ($null -ne $_.TokenDetails.CumulativeTokens) { return [decimal]$_.TokenDetails.CumulativeTokens }
+                    return [decimal]-1
+                }; Descending = $true },
+                @{ Expression = { [datetime]$_.ObservedAt }; Descending = $true } |
+            Select-Object -First 1
+        if ($null -ne $tokenSource) { $newest.TokenDetails = $tokenSource.TokenDetails }
+        return $newest
+    }
 
     $states = if ($matchingStates.Count -gt 0) { $matchingStates.ToArray() } else { $legacyStates.ToArray() }
     if ($states.Count -eq 0) { return $null }
@@ -445,9 +530,20 @@ function Get-NewestUsageState {
     if ($selectedWindows.Count -eq 0) { return $null }
 
     $sourceState = $currentStates.ToArray() | Sort-Object ObservedAt -Descending | Select-Object -First 1
+    $tokenSource = $currentStates.ToArray() |
+        Where-Object { $null -ne $_.TokenDetails } |
+        Sort-Object @{ Expression = {
+                if ($null -ne $_.TokenDetails.CacheHitTokens -and $null -ne $_.TokenDetails.CacheMissTokens) {
+                    return [decimal]$_.TokenDetails.CacheHitTokens + [decimal]$_.TokenDetails.CacheMissTokens
+                }
+                if ($null -ne $_.TokenDetails.CumulativeTokens) { return [decimal]$_.TokenDetails.CumulativeTokens }
+                return [decimal]-1
+            }; Descending = $true },
+            @{ Expression = { [datetime]$_.ObservedAt }; Descending = $true } |
+        Select-Object -First 1
     return [pscustomobject]@{
         LimitWindows = $selectedWindows.ToArray()
-        TokenDetails = $sourceState.TokenDetails
+        TokenDetails = if ($null -ne $tokenSource) { $tokenSource.TokenDetails } else { $sourceState.TokenDetails }
         ObservedAt   = $sourceState.ObservedAt
     }
 }
@@ -479,8 +575,77 @@ function Resolve-CodexDataDirectory {
     return $null
 }
 
+function Get-BoundedSessionFiles {
+    param(
+        [Parameter(Mandatory)][string]$SessionsPath,
+        [ValidateRange(1, 1000)][int]$MaxFiles = 30,
+        [ValidateRange(1, 100000)][int]$MaxEntries = 4096,
+        [Parameter(Mandatory)][datetime]$DeadlineUtc
+    )
+
+    $result = [pscustomobject]@{
+        Files = @()
+        EntriesVisited = 0
+        RejectedPathCount = 0
+        ReadFailureCount = 0
+        Truncated = $false
+    }
+    if ([datetime]::UtcNow -ge $DeadlineUtc.ToUniversalTime()) { $result.Truncated = $true; return $result }
+    try {
+        $root = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($SessionsPath))
+        if (-not $root.Exists) { $result.ReadFailureCount = 1; return $result }
+        if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $result.RejectedPathCount = 1
+            return $result
+        }
+        $rootPrefix = $root.FullName.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    }
+    catch { $result.ReadFailureCount = 1; return $result }
+
+    $directories = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+    $files = [Collections.Generic.List[IO.FileInfo]]::new()
+    $directories.Push($root)
+    while ($directories.Count -gt 0) {
+        if ($result.EntriesVisited -ge $MaxEntries -or [datetime]::UtcNow -ge $DeadlineUtc.ToUniversalTime()) {
+            $result.Truncated = $true
+            break
+        }
+        $directory = $directories.Pop()
+        try {
+            foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+                if ($result.EntriesVisited -ge $MaxEntries -or [datetime]::UtcNow -ge $DeadlineUtc.ToUniversalTime()) {
+                    $result.Truncated = $true
+                    break
+                }
+                $result.EntriesVisited++
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $result.RejectedPathCount++
+                    continue
+                }
+                $fullName = [IO.Path]::GetFullPath($entry.FullName)
+                if (-not $fullName.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    $result.RejectedPathCount++
+                    continue
+                }
+                if (($entry.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                    $directories.Push([IO.DirectoryInfo]$entry)
+                }
+                elseif ($entry -is [IO.FileInfo] -and $entry.Extension.Equals('.jsonl', [StringComparison]::OrdinalIgnoreCase)) {
+                    $files.Add([IO.FileInfo]$entry)
+                }
+            }
+        }
+        catch { $result.ReadFailureCount++ }
+    }
+    $result.Files = @($files.ToArray() | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First $MaxFiles)
+    return $result
+}
+
 function Get-CodexUsageState {
-    param([AllowNull()][string]$DataDirectory)
+    param(
+        [AllowNull()][string]$DataDirectory,
+        [switch]$ReadOnly
+    )
 
     if (-not $PSBoundParameters.ContainsKey('DataDirectory')) {
         $DataDirectory = Resolve-CodexDataDirectory $null $env:CODEX_HOME $env:USERPROFILE
@@ -490,17 +655,30 @@ function Get-CodexUsageState {
     $sessionTokenSnapshots = New-Object 'System.Collections.Generic.List[object]'
     $activeTasks = New-Object 'System.Collections.Generic.List[object]'
     $script:CodexUsageDiagnostic = $null
+    $script:CodexUsageClassification = 'empty'
+    $script:CodexUsageMetrics = [pscustomobject]@{
+        CandidateLineCount = 0
+        UsageEventCount = 0
+        MalformedLineCount = 0
+        UnknownEventCount = 0
+        ReadFailureCount = 0
+        InvalidValueCount = 0
+        RejectedPathCount = 0
+        EnumerationTruncated = $false
+    }
     if (-not [System.IO.Directory]::Exists($sessionsPath)) {
         $script:CodexUsageDiagnostic = 'missing_directory'
         return $null
     }
 
-    try {
-        $allFiles = @(Get-ChildItem -LiteralPath $sessionsPath -Recurse -File -Filter '*.jsonl' -ErrorAction Stop |
-            Sort-Object LastWriteTimeUtc -Descending)
-        $files = @($allFiles | Select-Object -First 30)
-    }
-    catch {
+    $discovery = Get-BoundedSessionFiles -SessionsPath $sessionsPath -MaxFiles 30 -MaxEntries 4096 -DeadlineUtc ([datetime]::UtcNow.AddSeconds(3))
+    $script:CodexUsageMetrics.ReadFailureCount += $discovery.ReadFailureCount
+    $script:CodexUsageMetrics.RejectedPathCount = $discovery.RejectedPathCount
+    $script:CodexUsageMetrics.EnumerationTruncated = $discovery.Truncated
+    $allFiles = @($discovery.Files)
+    $files = $allFiles
+    if ($discovery.ReadFailureCount -gt 0 -and $files.Count -eq 0) {
+        $script:CodexUsageClassification = 'error'
         $script:CodexUsageDiagnostic = 'read_failed'
         return $null
     }
@@ -531,18 +709,22 @@ function Get-CodexUsageState {
         $readPaths[$candidate.FullName] = $true
     }
 
-    $readFailed = $false
+    $readFailed = $discovery.ReadFailureCount -gt 0
     $isNewestCandidate = $true
     foreach ($file in $filesToRead) {
         $fileReadFailed = $false
-        $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 262144 -ReadFailed ([ref]$fileReadFailed))
+        $fileMetrics = $null
+        $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 262144 -ReadFailed ([ref]$fileReadFailed) -Metrics ([ref]$fileMetrics))
         if ($fileReadFailed) { $readFailed = $true }
         $fileState = Get-NewestUsageState -Events $fileEvents
         if ($isNewestCandidate -and $null -eq $fileState) {
             # ponytail: one 1 MiB retry bounds fallback I/O; enlarge only if Codex records outgrow it.
-            $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 1048576 -ReadFailed ([ref]$fileReadFailed))
+            $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 1048576 -ReadFailed ([ref]$fileReadFailed) -Metrics ([ref]$fileMetrics))
             if ($fileReadFailed) { $readFailed = $true }
             $fileState = Get-NewestUsageState -Events $fileEvents
+        }
+        foreach ($metricName in 'CandidateLineCount', 'UsageEventCount', 'MalformedLineCount', 'UnknownEventCount', 'ReadFailureCount', 'InvalidValueCount') {
+            $script:CodexUsageMetrics.$metricName += [int]$fileMetrics.$metricName
         }
         if ($usagePaths.ContainsKey($file.FullName)) {
             if ($null -ne $fileState -and $null -ne $fileState.TokenDetails) {
@@ -567,18 +749,30 @@ function Get-CodexUsageState {
     }
     $state = Get-NewestUsageState -Events $events.ToArray() -LimitId 'codex'
     if ($null -ne $state) {
-        $cacheTotals = Update-CumulativeCacheTokens $sessionTokenSnapshots.ToArray()
-        if ($null -ne $cacheTotals) {
-            if ($null -eq $state.TokenDetails) { $state.TokenDetails = [pscustomobject]@{} }
-            foreach ($name in 'CacheHitTokens', 'CacheMissTokens', 'CacheHitPercent', 'CacheMissPercent') {
-                $state.TokenDetails | Add-Member -NotePropertyName $name -NotePropertyValue $cacheTotals.$name -Force
+        $state | Add-Member -NotePropertyName SessionTokenSnapshots -NotePropertyValue $sessionTokenSnapshots.ToArray()
+        if (-not $ReadOnly) {
+            $cacheTotals = Update-CumulativeCacheTokens $sessionTokenSnapshots.ToArray()
+            if ($null -ne $cacheTotals) {
+                if ($null -eq $state.TokenDetails) { $state.TokenDetails = [pscustomobject]@{} }
+                foreach ($name in 'CacheHitTokens', 'CacheMissTokens', 'CacheHitPercent', 'CacheMissPercent') {
+                    $state.TokenDetails | Add-Member -NotePropertyName $name -NotePropertyValue $cacheTotals.$name -Force
+                }
             }
         }
         $state | Add-Member -NotePropertyName ActiveTasks -NotePropertyValue $activeTasks.ToArray()
         $state | Add-Member -NotePropertyName TaskNamesAvailable -NotePropertyValue ($null -ne $taskNames)
+        $script:CodexUsageClassification = if ($readFailed -or $script:CodexUsageMetrics.MalformedLineCount -gt 0 -or
+            $script:CodexUsageMetrics.UnknownEventCount -gt 0 -or $script:CodexUsageMetrics.InvalidValueCount -gt 0 -or
+            $script:CodexUsageMetrics.RejectedPathCount -gt 0 -or $script:CodexUsageMetrics.EnumerationTruncated) { 'partial' } else { 'complete' }
         $script:CodexUsageDiagnostic = $null
         return $state
     }
+    $script:CodexUsageClassification = if ($script:CodexUsageMetrics.UnknownEventCount -gt 0 -and
+        -not $readFailed -and $script:CodexUsageMetrics.MalformedLineCount -eq 0) { 'unsupported' }
+        elseif ($readFailed -or $script:CodexUsageMetrics.MalformedLineCount -gt 0 -or
+            $script:CodexUsageMetrics.CandidateLineCount -gt 0 -or $script:CodexUsageMetrics.RejectedPathCount -gt 0 -or
+            $script:CodexUsageMetrics.EnumerationTruncated) { 'error' }
+        else { 'empty' }
     $script:CodexUsageDiagnostic = if ($readFailed) { 'read_failed' } else { 'no_valid_event' }
     return $state
 }
@@ -588,16 +782,21 @@ function Get-CodexUsageDiagnostic {
 }
 
 function Get-CodexUsageSnapshot {
-    param([AllowNull()][string]$DataDirectory)
+    param(
+        [AllowNull()][string]$DataDirectory,
+        [switch]$ReadOnly
+    )
 
     $state = if ($PSBoundParameters.ContainsKey('DataDirectory')) {
-        Get-CodexUsageState -DataDirectory $DataDirectory
+        Get-CodexUsageState -DataDirectory $DataDirectory -ReadOnly:$ReadOnly
     } else {
-        Get-CodexUsageState
+        Get-CodexUsageState -ReadOnly:$ReadOnly
     }
     [pscustomobject]@{
-        State      = $state
-        Diagnostic = Get-CodexUsageDiagnostic
+        State          = $state
+        Diagnostic     = Get-CodexUsageDiagnostic
+        Classification = $script:CodexUsageClassification
+        Metrics        = $script:CodexUsageMetrics
     }
 }
 
@@ -625,27 +824,258 @@ function Resolve-UsageRefreshResult {
     return [pscustomobject]@{ State = $null; Diagnostic = $diagnostic }
 }
 
-function Get-UsageWorkerFunctionNames {
-    @(
-        'ConvertTo-LimitWindow',
-        'ConvertTo-UsageState',
-        'ConvertTo-ObservedAt',
-        'Get-TokenNumber',
-        'Get-TokenPercent',
-        'Get-EventTokenDetails',
-        'Get-EventRateLimits',
-        'Read-TaskNameIndex',
-        'Get-ActiveTaskCandidates',
-        'Read-SessionEvents',
-        'Get-NewestUsageState',
-        'ConvertTo-CodexDataDirectoryPath',
-        'Resolve-CodexDataDirectory',
-        'Save-TextAtomically',
-        'Update-CumulativeCacheTokens',
-        'Get-CodexUsageState',
-        'Get-CodexUsageDiagnostic',
-        'Get-CodexUsageSnapshot'
+function Read-UsageScanResult {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedGeneration
     )
+
+    try {
+        if ($ExpectedGeneration -cnotmatch '^[0-9a-f]{32}$' -or -not [IO.Path]::IsPathRooted($Path)) { return $null }
+        $file = [IO.FileInfo]::new([IO.Path]::GetFullPath($Path))
+        if (-not $file.Exists -or $file.Length -lt 1 -or $file.Length -gt 262144 -or
+            ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
+        $bytes = [IO.File]::ReadAllBytes($file.FullName)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return $null }
+        $json = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $result = $json | ConvertFrom-Json -ErrorAction Stop
+        if ($result -isnot [pscustomobject] -or
+            (@($result.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'generation,schemaVersion,snapshot' -or
+            $result.schemaVersion -is [bool] -or $result.schemaVersion -isnot [System.ValueType] -or
+            [decimal]$result.schemaVersion -ne 1 -or $result.generation -isnot [string] -or
+            $result.generation -cne $ExpectedGeneration -or $result.snapshot -isnot [pscustomobject]) { return $null }
+        $snapshot = $result.snapshot
+        if ((@($snapshot.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'Classification,Diagnostic,Metrics,State' -or
+            $snapshot.Classification -isnot [string] -or
+            $snapshot.Classification -cnotin 'complete', 'partial', 'unsupported', 'error', 'empty' -or
+            $snapshot.Metrics -isnot [pscustomobject]) { return $null }
+        $metricNames = 'CandidateLineCount,EnumerationTruncated,InvalidValueCount,MalformedLineCount,ReadFailureCount,RejectedPathCount,UnknownEventCount,UsageEventCount'
+        if ((@($snapshot.Metrics.PSObject.Properties.Name | Sort-Object) -join ',') -cne $metricNames -or
+            $snapshot.Metrics.EnumerationTruncated -isnot [bool]) { return $null }
+        foreach ($name in 'CandidateLineCount', 'InvalidValueCount', 'MalformedLineCount', 'ReadFailureCount', 'RejectedPathCount', 'UnknownEventCount', 'UsageEventCount') {
+            $value = Get-TokenNumber ([pscustomobject]@{ Value = $snapshot.Metrics.$name }) 'Value'
+            if ($null -eq $value -or $value -gt 1000000) { return $null }
+        }
+        $resolved = Resolve-UsageRefreshResult -Snapshot $snapshot -ErrorCount 0
+        if (($snapshot.Classification -cin 'complete', 'partial') -ne ($null -ne $resolved.State) -or
+            ($snapshot.Classification -cin 'unsupported', 'error', 'empty') -ne ($null -eq $resolved.State)) { return $null }
+        if ($null -ne $snapshot.State) {
+            $tasks = $snapshot.State.PSObject.Properties['ActiveTasks']
+            $sessions = $snapshot.State.PSObject.Properties['SessionTokenSnapshots']
+            if (($null -ne $tasks -and @($tasks.Value).Count -gt 30) -or
+                $null -eq $sessions -or @($sessions.Value).Count -gt 30) { return $null }
+        }
+        return $snapshot
+    }
+    catch { return $null }
+}
+
+function Apply-UsageSnapshotPersistence {
+    param([Parameter(Mandatory)]$Snapshot)
+
+    if ($Snapshot.Classification -cnotin 'complete', 'partial' -or $null -eq $Snapshot.State) { return $Snapshot }
+    $sessions = $Snapshot.State.PSObject.Properties['SessionTokenSnapshots']
+    if ($null -eq $sessions) { return $Snapshot }
+    $cacheTotals = Update-CumulativeCacheTokens @($sessions.Value)
+    if ($null -ne $cacheTotals) {
+        if ($null -eq $Snapshot.State.TokenDetails) { $Snapshot.State.TokenDetails = [pscustomobject]@{} }
+        foreach ($name in 'CacheHitTokens', 'CacheMissTokens', 'CacheHitPercent', 'CacheMissPercent') {
+            $Snapshot.State.TokenDetails | Add-Member -NotePropertyName $name -NotePropertyValue $cacheTotals.$name -Force
+        }
+    }
+    return $Snapshot
+}
+
+function New-UsageWorkerJob {
+    if ($null -eq ('CodexUsageWorkerJobNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class CodexUsageWorkerJobNative {
+    const uint KillOnJobClose = 0x00002000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicLimits {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IoCounters {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ExtendedLimits {
+        public BasicLimits BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, uint length);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    public static IntPtr CreateKillOnClose() {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Win32Exception();
+        ExtendedLimits limits = new ExtendedLimits();
+        limits.BasicLimitInformation.LimitFlags = KillOnJobClose;
+        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(ExtendedLimits)))) {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new Win32Exception(error);
+        }
+        return job;
+    }
+
+    public static void Assign(IntPtr job, IntPtr process) {
+        if (!AssignProcessToJobObject(job, process)) throw new Win32Exception();
+    }
+
+    public static void Close(IntPtr job) {
+        if (job != IntPtr.Zero && !CloseHandle(job)) throw new Win32Exception();
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return [CodexUsageWorkerJobNative]::CreateKillOnClose()
+}
+
+function Add-UsageWorkerProcessToJob {
+    param(
+        [Parameter(Mandatory)][IntPtr]$Handle,
+        [Parameter(Mandatory)][Diagnostics.Process]$Process
+    )
+
+    if ($Handle -eq [IntPtr]::Zero -or $Process.HasExited) { throw 'Invalid worker job assignment.' }
+    [CodexUsageWorkerJobNative]::Assign($Handle, $Process.Handle)
+}
+
+function Close-UsageWorkerJob {
+    param([Parameter(Mandatory)][IntPtr]$Handle)
+
+    if ($Handle -ne [IntPtr]::Zero) { [CodexUsageWorkerJobNative]::Close($Handle) }
+}
+
+function Start-UsageScanProcess {
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$DataDirectory,
+        [Parameter(Mandatory)][string]$Generation,
+        [IntPtr]$WorkerJobHandle = [IntPtr]::Zero
+    )
+
+    if ($Generation -cnotmatch '^[0-9a-f]{32}$' -or $ScriptPath.IndexOf('"') -ge 0 -or
+        $DataDirectory.IndexOf('"') -ge 0) { throw 'Invalid scan launch arguments.' }
+    $scriptFile = [IO.FileInfo]::new([IO.Path]::GetFullPath($ScriptPath))
+    $dataPath = ConvertTo-CodexDataDirectoryPath $DataDirectory
+    if (-not $scriptFile.Exists -or ($scriptFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $null -eq $dataPath) { throw 'Invalid scan launch path.' }
+    $workerRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'worker'))
+    [void][IO.Directory]::CreateDirectory($workerRoot)
+    $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
+    if (($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Invalid scan output directory.' }
+    $outputPath = Join-Path $workerRoot ($Generation + '.json')
+    if ([IO.File]::Exists($outputPath)) { throw 'Scan output already exists.' }
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = (Join-Path $PSHOME 'powershell.exe')
+    $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $scriptFile.FullName +
+        '" -ScanWorker -ScanDataDirectory "' + $dataPath + '" -ScanOutputPath "' + $outputPath +
+        '" -ScanGeneration ' + $Generation
+    $startInfo.WorkingDirectory = $scriptFile.DirectoryName
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) { throw 'Scan worker did not start.' }
+    if ($WorkerJobHandle -ne [IntPtr]::Zero) {
+        try { Add-UsageWorkerProcessToJob -Handle $WorkerJobHandle -Process $process }
+        catch {
+            try { if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() } } catch { }
+            $process.Dispose()
+            throw
+        }
+    }
+    return [pscustomobject]@{
+        Process = $process
+        Generation = $Generation
+        OutputPath = $outputPath
+        StartedAtUtc = [datetime]::UtcNow
+    }
+}
+
+function Receive-UsageScanProcess {
+    param(
+        [Parameter(Mandatory)]$Job,
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    )
+
+    $process = $Job.PSObject.Properties['Process'].Value
+    $generation = $Job.PSObject.Properties['Generation'].Value
+    $outputPath = $Job.PSObject.Properties['OutputPath'].Value
+    $startedAt = $Job.PSObject.Properties['StartedAtUtc'].Value
+    if ($process -isnot [Diagnostics.Process] -or $generation -isnot [string] -or
+        $outputPath -isnot [string] -or $startedAt -isnot [datetime]) {
+        return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false }
+    }
+    try { $hasExited = $process.HasExited }
+    catch { return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false } }
+    if (-not $hasExited -and ([datetime]::UtcNow - $startedAt.ToUniversalTime()).TotalSeconds -lt $TimeoutSeconds) {
+        return [pscustomobject]@{ Status = 'pending'; Snapshot = $null; ProcessExited = $false }
+    }
+
+    $timedOut = -not $hasExited
+    $snapshot = $null
+    try {
+        if ($timedOut) {
+            try { $process.Kill() } catch { }
+            try { [void]$process.WaitForExit(2000) } catch { }
+        }
+        try { $hasExited = $process.HasExited } catch { $hasExited = $false }
+        if ($hasExited -and -not $timedOut) {
+            $stdout = $process.StandardOutput.ReadToEnd()
+            $stderr = $process.StandardError.ReadToEnd()
+            if ($process.ExitCode -eq 0 -and $stdout.Length -eq 0 -and $stderr.Length -eq 0) {
+                $snapshot = Read-UsageScanResult -Path $outputPath -ExpectedGeneration $generation
+            }
+        }
+    }
+    catch { $snapshot = $null }
+    finally {
+        try { if ([IO.File]::Exists($outputPath)) { [IO.File]::Delete($outputPath) } } catch { }
+        try { $process.Dispose() } catch { }
+    }
+    $status = if ($timedOut) { 'timeout' } elseif ($null -ne $snapshot) { 'completed' } else { 'failed' }
+    return [pscustomobject]@{ Status = $status; Snapshot = $snapshot; ProcessExited = $hasExited }
 }
 
 function Save-TextAtomically {
@@ -858,43 +1288,42 @@ function Update-CumulativeCacheTokens {
 
     $toCounter = {
         param([AllowNull()]$Value)
-        if ($null -eq $Value -or $Value -is [bool] -or $Value -isnot [System.ValueType]) { return $null }
-        try { $number = [double]$Value } catch { return $null }
-        if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt 0 -or
-            $number -ne [math]::Truncate($number) -or $number -gt [long]::MaxValue) { return $null }
-        return [long]$number
+        return Get-TokenNumber ([pscustomobject]@{ Value = $Value }) 'Value'
     }
 
     if ($null -eq $script:CacheTokenLedger) {
         $knownSessions = @{}
+        $storeStatus = 'missing'
         try {
             $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
             if ([System.IO.File]::Exists($path)) {
                 $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+                if ($stored -isnot [pscustomobject]) { throw 'Cache ledger root must be an object.' }
                 $storedSessions = $stored.PSObject.Properties['Sessions']
                 if ($null -eq $storedSessions) { throw 'Missing sessions.' }
                 $loaded = 0
                 foreach ($item in @($storedSessions.Value)) {
-                    if ($loaded++ -ge 10000) { break }
+                    if ($loaded++ -ge 10000) { throw 'Too many stored sessions.' }
                     $idProperty = $item.PSObject.Properties['Id']
                     $hitProperty = $item.PSObject.Properties['CacheHitTokens']
                     $missProperty = $item.PSObject.Properties['CacheMissTokens']
                     if ($null -eq $idProperty -or $idProperty.Value -isnot [string] -or
                         $idProperty.Value -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
-                        $null -eq $hitProperty -or $null -eq $missProperty) { continue }
+                        $null -eq $hitProperty -or $null -eq $missProperty) { throw 'Invalid stored session.' }
                     $hit = & $toCounter $hitProperty.Value
                     $miss = & $toCounter $missProperty.Value
-                    if ($null -eq $hit -or $null -eq $miss) { continue }
+                    if ($null -eq $hit -or $null -eq $miss) { throw 'Invalid stored counters.' }
                     $knownSessions[$idProperty.Value] = [pscustomobject]@{
                         CacheHitTokens  = $hit
                         CacheMissTokens = $miss
                     }
                 }
+                $storeStatus = 'valid'
             }
         }
-        catch { $knownSessions = @{} }
-        # ponytail: the single persistent refresh worker owns this ledger; add locking only if refreshes become concurrent.
-        $script:CacheTokenLedger = [pscustomobject]@{ Sessions = $knownSessions; Dirty = $false }
+        catch { $knownSessions = @{}; $storeStatus = 'invalid' }
+        # ponytail: the UI process is the only persistent-state writer; add locking only if that ownership changes.
+        $script:CacheTokenLedger = [pscustomobject]@{ Sessions = $knownSessions; Dirty = $false; StoreStatus = $storeStatus }
     }
 
     foreach ($session in @($Sessions)) {
@@ -921,7 +1350,7 @@ function Update-CumulativeCacheTokens {
         }
     }
 
-    if ($script:CacheTokenLedger.Dirty) {
+    if ($script:CacheTokenLedger.Dirty -and $script:CacheTokenLedger.StoreStatus -cne 'invalid') {
         try {
             $storedSessions = @(
                 foreach ($id in @($script:CacheTokenLedger.Sessions.Keys | Sort-Object)) {
@@ -935,18 +1364,24 @@ function Update-CumulativeCacheTokens {
             )
             $json = [pscustomobject]@{ Sessions = $storedSessions } | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop
             $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
-            if (Save-TextAtomically -Path $path -Text $json) { $script:CacheTokenLedger.Dirty = $false }
+            if (Save-TextAtomically -Path $path -Text $json) {
+                $script:CacheTokenLedger.Dirty = $false
+                $script:CacheTokenLedger.StoreStatus = 'valid'
+            }
         }
         catch { }
     }
 
     if ($script:CacheTokenLedger.Sessions.Count -eq 0) { return $null }
-    $cacheHitTokens = 0.0
-    $cacheMissTokens = 0.0
+    $cacheHitTokens = [decimal]0
+    $cacheMissTokens = [decimal]0
     foreach ($tokens in $script:CacheTokenLedger.Sessions.Values) {
-        $cacheHitTokens += [double]$tokens.CacheHitTokens
-        $cacheMissTokens += [double]$tokens.CacheMissTokens
+        $cacheHitTokens += [decimal]$tokens.CacheHitTokens
+        $cacheMissTokens += [decimal]$tokens.CacheMissTokens
     }
+    if ($cacheHitTokens -gt [long]::MaxValue -or $cacheMissTokens -gt [long]::MaxValue) { return $null }
+    $cacheHitTokens = [long]$cacheHitTokens
+    $cacheMissTokens = [long]$cacheMissTokens
     $cacheHitPercent = Get-TokenPercent $cacheHitTokens ($cacheHitTokens + $cacheMissTokens)
     return [pscustomobject]@{
         CacheHitTokens  = $cacheHitTokens
@@ -963,11 +1398,14 @@ function Get-ReminderGateState {
 
     # ponytail: Prune expired keys on startup load; prune every write only if measured month-long residency grows the file.
     $sentKeys = @()
+    $storeStatus = 'missing'
     try {
         $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'reminders.json'
         if ([System.IO.File]::Exists($path)) {
             $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+            if ($stored -isnot [pscustomobject]) { throw 'Reminder root must be an object.' }
             $sentKeysProperty = $stored.PSObject.Properties['SentKeys']
+            if ($null -eq $sentKeysProperty) { throw 'Missing reminder keys.' }
             if ($null -ne $sentKeysProperty) {
                 $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                 foreach ($value in @($sentKeysProperty.Value)) {
@@ -979,20 +1417,24 @@ function Get-ReminderGateState {
                     if ($sentKeys -notcontains $key) { $sentKeys += $key }
                 }
             }
+            $storeStatus = 'valid'
         }
     }
-    catch { $sentKeys = @() }
+    catch { $sentKeys = @(); $storeStatus = 'invalid' }
 
-    $script:ReminderGateCache = [pscustomobject]@{ SentKeys = $sentKeys }
+    $script:ReminderGateCache = [pscustomobject]@{ SentKeys = $sentKeys; StoreStatus = $storeStatus }
     return $script:ReminderGateCache
 }
 
 function Save-ReminderGateState {
     param([Parameter(Mandatory)]$State)
 
+    if ($State.PSObject.Properties['StoreStatus'].Value -ceq 'invalid') { return $false }
     $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'reminders.json'
     $json = [pscustomobject]@{ SentKeys = @($State.SentKeys) } | ConvertTo-Json -Compress
-    return Save-TextAtomically -Path $path -Text $json
+    $saved = Save-TextAtomically -Path $path -Text $json
+    if ($saved) { $State.StoreStatus = 'valid' }
+    return $saved
 }
 
 function Register-UsageReminderThreshold {
@@ -1042,39 +1484,56 @@ function Get-WidgetThemes {
 }
 
 function Get-WidgetPreferences {
-    $preferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 0; CodexDataDirectory = $null; Language = $null }
+    $preferences = [pscustomobject]@{ Left = $null; Top = $null; Monitor = $null; Theme = 0; CodexDataDirectory = $null; Language = $null; StoreStatus = 'missing' }
+    $script:PreferenceStoreStatus = 'missing'
     try {
         $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'preferences.json'
         if (-not [System.IO.File]::Exists($path)) { return $preferences }
         $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+        if ($stored -isnot [pscustomobject]) { throw 'Preference root must be an object.' }
+        $status = 'valid'
         foreach ($name in 'Left', 'Top') {
             $property = $stored.PSObject.Properties[$name]
-            if ($null -eq $property -or $property.Value -is [bool] -or $property.Value -isnot [System.ValueType]) { continue }
-            try { $value = [double]$property.Value } catch { continue }
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            if ($property.Value -is [bool] -or $property.Value -isnot [System.ValueType]) { $status = 'invalid'; continue }
+            try { $value = [double]$property.Value } catch { $status = 'invalid'; continue }
             if (-not [double]::IsNaN($value) -and -not [double]::IsInfinity($value)) { $preferences.$name = $value }
+            else { $status = 'invalid' }
         }
         $monitor = $stored.PSObject.Properties['Monitor']
-        if ($null -ne $monitor -and $monitor.Value -is [string] -and $monitor.Value.Length -le 256 -and -not [string]::IsNullOrWhiteSpace($monitor.Value)) {
-            $preferences.Monitor = $monitor.Value
+        if ($null -ne $monitor -and $null -ne $monitor.Value) {
+            if ($monitor.Value -is [string] -and $monitor.Value.Length -le 256 -and -not [string]::IsNullOrWhiteSpace($monitor.Value)) {
+                $preferences.Monitor = $monitor.Value
+            }
+            else { $status = 'invalid' }
         }
         $codexDataDirectory = $stored.PSObject.Properties['CodexDataDirectory']
-        if ($null -ne $codexDataDirectory) {
+        if ($null -ne $codexDataDirectory -and $null -ne $codexDataDirectory.Value) {
             $preferences.CodexDataDirectory = ConvertTo-CodexDataDirectoryPath $codexDataDirectory.Value
+            if ($null -eq $preferences.CodexDataDirectory) { $status = 'invalid' }
         }
         $language = $stored.PSObject.Properties['Language']
-        if ($null -ne $language -and $language.Value -is [string] -and @(Get-WidgetLanguageCodes) -ccontains $language.Value) {
-            $preferences.Language = $language.Value
+        if ($null -ne $language -and $null -ne $language.Value) {
+            if ($language.Value -is [string] -and @(Get-WidgetLanguageCodes) -ccontains $language.Value) { $preferences.Language = $language.Value }
+            else { $status = 'invalid' }
         }
         $themeCount = @(Get-WidgetThemes).Count
         $theme = $stored.PSObject.Properties['Theme']
-        if ($null -ne $theme -and $theme.Value -isnot [bool] -and $theme.Value -is [System.ValueType]) {
+        if ($null -ne $theme -and $null -ne $theme.Value -and $theme.Value -isnot [bool] -and $theme.Value -is [System.ValueType]) {
             try { $themeValue = [double]$theme.Value } catch { $themeValue = -1 }
             if (-not [double]::IsNaN($themeValue) -and -not [double]::IsInfinity($themeValue) -and $themeValue -eq [Math]::Floor($themeValue) -and $themeValue -ge 0 -and $themeValue -lt $themeCount) {
                 $preferences.Theme = [int]$themeValue
             }
+            else { $status = 'invalid' }
         }
+        elseif ($null -ne $theme -and $null -ne $theme.Value) { $status = 'invalid' }
+        $preferences.StoreStatus = $status
+        $script:PreferenceStoreStatus = $status
     }
-    catch { }
+    catch {
+        $preferences.StoreStatus = 'invalid'
+        $script:PreferenceStoreStatus = 'invalid'
+    }
     return $preferences
 }
 
@@ -1088,6 +1547,7 @@ function Save-WidgetPreferences {
         [AllowNull()][string]$Language = $null
     )
 
+    if ($script:PreferenceStoreStatus -ceq 'invalid') { return $false }
     if ($Left -is [bool] -or $Left -isnot [System.ValueType] -or
         $Top -is [bool] -or $Top -isnot [System.ValueType] -or
         $Theme -is [bool] -or $Theme -isnot [System.ValueType] -or
@@ -1112,7 +1572,9 @@ function Save-WidgetPreferences {
         CodexDataDirectory = $codexDataDirectoryPath
         Language = $Language
     } | ConvertTo-Json -Compress
-    return Save-TextAtomically -Path $path -Text $json
+    $saved = Save-TextAtomically -Path $path -Text $json
+    if ($saved) { $script:PreferenceStoreStatus = 'valid' }
+    return $saved
 }
 
 function Get-SnappedWidgetPosition {
@@ -1423,7 +1885,7 @@ function Format-ResetCountdown {
     if ($null -eq $State) { return '—' }
     $current = Get-CurrentLimitState -State $State -Now $Now
     if ($null -eq $current) { return Get-WidgetText 'countdown.waiting' }
-    $remaining = ([datetime]$current.ResetAt) - $Now
+    $remaining = ([datetime]$current.ResetAt).ToUniversalTime() - $Now.ToUniversalTime()
     if ($remaining.TotalDays -ge 1) {
         return Get-WidgetText 'countdown.daysHours' @([math]::Floor($remaining.TotalDays), $remaining.Hours)
     }
@@ -1802,7 +2264,9 @@ function Set-WidgetState {
 
     $observedProperty = if ($null -ne $usageState) { $usageState.PSObject.Properties['ObservedAt'] } else { $null }
     $observedText = if ($null -ne $observedProperty -and $observedProperty.Value -is [datetime]) {
-        ([datetime]$observedProperty.Value).ToString('g', $script:CurrentLanguageCulture)
+        $observedValue = [datetime]$observedProperty.Value
+        if ($observedValue.Kind -eq [DateTimeKind]::Utc) { $observedValue = $observedValue.ToLocalTime() }
+        $observedValue.ToString('g', $script:CurrentLanguageCulture)
     } else { $null }
     $diagnosticText = $null
     if ($null -ne $script:LastUsageDiagnostic) {
@@ -3024,7 +3488,8 @@ if ($SelfTest) {
     $refreshStart = $runtimeSource.IndexOf('function Start-UsageRefresh', [StringComparison]::Ordinal)
     $refreshEnd = $runtimeSource.IndexOf('function Complete-UsageRefresh', $refreshStart, [StringComparison]::Ordinal)
     $refreshSource = if ($refreshStart -ge 0 -and $refreshEnd -gt $refreshStart) { $runtimeSource.Substring($refreshStart, $refreshEnd - $refreshStart) } else { '' }
-    Assert-Widget ($refreshSource.Contains("AddParameter('DataDirectory'")) 'the background refresh should receive the resolved data directory.'
+    Assert-Widget ($refreshSource.Contains('Start-UsageScanProcess') -and
+        $refreshSource.Contains('-DataDirectory $script:CodexDataDirectory')) 'the isolated background refresh should receive the resolved data directory.'
     $timerStart = $runtimeSource.IndexOf('$script:WidgetTimer.Add_Tick({', [StringComparison]::Ordinal)
     $timerEnd = $runtimeSource.IndexOf('$script:WidgetTimer.Start()', $timerStart, [StringComparison]::Ordinal)
     $timerSource = if ($timerStart -ge 0 -and $timerEnd -gt $timerStart) { $runtimeSource.Substring($timerStart, $timerEnd - $timerStart) } else { '' }
@@ -3348,7 +3813,7 @@ if ($SelfTest) {
     $newerLimits.secondary.used_percent = 42
     $newer = [pscustomobject]@{ timestamp = [DateTimeOffset]::UtcNow.AddSeconds(-10).ToString('o'); payload = [pscustomobject]@{ info = $fixtureEvent.payload.info; rate_limits = $newerLimits } }
     $newest = Get-NewestUsageState -Events @($older, $newer)
-    Assert-Widget ($newest.LimitWindows[1].UsedPercent -eq 42 -and $newest.ObservedAt -gt $older.timestamp -and $null -ne $newest.TokenDetails) 'newest valid rate-limit event should attach observation and token details.'
+    Assert-Widget ($newest.LimitWindows[1].UsedPercent -eq 42 -and $newest.ObservedAt -gt (ConvertTo-ObservedAt $older.timestamp) -and $null -ne $newest.TokenDetails) 'newest valid rate-limit event should attach observation and token details.'
     Assert-Widget ($newest.PSObject.Properties.Name -notcontains 'IsStale') 'newest state should not expose stale state.'
 
     $deep = [pscustomobject]@{}
@@ -3565,80 +4030,6 @@ if ($SelfTest) {
             Assert-Widget ($null -eq $diagnosticRefresh.State -and $diagnosticRefresh.Diagnostic -eq $diagnostic) 'a safe null-state diagnostic should be preserved.'
         }
 
-        $workerNames = @(Get-UsageWorkerFunctionNames)
-        Assert-Widget ($workerNames -contains 'ConvertTo-LimitWindow' -and $workerNames -contains 'Get-TokenPercent' -and $workerNames -contains 'Get-CodexUsageSnapshot') 'the worker list should contain the complete data pipeline.'
-        $incompleteState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-        foreach ($functionName in @($workerNames | Where-Object { $_ -ne 'Get-CodexUsageState' })) {
-            $definition = (Get-Command -Name $functionName -CommandType Function -ErrorAction Stop).Definition
-            $incompleteState.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition))
-        }
-        $incompleteRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($incompleteState)
-        $incompleteRunspace.Open()
-        $incompleteWorker = [System.Management.Automation.PowerShell]::Create()
-        $incompleteWorker.Runspace = $incompleteRunspace
-        try {
-            [void]$incompleteWorker.AddCommand('Get-CodexUsageSnapshot')
-            [void]$incompleteWorker.Invoke()
-            Assert-Widget ($incompleteWorker.HadErrors) 'omitting a real worker dependency should make the invocation fail.'
-        }
-        finally {
-            $incompleteWorker.Dispose()
-            $incompleteRunspace.Dispose()
-        }
-
-        $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-        foreach ($functionName in $workerNames) {
-            $definition = (Get-Command -Name $functionName -CommandType Function -ErrorAction Stop).Definition
-            $initialState.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition))
-        }
-        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
-        $runspace.Open()
-        $worker = [System.Management.Automation.PowerShell]::Create()
-        $worker.Runspace = $runspace
-        try {
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $workerSnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -ne $workerSnapshot.State -and $null -eq $workerSnapshot.Diagnostic) 'restoring the production worker list should execute a valid snapshot without command errors.'
-
-            [System.IO.File]::Delete($fallbackFile)
-            $worker.Commands.Clear()
-            $worker.Streams.Error.Clear()
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $emptySnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $emptySnapshot.State -and $emptySnapshot.Diagnostic -eq 'empty_directory') 'the worker snapshot should distinguish an empty directory.'
-
-            [System.IO.Directory]::Delete($sessionDirectory)
-            $worker.Commands.Clear()
-            $worker.Streams.Error.Clear()
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $missingSnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $missingSnapshot.State -and $missingSnapshot.Diagnostic -eq 'missing_directory') 'the worker snapshot should distinguish a missing directory.'
-
-            [System.IO.Directory]::CreateDirectory($sessionDirectory) | Out-Null
-            [System.IO.File]::WriteAllText($fallbackFile, '{bad json')
-            $worker.Commands.Clear()
-            $worker.Streams.Error.Clear()
-            [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-            $invalidSnapshot = @($worker.Invoke())[-1]
-            Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $invalidSnapshot.State -and $invalidSnapshot.Diagnostic -eq 'no_valid_event') 'the worker snapshot should distinguish invalid events.'
-
-            [System.IO.File]::WriteAllText($fallbackFile, $eventLine)
-            $lockedSession = [System.IO.File]::Open($fallbackFile, 'Open', 'Read', 'None')
-            try {
-                $worker.Commands.Clear()
-                $worker.Streams.Error.Clear()
-                [void]$worker.AddCommand('Get-CodexUsageSnapshot')
-                $failedSnapshot = @($worker.Invoke())[-1]
-                Assert-Widget (-not $worker.HadErrors -and $worker.Streams.Error.Count -eq 0 -and $null -eq $failedSnapshot.State -and $failedSnapshot.Diagnostic -eq 'read_failed') 'the worker snapshot should distinguish a session read failure.'
-            }
-            finally {
-                $lockedSession.Dispose()
-            }
-        }
-        finally {
-            $worker.Dispose()
-            $runspace.Dispose()
-        }
     }
     finally {
         $env:USERPROFILE = $savedProfile
@@ -3854,6 +4245,33 @@ if ($SelfTest) {
 
 if ($SelfTest) { return }
 
+if ($ScanWorker) {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        if ($ScanGeneration -cnotmatch '^[0-9a-f]{32}$' -or [string]::IsNullOrWhiteSpace($ScanDataDirectory) -or
+            [string]::IsNullOrWhiteSpace($ScanOutputPath)) { throw 'Invalid scan-worker arguments.' }
+        $dataDirectory = Resolve-CodexDataDirectory $ScanDataDirectory $null $null
+        if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
+        $workerRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'worker'))
+        $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
+        if (-not $workerDirectory.Exists -or ($workerDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Invalid scan output directory.'
+        }
+        $expectedOutput = [IO.Path]::GetFullPath((Join-Path $workerRoot ($ScanGeneration + '.json')))
+        if (-not $expectedOutput.Equals([IO.Path]::GetFullPath($ScanOutputPath), [StringComparison]::OrdinalIgnoreCase) -or
+            [IO.File]::Exists($expectedOutput)) { throw 'Invalid scan output path.' }
+
+        $snapshot = Get-CodexUsageSnapshot -DataDirectory $dataDirectory -ReadOnly
+        $result = [pscustomobject]@{ schemaVersion = 1; generation = $ScanGeneration; snapshot = $snapshot }
+        $json = $result | ConvertTo-Json -Depth 16 -Compress -ErrorAction Stop
+        if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 262144) { throw 'Scan result exceeds 256 KiB.' }
+        if (-not (Save-TextAtomically -Path $expectedOutput -Text $json)) { throw 'Scan result could not be saved.' }
+        exit 0
+    }
+    catch { exit 2 }
+}
+
 $script:WidgetPreferences = Get-WidgetPreferences
 try {
     Initialize-WidgetLocalization -Root $PSScriptRoot `
@@ -4024,11 +4442,13 @@ $script:DetailAccentBrush = $null
 $script:DetailAccentSoftBrush = $null
 $script:LastUsageState = $null
 $script:LastUsageDiagnostic = $null
+$script:LastUsageClassification = 'empty'
 $script:RefreshTicks = 0
 $script:WidgetTimer = $null
-$script:UsageRunspace = $null
-$script:UsagePowerShell = $null
-$script:UsageAsyncResult = $null
+$script:UsageJob = $null
+$script:UsageWorkerJobHandle = [IntPtr]::Zero
+$script:UsageFailureCount = 0
+$script:UsageNextAttemptAtUtc = [datetime]::MinValue
 $script:PendingUsageState = $null
 $script:NotifyIcon = $null
 $script:TrayMenu = $null
@@ -4392,6 +4812,7 @@ function Show-UsageReminder {
     try {
         $remaining = [double]$State.RemainingPercent
         $resetAt = [datetime]$State.ResetAt
+        if ($resetAt.Kind -eq [DateTimeKind]::Utc) { $resetAt = $resetAt.ToLocalTime() }
         $script:NotifyIcon.ShowBalloonTip(
             5000,
             (Get-WidgetText 'reminder.title' @($remaining)),
@@ -4434,54 +4855,57 @@ function Show-CodexDataDirectoryPicker {
 }
 
 function Initialize-UsageWorker {
-    $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    foreach ($functionName in Get-UsageWorkerFunctionNames) {
-        $definition = (Get-Command -Name $functionName -CommandType Function -ErrorAction Stop).Definition
-        $entry = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition)
-        $initialState.Commands.Add($entry)
+    $workerRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'worker'
+    [void][IO.Directory]::CreateDirectory($workerRoot)
+    if (([IO.DirectoryInfo]$workerRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'The usage worker directory is a reparse point.'
     }
-
-    $script:UsageRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
-    $script:UsageRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-    $script:UsageRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-    $script:UsageRunspace.Open()
-    $script:UsagePowerShell = [System.Management.Automation.PowerShell]::Create()
-    $script:UsagePowerShell.Runspace = $script:UsageRunspace
+    if ($script:UsageWorkerJobHandle -eq [IntPtr]::Zero) { $script:UsageWorkerJobHandle = New-UsageWorkerJob }
 }
 
 function Start-UsageRefresh {
-    if ($null -eq $script:UsagePowerShell -or $null -ne $script:UsageAsyncResult) { return $false }
+    if ($null -ne $script:UsageJob -or [datetime]::UtcNow -lt $script:UsageNextAttemptAtUtc) { return $false }
 
     try {
         $script:CodexDataDirectory = Resolve-CodexDataDirectory `
             $script:WidgetPreferences.CodexDataDirectory $env:CODEX_HOME $env:USERPROFILE
-        $script:UsagePowerShell.Commands.Clear()
-        $script:UsagePowerShell.Streams.Error.Clear()
-        [void]$script:UsagePowerShell.AddCommand('Get-CodexUsageSnapshot')
-        [void]$script:UsagePowerShell.AddParameter('DataDirectory', $script:CodexDataDirectory)
-        $script:UsageAsyncResult = $script:UsagePowerShell.BeginInvoke()
+        if ($null -eq $script:CodexDataDirectory) { throw 'The Codex data directory is unavailable.' }
+        $generation = [guid]::NewGuid().ToString('N')
+        $script:UsageJob = Start-UsageScanProcess -ScriptPath $PSCommandPath `
+            -DataDirectory $script:CodexDataDirectory -Generation $generation `
+            -WorkerJobHandle $script:UsageWorkerJobHandle
         return $true
     }
     catch {
-        $script:UsageAsyncResult = $null
+        $script:UsageJob = $null
+        $script:UsageFailureCount++
+        $delay = @(1, 5, 15, 30)[[math]::Min($script:UsageFailureCount - 1, 3)]
+        $script:UsageNextAttemptAtUtc = [datetime]::UtcNow.AddSeconds($delay)
         return $false
     }
 }
 
 function Complete-UsageRefresh {
-    if ($null -eq $script:UsageAsyncResult -or -not $script:UsageAsyncResult.IsCompleted) { return }
+    if ($null -eq $script:UsageJob) { return }
 
-    $completed = $script:UsageAsyncResult
-    $script:UsageAsyncResult = $null
-    $snapshot = $null
-    $errorCount = 0
-    try {
-        $results = $script:UsagePowerShell.EndInvoke($completed)
-        if ($null -ne $results -and $results.Count -gt 0) { $snapshot = $results[$results.Count - 1] }
+    $received = Receive-UsageScanProcess -Job $script:UsageJob -TimeoutSeconds 10
+    if ($received.Status -ceq 'pending') { return }
+    $snapshot = $received.Snapshot
+    $script:UsageJob = $null
+
+    if ($null -ne $snapshot) {
+        $snapshot = Apply-UsageSnapshotPersistence $snapshot
+        $script:UsageFailureCount = 0
+        $script:UsageNextAttemptAtUtc = [datetime]::MinValue
+        $script:LastUsageClassification = $snapshot.Classification
     }
-    catch { $errorCount = 1 }
-    $errorCount += $script:UsagePowerShell.Streams.Error.Count
-    $refreshResult = Resolve-UsageRefreshResult -Snapshot $snapshot -ErrorCount $errorCount
+    else {
+        $script:UsageFailureCount++
+        $delay = @(1, 5, 15, 30)[[math]::Min($script:UsageFailureCount - 1, 3)]
+        $script:UsageNextAttemptAtUtc = [datetime]::UtcNow.AddSeconds($delay)
+        $script:LastUsageClassification = 'error'
+    }
+    $refreshResult = Resolve-UsageRefreshResult -Snapshot $snapshot -ErrorCount $(if ($null -eq $snapshot) { 1 } else { 0 })
 
     $script:LastUsageDiagnostic = $refreshResult.Diagnostic
     $script:PendingUsageState = $refreshResult.State
@@ -4498,19 +4922,22 @@ function Complete-UsageRefresh {
 }
 
 function Stop-UsageWorker {
-    if ($null -ne $script:UsagePowerShell) {
-        if ($null -ne $script:UsageAsyncResult) {
-            try { $script:UsagePowerShell.Stop() } catch { }
-            try { $script:UsagePowerShell.EndInvoke($script:UsageAsyncResult) | Out-Null } catch { }
-            $script:UsageAsyncResult = $null
+    if ($null -ne $script:UsageJob) {
+        $job = $script:UsageJob
+        try {
+            if (-not $job.Process.HasExited) {
+                $job.Process.Kill()
+                [void]$job.Process.WaitForExit(2000)
+            }
         }
-        try { $script:UsagePowerShell.Dispose() } catch { }
-        $script:UsagePowerShell = $null
+        catch { }
+        try { if ([IO.File]::Exists($job.OutputPath)) { [IO.File]::Delete($job.OutputPath) } } catch { }
+        try { $job.Process.Dispose() } catch { }
+        $script:UsageJob = $null
     }
-    if ($null -ne $script:UsageRunspace) {
-        try { $script:UsageRunspace.Close() } catch { }
-        try { $script:UsageRunspace.Dispose() } catch { }
-        $script:UsageRunspace = $null
+    if ($script:UsageWorkerJobHandle -ne [IntPtr]::Zero) {
+        try { Close-UsageWorkerJob -Handle $script:UsageWorkerJobHandle } catch { }
+        $script:UsageWorkerJobHandle = [IntPtr]::Zero
     }
     $script:PendingUsageState = $null
 }

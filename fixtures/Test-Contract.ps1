@@ -90,4 +90,17 @@ foreach ($propertyName in 'ContextPercent', 'InputPercent', 'OutputPercent', 'Re
     Assert-Contract ($actual -ceq [string]$precisionCase.expected.$expectedName) "$propertyName changed."
 }
 
+$cacheCase = @($expected.cases | Where-Object id -eq 'cache-order')[0]
+$cacheEvents = @(Get-Content -LiteralPath (Join-Path $contractRoot $cacheCase.input) | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+$cacheState = Get-NewestUsageState -Events $cacheEvents -LimitId 'codex'
+Assert-Contract ($cacheState.LimitWindows[0].UsedPercent -eq 51) 'the highest observation in the current reset cycle must win.'
+Assert-Contract ([string]$cacheState.TokenDetails.CacheHitTokens -ceq $cacheCase.expected.cacheHitTokens -and
+    [string]$cacheState.TokenDetails.CacheMissTokens -ceq $cacheCase.expected.cacheMissTokens) 'out-of-order cache counters must use the monotonic maximum.'
+
+$resetCase = @($expected.cases | Where-Object id -eq 'reset-boundary')[0]
+$resetEvents = @(Get-Content -LiteralPath (Join-Path $contractRoot $resetCase.input) | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+$resetState = Get-NewestUsageState -Events $resetEvents -LimitId 'codex'
+$resetNow = [datetime]::Parse($resetCase.nowUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+Assert-Contract ($null -eq (Get-CurrentLimitState -State $resetState -Now $resetNow)) 'resetAt equal to now must be expired.'
+
 Write-Output 'Contract self-test passed.'
