@@ -8,12 +8,18 @@
          <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="080000000000000000000002" BuildableName="CodexUsageWidgetTests.xctest" BlueprintName="CodexUsageWidgetTests" ReferencedContainer="container:CodexUsageWidget.xcodeproj"/>
          </BuildActionEntry>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="080000000000000000000003" BuildableName="CodexUsageWidgetUITests.xctest" BlueprintName="CodexUsageWidgetUITests" ReferencedContainer="container:CodexUsageWidget.xcodeproj"/>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
       <Testables>
          <TestableReference skipped="NO">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="080000000000000000000002" BuildableName="CodexUsageWidgetTests.xctest" BlueprintName="CodexUsageWidgetTests" ReferencedContainer="container:CodexUsageWidget.xcodeproj"/>
+         </TestableReference>
+         <TestableReference skipped="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="080000000000000000000003" BuildableName="CodexUsageWidgetUITests.xctest" BlueprintName="CodexUsageWidgetUITests" ReferencedContainer="container:CodexUsageWidget.xcodeproj"/>
          </TestableReference>
       </Testables>
    </TestAction>
