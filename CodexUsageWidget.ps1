@@ -1220,6 +1220,7 @@ function Invoke-UsageScanWorker {
     $ProgressPreference = 'SilentlyContinue'
     $workerStage = 'startup'
     try {
+        [Console]::InputEncoding = [Text.Encoding]::ASCII
         $workerDataDirectory = $env:CODEX_WIDGET_DATA_DIRECTORY
         if ([string]::IsNullOrWhiteSpace($workerDataDirectory)) { throw 'Invalid scan-worker arguments.' }
         while ($true) {
@@ -1228,12 +1229,8 @@ function Invoke-UsageScanWorker {
             if ($null -eq $workerGeneration) { return 0 }
             $workerDeadline = $null
             try {
-                $workerStage = 'deadline'
-                $workerDeadline = New-UsageWorkerDeadline
+                $workerStage = 'generation'
                 if ($workerGeneration -cnotmatch '^[0-9a-f]{32}$') { throw 'Invalid scan-worker arguments.' }
-                $workerStage = 'resolve'
-                $dataDirectory = Resolve-CodexDataDirectory $workerDataDirectory $null $null
-                if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
                 $workerStage = 'channel'
                 $workerRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($env:LOCALAPPDATA, 'CodexUsageWidget', 'worker'))
                 $workerDirectory = [IO.DirectoryInfo]::new($workerRoot)
@@ -1246,7 +1243,16 @@ function Invoke-UsageScanWorker {
                     throw 'Invalid scan channel directory.'
                 }
                 $expectedOutput = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'result.json'))
-                if ([IO.File]::Exists($expectedOutput)) { throw 'Invalid scan output path.' }
+                $readyPath = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'ready'))
+                if ([IO.File]::Exists($expectedOutput) -or [IO.Directory]::Exists($expectedOutput) -or
+                    [IO.File]::Exists($readyPath) -or [IO.Directory]::Exists($readyPath)) { throw 'Invalid scan output path.' }
+                $workerStage = 'ready'
+                if (-not (Save-TextAtomically -Path $readyPath -Text '')) { throw 'Scan request could not be acknowledged.' }
+                $workerStage = 'deadline'
+                $workerDeadline = New-UsageWorkerDeadline
+                $workerStage = 'resolve'
+                $dataDirectory = Resolve-CodexDataDirectory $workerDataDirectory $null $null
+                if ($null -eq $dataDirectory) { throw 'Invalid scan data directory.' }
                 $workerStage = 'snapshot'
                 $snapshot = Get-CodexUsageSnapshot -DataDirectory $dataDirectory -ReadOnly
                 $workerStage = 'write'
@@ -1399,8 +1405,10 @@ function Start-UsageScanProcess {
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $previousDataDirectory = [Environment]::GetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', [EnvironmentVariableTarget]::Process)
+        $previousLaunchInputEncoding = [Console]::InputEncoding
         try {
             [Environment]::SetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', $dataPath, [EnvironmentVariableTarget]::Process)
+            [Console]::InputEncoding = [Text.Encoding]::ASCII
             $process = [Diagnostics.Process]::Start($startInfo)
         }
         catch {
@@ -1409,6 +1417,7 @@ function Start-UsageScanProcess {
         }
         finally {
             [Environment]::SetEnvironmentVariable('CODEX_WIDGET_DATA_DIRECTORY', $previousDataDirectory, [EnvironmentVariableTarget]::Process)
+            [Console]::InputEncoding = $previousLaunchInputEncoding
         }
         if ($null -eq $process) {
             try { [IO.Directory]::Delete($channelPath, $true) } catch { }
@@ -1430,9 +1439,11 @@ function Start-UsageScanProcess {
         }
     }
     else { $process = $workerHost.Process }
-    $startedAt = [datetime]::UtcNow
+    $requestedAt = [datetime]::UtcNow
+    $previousInputEncoding = [Console]::InputEncoding
     try {
         if ($process.HasExited) { throw 'Scan worker exited before receiving a request.' }
+        [Console]::InputEncoding = [Text.Encoding]::ASCII
         $process.StandardInput.WriteLine($Generation)
         $process.StandardInput.Flush()
     }
@@ -1444,12 +1455,15 @@ function Start-UsageScanProcess {
         try { [IO.Directory]::Delete($channelPath, $true) } catch { }
         throw
     }
+    finally { [Console]::InputEncoding = $previousInputEncoding }
     return [pscustomobject]@{
         Process = $process
         Generation = $Generation
         OutputPath = $outputPath
         ChannelDirectory = $channelPath
-        StartedAtUtc = $startedAt
+        ReadyPath = (Join-Path $channelPath 'ready')
+        RequestedAtUtc = $requestedAt
+        StartedAtUtc = $null
     }
 }
 
@@ -1463,24 +1477,48 @@ function Receive-UsageScanProcess {
     $generation = $Job.PSObject.Properties['Generation'].Value
     $outputPath = $Job.PSObject.Properties['OutputPath'].Value
     $channelPath = $Job.PSObject.Properties['ChannelDirectory'].Value
-    $startedAt = $Job.PSObject.Properties['StartedAtUtc'].Value
+    $startedAtProperty = $Job.PSObject.Properties['StartedAtUtc']
+    $startedAt = if ($null -ne $startedAtProperty) { $startedAtProperty.Value } else { $null }
+    $readyProperty = $Job.PSObject.Properties['ReadyPath']
+    $requestedProperty = $Job.PSObject.Properties['RequestedAtUtc']
     if ($process -isnot [Diagnostics.Process] -or $generation -isnot [string] -or
-        $outputPath -isnot [string] -or $channelPath -isnot [string] -or $startedAt -isnot [datetime]) {
+        $outputPath -isnot [string] -or $channelPath -isnot [string] -or $null -eq $startedAtProperty -or
+        $null -eq $readyProperty -or $readyProperty.Value -isnot [string] -or
+        $null -eq $requestedProperty -or $requestedProperty.Value -isnot [datetime] -or
+        ($null -ne $startedAt -and $startedAt -isnot [datetime])) {
         return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false }
     }
+    $readyPath = $readyProperty.Value
+    try {
+        $expectedReadyPath = [IO.Path]::GetFullPath([IO.Path]::Combine($channelPath, 'ready'))
+        if (-not $expectedReadyPath.Equals([IO.Path]::GetFullPath($readyPath), [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false }
+        }
+    }
+    catch { return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false } }
     try {
         $hasExited = $process.HasExited
         $hasResult = [IO.File]::Exists($outputPath)
     }
     catch { return [pscustomobject]@{ Status = 'failed'; Snapshot = $null; ProcessExited = $false } }
+    if ($null -eq $startedAt -and [IO.File]::Exists($readyPath)) {
+        $startedAt = [datetime]::UtcNow
+        $startedAtProperty.Value = $startedAt
+    }
+    # ponytail: cold PowerShell startup gets one fixed budget; per-scan limits remain ten and twelve seconds.
+    $startupTimedOut = $null -eq $startedAt -and -not $hasExited -and
+        ([datetime]::UtcNow - $requestedProperty.Value.ToUniversalTime()).TotalSeconds -ge 30
+    if ($null -eq $startedAt -and -not $hasExited -and -not $startupTimedOut) {
+        return [pscustomobject]@{ Status = 'pending'; Snapshot = $null; ProcessExited = $false }
+    }
     if (-not $hasResult -and -not $hasExited -and
-        ([datetime]::UtcNow - $startedAt.ToUniversalTime()).TotalSeconds -lt $TimeoutSeconds) {
+        -not $startupTimedOut -and ([datetime]::UtcNow - $startedAt.ToUniversalTime()).TotalSeconds -lt $TimeoutSeconds) {
         return [pscustomobject]@{ Status = 'pending'; Snapshot = $null; ProcessExited = $false }
     }
 
-    $timedOut = -not $hasResult -and -not $hasExited
+    $timedOut = $startupTimedOut -or (-not $hasResult -and -not $hasExited)
     $snapshot = $null
-    if ($hasResult -and -not $hasExited) {
+    if (-not $timedOut -and $hasResult -and -not $hasExited) {
         $snapshot = Read-UsageScanResult -Path $outputPath -ExpectedGeneration $generation
     }
     $stopProcess = $timedOut -or $hasExited -or $null -eq $snapshot
@@ -1490,6 +1528,7 @@ function Receive-UsageScanProcess {
         }
         $hasExited = Stop-UsageWorkerProcess -Process $process
     }
+    try { if ($null -ne $readyPath -and [IO.File]::Exists($readyPath)) { [IO.File]::Delete($readyPath) } } catch { }
     try { if ([IO.File]::Exists($outputPath)) { [IO.File]::Delete($outputPath) } } catch { }
     try { if ([IO.Directory]::Exists($channelPath)) { [IO.Directory]::Delete($channelPath, $false) } } catch { }
     $status = if ($timedOut) { 'timeout' } elseif ($null -ne $snapshot) { 'completed' } else { 'failed' }
@@ -5533,6 +5572,7 @@ function Stop-UsageWorker {
         else { $null }
     if ($null -ne $process) { [void](Stop-UsageWorkerProcess -Process $process) }
     if ($null -ne $job) {
+        try { if ($null -ne $job.ReadyPath -and [IO.File]::Exists($job.ReadyPath)) { [IO.File]::Delete($job.ReadyPath) } } catch { }
         try { if ([IO.File]::Exists($job.OutputPath)) { [IO.File]::Delete($job.OutputPath) } } catch { }
         try { if ([IO.Directory]::Exists($job.ChannelDirectory)) { [IO.Directory]::Delete($job.ChannelDirectory, $false) } } catch { }
     }

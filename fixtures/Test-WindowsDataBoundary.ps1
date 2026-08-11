@@ -201,10 +201,18 @@ try {
     $workerEnvironmentBefore = @{}
     foreach ($name in $workerEnvironmentNames) { $workerEnvironmentBefore[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
     $workerWatch = [Diagnostics.Stopwatch]::StartNew()
-    $workerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') -DataDirectory $workerData -Generation $generation
+    $savedConsoleInputEncoding = [Console]::InputEncoding
+    try {
+        [Console]::InputEncoding = [Text.UTF8Encoding]::new($true)
+        $workerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') -DataDirectory $workerData -Generation $generation
+    }
+    finally { [Console]::InputEncoding = $savedConsoleInputEncoding }
     $channelDirectory = Join-Path $workerRoot ('CodexUsageWidget-scan-' + $generation)
     $workerOutput = Join-Path $channelDirectory 'result.json'
+    $workerReady = Join-Path $channelDirectory 'ready'
     Assert-Boundary ($workerJob.OutputPath -ceq $workerOutput -and $workerJob.ChannelDirectory -ceq $channelDirectory) 'each scan must bind output to its own private channel directory.'
+    Assert-Boundary ($workerJob.ReadyPath -ceq $workerReady -and $workerJob.RequestedAtUtc -is [datetime] -and
+        $null -eq $workerJob.StartedAtUtc) 'a cold worker request must expose a private readiness marker before its scan deadline begins.'
     $arguments = [string]$workerJob.Process.StartInfo.Arguments
     Assert-Boundary ($arguments -notlike ('*' + $workerData + '*') -and $arguments -notlike ('*' + $workerOutput + '*') -and
         $arguments -notlike ('*' + $generation + '*')) 'data, result, and generation values must not appear in the worker command line.'
@@ -216,6 +224,13 @@ try {
     Assert-Boundary ($channelAcl.AreAccessRulesProtected -and $channelRules.Count -eq 1 -and
         $channelRules[0].IdentityReference.Value -ceq [Security.Principal.WindowsIdentity]::GetCurrent().Name) 'the per-round channel ACL must allow only the current user.'
     $worker = $workerJob.Process
+    $workerStartupDeadlineAt = [datetime]::UtcNow.AddSeconds(30)
+    while (-not [IO.File]::Exists($workerReady) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $workerStartupDeadlineAt) {
+        Start-Sleep -Milliseconds 50
+    }
+    $workerStartupExited = $worker.HasExited
+    $workerStartupError = if ($workerStartupExited) { $worker.StandardError.ReadToEnd().Trim() } else { '' }
+    Assert-Boundary ([IO.File]::Exists($workerReady) -and -not $workerStartupExited) ('the worker must acknowledge a validated request before scanning; diagnostic={0}.' -f $workerStartupError)
     $workerDeadlineAt = [datetime]::UtcNow.AddSeconds(12)
     while (-not [IO.File]::Exists($workerOutput) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $workerDeadlineAt) {
         Start-Sleep -Milliseconds 50
@@ -246,6 +261,11 @@ try {
     $secondGeneration = [guid]::NewGuid().ToString('N')
     $secondWorkerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') -DataDirectory $workerData -Generation $secondGeneration
     Assert-Boundary ($secondWorkerJob.Process.Id -eq $worker.Id) 'consecutive scans must reuse the same isolated worker process.'
+    $secondStartupDeadlineAt = [datetime]::UtcNow.AddSeconds(30)
+    while (-not [IO.File]::Exists($secondWorkerJob.ReadyPath) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $secondStartupDeadlineAt) {
+        Start-Sleep -Milliseconds 50
+    }
+    Assert-Boundary ([IO.File]::Exists($secondWorkerJob.ReadyPath) -and -not $worker.HasExited) 'a reused worker must acknowledge its next request independently.'
     $secondDeadlineAt = [datetime]::UtcNow.AddSeconds(12)
     while (-not [IO.File]::Exists($secondWorkerJob.OutputPath) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $secondDeadlineAt) {
         Start-Sleep -Milliseconds 50
@@ -270,11 +290,15 @@ try {
     $timeoutProcess = [Diagnostics.Process]::Start($timeoutInfo)
     $timeoutChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-55555555555555555555555555555555'
     [void][IO.Directory]::CreateDirectory($timeoutChannel)
+    $timeoutReady = Join-Path $timeoutChannel 'ready'
+    [IO.File]::WriteAllText($timeoutReady, '')
     $timeoutJob = [pscustomobject]@{
         Process = $timeoutProcess
         Generation = '55555555555555555555555555555555'
         OutputPath = (Join-Path $timeoutChannel 'result.json')
         ChannelDirectory = $timeoutChannel
+        ReadyPath = $timeoutReady
+        RequestedAtUtc = [datetime]::UtcNow.AddSeconds(-11)
         StartedAtUtc = [datetime]::UtcNow.AddSeconds(-11)
     }
     $timedOut = Receive-UsageScanProcess -Job $timeoutJob -TimeoutSeconds 10
