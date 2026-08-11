@@ -20,12 +20,39 @@ function Get-FixtureSnapshot([string]$TestRoot, [string]$Package, [string]$Name)
     return Get-CodexUsageSnapshot -DataDirectory $dataRoot
 }
 
+function New-PrivateWorkerChannel([string]$Path) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.Name,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow))
+    [void][IO.Directory]::CreateDirectory($Path, $security)
+}
+
+function Remove-TestJunction([string]$Path) {
+    if ($null -eq ('CodexUsageWidgetTestJunctionNative' -as [type])) {
+        Add-Type @'
+using System.Runtime.InteropServices;
+public static class CodexUsageWidgetTestJunctionNative {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool RemoveDirectory(string path);
+}
+'@
+    }
+    if ([IO.Directory]::Exists($Path)) { [void][CodexUsageWidgetTestJunctionNative]::RemoveDirectory($Path) }
+}
+
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 . (Join-Path $package 'CodexUsageWidget.ps1') -SelfTest | Out-Null
 
 $savedLocalAppData = $env:LOCALAPPDATA
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('CodexUsageWidget-data-boundary-' + [guid]::NewGuid().ToString('N'))
 $worker = $null
+$cleanupJunction = $null
 try {
     $env:LOCALAPPDATA = $testRoot
     $stateRoot = Join-Path $testRoot 'CodexUsageWidget'
@@ -192,6 +219,37 @@ try {
     }
     $workerRoot = Join-Path $stateRoot 'worker'
     [void][IO.Directory]::CreateDirectory($workerRoot)
+    $orphanNow = [datetime]'2026-08-12T00:00:00Z'
+    $oldChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-11111111111111111111111111111111'
+    $freshChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-22222222222222222222222222222222'
+    $unknownChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-33333333333333333333333333333333'
+    $junctionChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-44444444444444444444444444444444'
+    $badAclChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-55555555555555555555555555555555'
+    $unrelatedChannel = Join-Path $workerRoot 'CodexUsageWidget-scan-not-ours'
+    foreach ($path in $oldChannel, $freshChannel, $unknownChannel, $junctionChannel, $unrelatedChannel) {
+        New-PrivateWorkerChannel $path
+    }
+    [void][IO.Directory]::CreateDirectory($badAclChannel)
+    [IO.File]::WriteAllText((Join-Path $oldChannel 'ready'), '')
+    [IO.File]::WriteAllText((Join-Path $oldChannel 'result.json'), '{}')
+    [IO.File]::WriteAllText((Join-Path $oldChannel 'result.json.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp'), '{}')
+    [IO.File]::WriteAllText((Join-Path $unknownChannel 'unexpected.txt'), 'keep')
+    $outsideCleanupTarget = Join-Path $testRoot 'orphan-cleanup-outside'
+    [void][IO.Directory]::CreateDirectory($outsideCleanupTarget)
+    $outsideCleanupSentinel = Join-Path $outsideCleanupTarget 'sentinel.txt'
+    [IO.File]::WriteAllText($outsideCleanupSentinel, 'keep')
+    $cleanupJunction = Join-Path $junctionChannel 'linked'
+    $null = New-Item -ItemType Junction -Path $cleanupJunction -Target $outsideCleanupTarget -ErrorAction Stop
+    foreach ($path in $oldChannel, $unknownChannel, $junctionChannel, $badAclChannel, $unrelatedChannel) {
+        [IO.Directory]::SetLastWriteTimeUtc($path, $orphanNow.AddHours(-25))
+    }
+    Remove-StaleUsageWorkerChannels -Root $workerRoot -NowUtc $orphanNow
+    Assert-Boundary (-not [IO.Directory]::Exists($oldChannel)) 'startup cleanup must remove an owned expired channel containing only known artifacts.'
+    Assert-Boundary ([IO.Directory]::Exists($freshChannel) -and [IO.Directory]::Exists($unrelatedChannel)) 'startup cleanup must preserve fresh and non-owned names.'
+    Assert-Boundary ([IO.Directory]::Exists($badAclChannel) -and [IO.Directory]::Exists($unknownChannel)) 'startup cleanup must preserve channels with an untrusted ACL or unknown child.'
+    Assert-Boundary ([IO.Directory]::Exists($junctionChannel) -and [IO.File]::Exists($outsideCleanupSentinel)) 'startup cleanup must not follow or remove a nested reparse target.'
+    Remove-TestJunction $cleanupJunction
+    $cleanupJunction = $null
     $generation = [guid]::NewGuid().ToString('N')
     $stateHashes = @{}
     foreach ($path in $preferencePath, $ledgerPath, $reminderPath) {
@@ -352,6 +410,10 @@ Start-Sleep -Seconds 30
     $runtime = $source.Substring($source.LastIndexOf('if ($SelfTest) { return }', [StringComparison]::Ordinal))
     Assert-Boundary (-not $runtime.Contains('RunspaceFactory') -and -not $runtime.Contains('InitialSessionState')) 'runtime refresh must not copy business functions into an in-process runspace.'
     Assert-Boundary ($runtime.Contains('Start-UsageScanProcess')) 'runtime refresh must use the isolated process launcher.'
+    $initializeStart = $runtime.IndexOf('function Initialize-UsageWorker', [StringComparison]::Ordinal)
+    $refreshStart = $runtime.IndexOf('function Start-UsageRefresh', $initializeStart, [StringComparison]::Ordinal)
+    Assert-Boundary ($initializeStart -ge 0 -and $refreshStart -gt $initializeStart -and
+        $runtime.Substring($initializeStart, $refreshStart - $initializeStart).Contains('Remove-StaleUsageWorkerChannels')) 'runtime startup must invoke bounded stale-channel cleanup.'
 }
 finally {
     if ($null -ne $worker) {
@@ -360,6 +422,9 @@ finally {
     }
     $script:UsageWorkerHost = $null
     $env:LOCALAPPDATA = $savedLocalAppData
+    if ($null -ne $cleanupJunction -and (Test-Path -LiteralPath $cleanupJunction)) {
+        Remove-TestJunction $cleanupJunction
+    }
     if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
 }
 

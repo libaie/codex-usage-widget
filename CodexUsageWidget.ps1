@@ -1110,6 +1110,66 @@ function Apply-UsageSnapshotPersistence {
     return $Snapshot
 }
 
+function Remove-StaleUsageWorkerChannels {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+
+    try {
+        $rootDirectory = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($Root))
+        if (-not $rootDirectory.Exists -or ($rootDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $directoryEnumerator = $rootDirectory.EnumerateDirectories().GetEnumerator()
+        try {
+            # ponytail: 128 channels x 16 artifacts bounds startup work; raise only if one day can legitimately exceed it.
+            $directoryCount = 0
+            while ($directoryCount -lt 128 -and $directoryEnumerator.MoveNext()) {
+                $directoryCount++
+                $directory = [IO.DirectoryInfo]$directoryEnumerator.Current
+                try {
+                    if ($directory.Name -cnotmatch '^CodexUsageWidget-scan-[0-9a-f]{32}$' -or
+                        ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        ($NowUtc.ToUniversalTime() - $directory.LastWriteTimeUtc).TotalHours -le 24) { continue }
+                    $acl = $directory.GetAccessControl()
+                    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
+                    if ($owner -cne $currentSid -or -not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+                        $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                        $rules[0].IdentityReference.Value -cne $currentSid -or
+                        ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                            [Security.AccessControl.FileSystemRights]::FullControl) { continue }
+
+                    $files = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+                    $entryEnumerator = $directory.EnumerateFileSystemInfos().GetEnumerator()
+                    $trusted = $true
+                    try {
+                        $entryCount = 0
+                        while ($entryEnumerator.MoveNext()) {
+                            $entryCount++
+                            $entry = [IO.FileSystemInfo]$entryEnumerator.Current
+                            if ($entryCount -gt 16 -or $entry -isnot [IO.FileInfo] -or
+                                ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                                $entry.Name -cnotmatch '^(?:ready|result\.json)(?:\.[0-9a-f]{32}\.(?:tmp|bak))?$') {
+                                $trusted = $false
+                                break
+                            }
+                            $files.Add([IO.FileInfo]$entry)
+                        }
+                    }
+                    finally { if ($null -ne $entryEnumerator) { $entryEnumerator.Dispose() } }
+                    if (-not $trusted) { continue }
+                    foreach ($file in $files) { $file.Delete() }
+                    $directory.Delete($false)
+                }
+                catch { }
+            }
+        }
+        finally { if ($null -ne $directoryEnumerator) { $directoryEnumerator.Dispose() } }
+    }
+    catch { }
+}
+
 function New-UsageWorkerJob {
     if ($null -eq ('CodexUsageWorkerJobNative' -as [type])) {
         Add-Type -TypeDefinition @'
@@ -5493,6 +5553,7 @@ function Initialize-UsageWorker {
     if (([IO.DirectoryInfo]$workerRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
         throw 'The usage worker directory is a reparse point.'
     }
+    Remove-StaleUsageWorkerChannels -Root $workerRoot
     if ($script:UsageWorkerJobHandle -eq [IntPtr]::Zero) { $script:UsageWorkerJobHandle = New-UsageWorkerJob }
 }
 
