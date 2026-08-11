@@ -115,8 +115,8 @@
       "fixtureStats": { "validJsonLines": 6, "malformedJsonLines": 0 },
       "expected": {
         "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
-        "selectedWindow": "primary", "remainingPercent": "49.0", "cumulativeTokens": "1100", "cacheHitTokens": "1000",
-        "cacheMissTokens": "100", "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "selectedWindow": "primary", "remainingPercent": "49.0", "cumulativeTokens": "1000", "cacheHitTokens": "1000",
+        "cacheMissTokens": "0", "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
         "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406460000, "tasks": [], "taskNamesAvailable": false,
         "metrics": { "validEventCount": 4, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
       }
