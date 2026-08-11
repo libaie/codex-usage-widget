@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "sourceKind": "local-session-observation",
+  "cases": [
+    {
+      "id": "precision-and-tightest-window",
+      "input": "inputs/precision-and-tightest-window.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": {
+        "classification": "complete",
+        "selectedWindow": "secondary",
+        "remainingPercent": "39.0",
+        "cumulativeTokens": "9007199254741093",
+        "cacheHitTokens": "9007199254740000",
+        "cacheMissTokens": "993",
+        "contextTokens": "400",
+        "contextLimit": "800",
+        "contextPercent": "50.0",
+        "inputPercent": "75.0",
+        "outputPercent": "25.0",
+        "reasoningOutputPercent": "25.0"
+      }
+    },
+    {
+      "id": "demo",
+      "input": "inputs/demo.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": { "classification": "complete", "selectedWindow": "primary", "remainingPercent": "55.0" }
+    },
+    {
+      "id": "partial",
+      "input": "inputs/partial.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 1 },
+      "expected": { "classification": "partial", "malformedLineCount": 1 }
+    },
+    {
+      "id": "unsupported",
+      "input": "inputs/unsupported.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": { "classification": "unsupported", "unknownEventCount": 1 }
+    },
+    {
+      "id": "all-malformed",
+      "input": "inputs/all-malformed.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 0, "malformedJsonLines": 1 },
+      "expected": { "classification": "error", "malformedLineCount": 1 }
+    },
+    {
+      "id": "empty",
+      "input": "inputs/empty.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 0, "malformedJsonLines": 0 },
+      "expected": { "classification": "empty" }
+    },
+    {
+      "id": "reset-boundary",
+      "input": "inputs/reset-boundary.jsonl",
+      "nowUtc": "2026-08-11T00:00:00.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": { "classification": "complete", "selectedWindow": null, "remainingPercent": null }
+    },
+    {
+      "id": "overflow",
+      "input": "inputs/overflow.jsonl",
+      "nowUtc": "2026-08-11T00:00:01.000Z",
+      "fixtureStats": { "validJsonLines": 1, "malformedJsonLines": 0 },
+      "expected": { "classification": "partial", "cumulativeTokens": null }
+    },
+    {
+      "id": "cache-order",
+      "input": "inputs/cache-order.jsonl",
+      "nowUtc": "2026-08-11T00:03:00.000Z",
+      "fixtureStats": { "validJsonLines": 3, "malformedJsonLines": 0 },
+      "expected": { "classification": "complete", "cacheHitTokens": "1000", "cacheMissTokens": "100" }
+    }
+  ]
+}

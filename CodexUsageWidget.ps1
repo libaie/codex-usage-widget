@@ -151,9 +151,16 @@ function Get-TokenNumber {
     if ($null -eq $property) { return $null }
     $value = $property.Value
     if ($null -eq $value -or $value -is [bool] -or $value -isnot [System.ValueType]) { return $null }
-    $number = [double]$value
-    if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt 0) { return $null }
-    return $number
+    $typeCode = [Type]::GetTypeCode($value.GetType())
+    if ($typeCode -notin [TypeCode]::Byte, [TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::UInt16,
+        [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64,
+        [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal) { return $null }
+    if (($typeCode -eq [TypeCode]::Single -and [math]::Abs([double]$value) -gt 16777215) -or
+        ($typeCode -eq [TypeCode]::Double -and ([double]::IsNaN([double]$value) -or
+            [double]::IsInfinity([double]$value) -or [math]::Abs([double]$value) -gt 9007199254740991))) { return $null }
+    try { $number = [decimal]$value } catch { return $null }
+    if ($number -lt 0 -or $number -gt [long]::MaxValue -or $number -ne [decimal]::Truncate($number)) { return $null }
+    return [long]$number
 }
 
 function Get-TokenPercent {
@@ -165,18 +172,14 @@ function Get-TokenPercent {
     if ($null -eq $Numerator -or $null -eq $Denominator -or $Numerator -is [bool] -or
         $Denominator -is [bool] -or $Numerator -isnot [System.ValueType] -or
         $Denominator -isnot [System.ValueType]) { return $null }
-    $numeratorValue = [double]$Numerator
-    $denominatorValue = [double]$Denominator
-    if ([double]::IsNaN($numeratorValue) -or [double]::IsInfinity($numeratorValue) -or
-        $numeratorValue -lt 0 -or [double]::IsNaN($denominatorValue) -or
-        [double]::IsInfinity($denominatorValue) -or $denominatorValue -le 0) { return $null }
-    $percent = ($numeratorValue / $denominatorValue) * 100.0
-    if ([double]::IsNaN($percent) -or [double]::IsInfinity($percent)) { return $null }
-    return [math]::Round(
-        [math]::Max([double]0, [math]::Min([double]100, $percent)),
-        1,
-        [MidpointRounding]::ToEven
-    )
+    try {
+        $numeratorValue = [decimal]$Numerator
+        $denominatorValue = [decimal]$Denominator
+    }
+    catch { return $null }
+    if ($numeratorValue -lt 0 -or $denominatorValue -le 0) { return $null }
+    if ($numeratorValue -ge $denominatorValue) { return [decimal]100 }
+    return [decimal]::Round(($numeratorValue / $denominatorValue) * 100, 1, [MidpointRounding]::ToEven)
 }
 
 function Get-EventTokenDetails {
@@ -219,7 +222,7 @@ function Get-EventTokenDetails {
         $null -eq $inputTokens -and $null -eq $outputTokens -and $null -eq $reasoningTokens -and
         $null -eq $cacheHitTokens) { return $null }
 
-    $compositionTotal = if ($null -ne $inputTokens -and $null -ne $outputTokens) { $inputTokens + $outputTokens } else { $null }
+    $compositionTotal = if ($null -ne $inputTokens -and $null -ne $outputTokens) { [decimal]$inputTokens + [decimal]$outputTokens } else { $null }
     [pscustomobject]@{
         CumulativeTokens       = $cumulative
         CacheHitTokens         = $cacheHitTokens
@@ -3240,11 +3243,12 @@ if ($SelfTest) {
     Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = $true }) 'value')) 'boolean token values should be rejected.'
     Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = '1' }) 'value')) 'non-numeric token values should be rejected.'
     Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = [double]::NaN }) 'value') -and $null -eq (Get-TokenNumber ([pscustomobject]@{ value = [double]::PositiveInfinity }) 'value') -and $null -eq (Get-TokenNumber ([pscustomobject]@{ value = -1 }) 'value')) 'non-finite and negative token values should be rejected.'
-    Assert-Widget ((Get-TokenNumber ([pscustomobject]@{ value = 0 }) 'value') -eq 0 -and (Get-TokenNumber ([pscustomobject]@{ value = 12.5 }) 'value') -eq 12.5) 'finite non-negative token values should be accepted.'
+    Assert-Widget ((Get-TokenNumber ([pscustomobject]@{ value = 0 }) 'value') -eq 0 -and (Get-TokenNumber ([pscustomobject]@{ value = [long]::MaxValue }) 'value') -eq [long]::MaxValue) 'signed 64-bit token values should be accepted exactly.'
+    Assert-Widget ($null -eq (Get-TokenNumber ([pscustomobject]@{ value = 12.5 }) 'value') -and $null -eq (Get-TokenNumber ([pscustomobject]@{ value = [decimal]::MaxValue }) 'value')) 'fractional and overflowing token values should be rejected.'
     Assert-Widget ($null -eq (Get-TokenPercent $null 10) -and $null -eq (Get-TokenPercent 1 0)) 'token percentages need a value and positive denominator.'
     Assert-Widget ($null -eq (Get-TokenPercent -1 10) -and $null -eq (Get-TokenPercent ([double]::NaN) 10)) 'token percentages should reject negative and non-finite numerators.'
     Assert-Widget ($null -eq (Get-TokenPercent 1 -10) -and $null -eq (Get-TokenPercent 1 ([double]::PositiveInfinity))) 'token percentages should reject negative and non-finite denominators.'
-    Assert-Widget ((Get-TokenPercent 5e307 1e308) -eq 50.0) 'token percentages should divide before multiplying to avoid overflow.'
+    Assert-Widget ((Get-TokenPercent ([long]::MaxValue - 1) ([long]::MaxValue)) -eq 100.0) 'token percentages should divide before multiplying and round without overflowing.'
     Assert-Widget ((Get-TokenPercent 1 3) -eq 33.3 -and (Get-TokenPercent 200 100) -eq 100) 'token percentages should round and clamp.'
 
     $tokenDetails = Get-EventTokenDetails $fixtureEvent
