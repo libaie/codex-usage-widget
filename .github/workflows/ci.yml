@@ -1,0 +1,110 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows core and contract
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\CodexUsageWidget.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-Contract.ps1 -PackageRoot .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-WindowsDataBoundary.ps1 -PackageRoot .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows worker stability
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-WorkerStability.ps1 -PackageRoot .
+      - name: Windows launch and release boundaries
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\fixtures\Test-Launcher.ps1 -PackageRoot .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-ReleasePackage.ps1 -PackageRoot .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Windows artifacts
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Windows.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\dist\candidate\CodexUsageWidget-v1.1.0-windows.exe --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned
+          path: |
+            dist/candidate/CodexUsageWidget-v1.1.0-windows.exe
+            dist/candidate/CodexUsageWidget-v1.1.0-windows.exe.sha256
+            dist/candidate/CodexUsageWidget-v1.1.0-windows.zip
+            dist/candidate/CodexUsageWidget-v1.1.0-windows.zip.sha256
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test macOS core
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_VALUE="$(tr -d '\r\n' < VERSION)"
+          test "$VERSION_VALUE" = "1.1.0"
+          xcodebuild -version
+          xcodebuild -project macos/CodexUsageWidget.xcodeproj \
+            -scheme CodexUsageWidget \
+            -destination 'platform=macOS' \
+            -derivedDataPath .build \
+            MARKETING_VERSION="$VERSION_VALUE" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+      - name: Build and verify unsigned Universal app
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_VALUE="$(tr -d '\r\n' < VERSION)"
+          xcodebuild -project macos/CodexUsageWidget.xcodeproj \
+            -scheme CodexUsageWidget \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath .build \
+            MARKETING_VERSION="$VERSION_VALUE" \
+            ARCHS='arm64 x86_64' \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          APP=.build/Build/Products/Release/CodexUsageWidget.app
+          ARCHITECTURES="$(lipo -archs "$APP/Contents/MacOS/CodexUsageWidget")"
+          [[ " $ARCHITECTURES " == *" arm64 "* ]]
+          [[ " $ARCHITECTURES " == *" x86_64 "* ]]
+          test "$(plutil -extract LSMultipleInstancesProhibited raw -o - "$APP/Contents/Info.plist")" = "true"
+          SETTINGS="$(xcodebuild -project macos/CodexUsageWidget.xcodeproj -scheme CodexUsageWidget -configuration Release -showBuildSettings)"
+          grep -q 'ENABLE_APP_SANDBOX = NO' <<<"$SETTINGS"
+          grep -q 'ENABLE_HARDENED_RUNTIME = YES' <<<"$SETTINGS"
+          for locale in en-US zh-CN zh-TW ja-JP ko-KR; do
+            cmp "locales/$locale.json" "$APP/Contents/Resources/locales/$locale.json"
+          done
+          mkdir -p dist/candidate
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip
+          (cd dist/candidate && shasum -a 256 CodexUsageWidget-v1.1.0-macos-unsigned.zip > CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-unsigned
+          path: |
+            dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip
+            dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256
+          if-no-files-found: error

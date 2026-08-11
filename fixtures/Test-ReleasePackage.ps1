@@ -69,7 +69,12 @@ if (-not $RuntimeArchive) {
         'fixtures\contract\v1\inputs\overflow.jsonl', 'fixtures\contract\v1\inputs\partial.jsonl',
         'fixtures\contract\v1\inputs\precision-and-tightest-window.jsonl',
         'fixtures\contract\v1\inputs\reset-boundary.jsonl', 'fixtures\contract\v1\inputs\unsupported.jsonl',
-        'scripts\Build-Windows.ps1', 'windows\Bootstrap\Program.cs'
+        'scripts\Build-Windows.ps1', 'windows\Bootstrap\Program.cs',
+        'macos\CodexUsageWidget.xcodeproj\project.pbxproj',
+        'macos\CodexUsageWidget.xcodeproj\xcshareddata\xcschemes\CodexUsageWidget.xcscheme',
+        'macos\CodexUsageWidget\Info.plist', 'macos\CodexUsageWidget\App\main.swift',
+        'macos\CodexUsageWidget\Core\UsageCore.swift', 'macos\CodexUsageWidgetTests\CoreTests.swift',
+        '.github\workflows\ci.yml'
     )
 }
 
