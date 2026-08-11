@@ -501,6 +501,9 @@ final class WidgetModel: ObservableObject {
             return
         }
         now = Date()
+        if dataDirectory == nil {
+            dataDirectory = DataDirectoryResolver.resolve(savedPath: preferences.codexDataDirectory)
+        }
         guard let directory = dataDirectory, let executable = Bundle.main.executableURL else {
             diagnosticKey = "diagnostic.missingDirectory"
             return
@@ -1107,10 +1110,14 @@ final class WidgetController: NSObject, UNUserNotificationCenterDelegate {
             dragChanged: { [weak self] in self?.dragChanged($0) },
             dragEnded: { [weak self] in self?.dragEnded() }
         ))
-        detailPanel.contentView = NSHostingView(rootView: WidgetDetailView(
+        let detailHost = NSHostingView(rootView: WidgetDetailView(
             model: model,
             hoverChanged: { [weak self] in self?.detailHover($0) }
         ))
+        detailHost.setAccessibilityElement(true)
+        detailHost.setAccessibilityRole(.group)
+        detailHost.setAccessibilityIdentifier("usage-details")
+        detailPanel.contentView = detailHost
     }
 
     private func configureStatusItem() {
@@ -1205,6 +1212,7 @@ final class WidgetController: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func showDetails() {
+        if !ringPanel.isVisible { ringPanel.orderFront(nil) }
         if interaction.detailMode != .pinned { interaction.togglePinned() }
         syncDetails()
     }
