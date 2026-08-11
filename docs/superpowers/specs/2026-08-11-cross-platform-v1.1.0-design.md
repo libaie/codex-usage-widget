@@ -1785,18 +1785,34 @@ E0 不是代码决策，不能由 Codex 代替账号持有人完成，也不阻�
 - 公开发布仍明确依赖 E0/P9；这是外部执行门禁，不是待选方案。
 - 本计划阶段不推送、不创建 PR、tag 或 Release，也不触碰现有 v1.0.0 用户安装。
 
+## Implementation Tasks
+
+执行顺序以正文的 P0–P10 权威 DAG、owner 和完成门槛为准：P0 先冻结契约；P1/P2/P3/P4 可并行；P5/P6 可并行；P7–P10 串行收口。
+
+- [ ] **P0**：冻结 `VERSION=1.1.0`、schema v1、匿名 fixtures、expected state、五语言与八主题目录。
+- [ ] **P1**：完成 Windows 三态数据边界、隔离 scan worker、producer/consumer 256 KiB 边界和唯一持久化 writer。
+- [ ] **P2**：完成最小单文件 Windows EXE 引导、内嵌 ZIP 同源校验、并发释放和隐藏启动回归。
+- [ ] **P3**：完成单 target macOS Core、非沙盒目录访问、隔离 worker、POSIX writer 锁与共同契约测试。
+- [ ] **P4**：完成无密钥 Windows/macOS CI、固定 job timeout、根语言包直接打包和 fork secret 隔离。
+- [ ] **P5**：完成 Windows 六状态、拖拽吸附、详情/任务交互、键盘/无障碍和隔离 demo。
+- [ ] **P6**：完成 macOS 原生同语义体验、菜单栏/通知、五语言八主题、VoiceOver、Reduce Motion 与双显示器回归。
+- [ ] **P7**：完成双语贡献/发布文档、v1.1.0 release notes、平台资产表、脱敏反馈格式和最终截图。
+- [ ] **P8**：从完整 commit SHA 生成无密钥双平台候选，跑完 32/32 自动或明确 E2E gate，不创建 tag。
+- [ ] **P9**：在受保护环境完成签名、公证、真机验收，并把 manifest、六资产和证据一次上传为唯一 immutable artifact。
+- [ ] **P10**：只按 P9 artifact ID 发布；复核 digest/manifest、创建 annotated tag/draft、重下验证后公开或按规则回滚。
+
 ## GSTACK REVIEW REPORT
 
-| 审查 | 运行 | 状态 | 结果 |
-|---|---:|---|---|
-| CEO | 1 | CLEAN | SELECTIVE EXPANSION；7 项提议，5 项纳入，2 项延后；0 未决 |
-| Codex Review | 0 | UNAVAILABLE | CLI 访问被拒绝：`[codex-unavailable: access denied]`；不声称跨模型共识 |
-| Engineering | 1 | CLEAN | FULL_REVIEW；9 个 P1、0 个 P0；全部进入权威 DAG |
-| Design | 1 | CLEAN | 7.2/10 → 9.8/10；14 个决策已定案；0 未决 |
-| Developer Experience | 1 | CLEAN | 5.1/10 → 8.8/10；TTHW 从 Windows 5–10 分钟/Mac 不可达到 demo ≤5 分钟、全 gate 10/15 分钟 |
+| Review | Trigger | Why | Runs | Status | Findings |
+|---|---|---|---:|---|---|
+| CEO | `/autoplan` | 锁定产品目标、同步版本与选择性扩展边界 | 1 | CLEAN | 7 项提议，5 项纳入，2 项进入 `TODOS.md`；0 未决 |
+| Codex / Outside Voice | `/plan-eng-review` 的最终独立复审 | 挑战主审遗漏的跨进程 writer、输出信任边界和发布交接风险 | 1 | CLEAN | Claude CLI 不可用，未声称跨模型共识；独立 fallback 找到 3 个 P1，均经用户逐项批准并纳入：Mac 单 writer、producer 256 KiB、P9/P10 artifact 绑定 |
+| Engineering | `/autoplan` + `/plan-eng-review` | 锁定架构、数据流、失败恢复、测试和性能预算 | 2 | CLEAN | 初审 9 个 P1 全部进入计划；显式复审进一步冻结 10 条 critical requirements、资源门槛和 P0–P10 owner/DAG；0 未决 |
+| Design | `/autoplan` | 保持两端同语义体验，同时服从 WPF/AppKit 原生行为 | 1 | CLEAN | 7.2/10 → 9.8/10；14 个决策定案；0 未决 |
+| Developer Experience | `/autoplan` | 让首次贡献、demo、CI 失败与发布 runbook 可执行 | 1 | CLEAN | 5.1/10 → 8.8/10；demo 目标 ≤5 分钟，完整 gate Windows 10 分钟/Mac 15 分钟 |
 
-独立 CEO、设计、工程与 DX 声音均已运行；缺失的 `dx-hall-of-fame.md` 已如实降级记录，没有伪造参考内容。四轮审查之间的冲突已按最小方案消解：保留 Windows 稳定核心、Mac 只建一个 app target、共享数据契约而非运行时、使用原生构建入口、正式双平台 Release 保持同步门禁。
+独立 CEO、设计、工程、DX 与工程外部声音均已运行；缺失的 `dx-hall-of-fame.md` 和不可用的 Claude CLI 均已如实降级记录，没有伪造参考内容或跨模型共识。审查冲突按最小完整方案消解：保留 Windows 稳定核心、Mac 只建一个 app target、共享数据契约而非运行时、使用原生构建入口、正式双平台 Release 保持同步门禁。
 
-最终判定：**CEO + DESIGN + ENGINEERING + DX CLEARED — READY TO IMPLEMENT**。源码实施可立即开始；正式公开发布仅被 Apple 账号/证书、公证和真实 Mac 设备证据阻塞。当前没有需要用户继续选择的产品或工程决策。
+最终判定：**CEO + OUTSIDE + DESIGN + ENGINEERING + DX CLEARED — READY TO IMPLEMENT**。源码实施可立即开始；正式公开发布仅被 Apple 账号/证书、公证和真实 Mac 设备证据阻塞。当前没有需要用户继续选择的产品或工程决策。
 
 NO UNRESOLVED DECISIONS
