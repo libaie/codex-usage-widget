@@ -841,16 +841,18 @@ struct WidgetDetailView: View {
     private var state: NormalizedUsageState? { model.result?.state }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 13) {
-                header
-                usageSummary
-                activity
-                localCache
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    header
+                    usageSummary
+                    activity
+                    localCache
+                }
+                .padding(16)
             }
-            .padding(16)
+            .scrollIndicators(.automatic)
         }
-        .scrollIndicators(.automatic)
         .frame(width: 310, height: 506)
         .background(
             ZStack {
