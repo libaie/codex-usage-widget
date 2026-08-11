@@ -10,6 +10,7 @@
 		010000000000000000000002 /* UsageCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000002 /* UsageCore.swift */; };
 		010000000000000000000003 /* locales in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000004 /* locales */; };
 		010000000000000000000004 /* CoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000005 /* CoreTests.swift */; };
+		010000000000000000000005 /* UIContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000008 /* UIContractTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,6 +31,7 @@
 		020000000000000000000005 /* CoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreTests.swift; sourceTree = "<group>"; };
 		020000000000000000000006 /* CodexUsageWidget.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodexUsageWidget.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		020000000000000000000007 /* CodexUsageWidgetTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexUsageWidgetTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		020000000000000000000008 /* UIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIContractTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,7 +62,7 @@
 		};
 		050000000000000000000003 /* App */ = {isa = PBXGroup; children = (020000000000000000000001 /* main.swift */,); path = App; sourceTree = "<group>"; };
 		050000000000000000000004 /* Core */ = {isa = PBXGroup; children = (020000000000000000000002 /* UsageCore.swift */,); path = Core; sourceTree = "<group>"; };
-		050000000000000000000005 /* CodexUsageWidgetTests */ = {isa = PBXGroup; children = (020000000000000000000005 /* CoreTests.swift */,); path = CodexUsageWidgetTests; sourceTree = "<group>"; };
+		050000000000000000000005 /* CodexUsageWidgetTests */ = {isa = PBXGroup; children = (020000000000000000000005 /* CoreTests.swift */, 020000000000000000000008 /* UIContractTests.swift */,); path = CodexUsageWidgetTests; sourceTree = "<group>"; };
 		050000000000000000000006 /* Products */ = {isa = PBXGroup; children = (020000000000000000000006 /* CodexUsageWidget.app */, 020000000000000000000007 /* CodexUsageWidgetTests.xctest */,); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
@@ -120,7 +122,7 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		090000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (010000000000000000000001 /* main.swift in Sources */, 010000000000000000000002 /* UsageCore.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
-		090000000000000000000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (010000000000000000000004 /* CoreTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		090000000000000000000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (010000000000000000000004 /* CoreTests.swift in Sources */, 010000000000000000000005 /* UIContractTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
