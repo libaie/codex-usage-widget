@@ -126,6 +126,9 @@ try {
         @([IO.Directory]::GetFiles($workerRoot) | Where-Object { [IO.Path]::GetFileName($_) -cne 'scan-worker.ps1' }).Count
     } else { 0 }
     $residualDirectories = if ([IO.Directory]::Exists($workerRoot)) { [IO.Directory]::GetDirectories($workerRoot).Count } else { 0 }
+    $residualEntries = if ([IO.Directory]::Exists($workerRoot)) {
+        @([IO.Directory]::GetDirectories($workerRoot) | ForEach-Object { [IO.Directory]::GetFileSystemEntries($_) }).Count
+    } else { 0 }
     $sortedDurations = @($durations.ToArray() | Sort-Object)
     $p95 = $sortedDurations[[int]([math]::Ceiling($sortedDurations.Count * 0.95) - 1)]
     $parentCpuSeconds = [math]::Max(0, $hostProcess.TotalProcessorTime.TotalSeconds - $baselineCpuSeconds)
@@ -137,7 +140,9 @@ try {
         ($workerPeakBytes / 1MB), $parentCpuPercent, $combinedCpuPercent
     Write-Output $metricsLine
     if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "::notice title=Windows worker stability::$metricsLine" }
-    Assert-Stability ($alive -eq 0 -and $residualFiles -eq 0 -and $residualDirectories -eq 0) 'workers or private channel paths remained after refresh completion.'
+    Assert-Stability ($alive -eq 0 -and $residualFiles -eq 0 -and $residualDirectories -eq 0) `
+        ('workers or private channel paths remained after refresh completion (alive={0}, files={1}, directories={2}, channelEntries={3}).' -f
+            $alive, $residualFiles, $residualDirectories, $residualEntries)
     Assert-Stability ($hostProcess.HandleCount -le $baselineHandles + 8) 'parent handle count grew by more than eight after warmup.'
     Assert-Stability ($hostProcess.PrivateMemorySize64 -le $baselineMemory + 20971520) 'parent private memory grew by more than 20 MiB after warmup.'
     Assert-Stability ($workerPeakBytes -le 134217728) ('a worker exceeded 128 MiB peak working set: {0:N1} MiB.' -f ($workerPeakBytes / 1MB))
