@@ -13,6 +13,8 @@
     "menu.theme": "テーマ",
     "menu.chooseDirectory": "データフォルダを選択",
     "menu.resetState": "ローカル状態をリセット",
+    "menu.enableReminders": "使用量低下の通知を有効にする",
+    "menu.remindersDenied": "通知は許可されていません",
     "menu.exit": "ウィジェットを終了",
     "action.cancel": "キャンセル",
     "action.reset": "リセット",

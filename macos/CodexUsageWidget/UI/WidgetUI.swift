@@ -37,7 +37,7 @@ struct WidgetLocalization {
             let pack = try loadPack(from: directory.appendingPathComponent("\(code).json"), expectedCode: code)
             let keys = Set(pack.strings.keys)
             if code == "en-US" {
-                guard keys.count == 115 else { throw WidgetUIError.invalidResource }
+                guard keys.count == 117 else { throw WidgetUIError.invalidResource }
                 canonicalKeys = keys
                 canonicalPlaceholders = pack.strings.mapValues { placeholders($0) }
             }

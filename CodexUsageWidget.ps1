@@ -1137,7 +1137,8 @@ function Get-WidgetRequiredLanguageKeys {
     @(
         'app.title', 'app.alreadyRunning',
         'menu.showWidget', 'menu.hideWidget', 'menu.showDetails', 'menu.hideDetails', 'menu.language', 'menu.theme',
-        'menu.chooseDirectory', 'menu.resetState', 'menu.exit', 'action.cancel', 'action.reset',
+        'menu.chooseDirectory', 'menu.resetState', 'menu.enableReminders', 'menu.remindersDenied',
+        'menu.exit', 'action.cancel', 'action.reset',
         'language.zh-CN', 'language.zh-TW', 'language.en-US', 'language.ja-JP', 'language.ko-KR',
         'theme.glacier', 'theme.nebula', 'theme.ocean', 'theme.sakura', 'theme.aurora', 'theme.mica', 'theme.sunset', 'theme.lime',
         'detail.title', 'detail.remaining', 'detail.observed', 'detail.status',
@@ -2826,7 +2827,7 @@ if ($SelfTest) {
     Assert-Widget ((Resolve-WidgetLanguageCode 'JA-jp' ([cultureinfo]'en-US')) -ceq 'en-US') 'saved language codes should be case-sensitive.'
 
     $requiredLanguageKeys = @(Get-WidgetRequiredLanguageKeys)
-    Assert-Widget ($requiredLanguageKeys.Count -eq 115 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 115) 'the required language-key catalog should contain exactly 115 unique keys.'
+    Assert-Widget ($requiredLanguageKeys.Count -eq 117 -and ($requiredLanguageKeys | Select-Object -Unique).Count -eq 117) 'the required language-key catalog should contain exactly 117 unique keys.'
     $temporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     $temporaryLocaleRoot = Join-Path $temporaryParent ('CodexUsageWidget-Locale-' + [guid]::NewGuid().ToString('N'))
     $temporaryLocales = Join-Path $temporaryLocaleRoot 'locales'
@@ -2914,11 +2915,11 @@ if ($SelfTest) {
     Assert-Widget ((Get-WidgetText 'countdown.daysHours' @(2, 3)) -ceq '2 天 3 小时后重置') 'localized placeholders should format with the active culture.'
     $englishStrings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'locales\en-US.json')) | ConvertFrom-Json -ErrorAction Stop).strings
     $englishKeys = @($englishStrings.PSObject.Properties.Name | Sort-Object)
-    Assert-Widget ($englishKeys.Count -eq 115 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 115 keys.'
+    Assert-Widget ($englishKeys.Count -eq 117 -and ($englishKeys -join ',') -ceq (@($requiredLanguageKeys | Sort-Object) -join ',')) 'the raw English pack should contain exactly the canonical 117 keys.'
     foreach ($code in $languageCodes) {
         $strings = ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot ('locales\' + $code + '.json'))) | ConvertFrom-Json -ErrorAction Stop).strings
         $keys = @($strings.PSObject.Properties.Name | Sort-Object)
-        Assert-Widget ($keys.Count -eq 115 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 115 keys as English.')
+        Assert-Widget ($keys.Count -eq 117 -and ($keys -join ',') -ceq ($englishKeys -join ',')) ($code + ' raw JSON should contain exactly the same 117 keys as English.')
         foreach ($key in $requiredLanguageKeys) {
             Assert-Widget (-not [string]::IsNullOrWhiteSpace([string]$strings.$key)) ($code + ' raw JSON should contain nonblank text for ' + $key + '.')
             $englishPlaceholders = @([regex]::Matches($englishStrings.$key, '(?<!\{)\{[^{}]+\}(?!\})') | ForEach-Object Value | Sort-Object)

@@ -13,6 +13,8 @@
     "menu.theme": "主题",
     "menu.chooseDirectory": "选择数据目录",
     "menu.resetState": "重置本地状态",
+    "menu.enableReminders": "启用低用量提醒",
+    "menu.remindersDenied": "通知权限已拒绝",
     "menu.exit": "退出小组件",
     "action.cancel": "取消",
     "action.reset": "重置",

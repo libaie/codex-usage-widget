@@ -13,6 +13,8 @@
     "menu.theme": "主題",
     "menu.chooseDirectory": "選擇資料目錄",
     "menu.resetState": "重設本機狀態",
+    "menu.enableReminders": "啟用低用量提醒",
+    "menu.remindersDenied": "通知權限已拒絕",
     "menu.exit": "結束小工具",
     "action.cancel": "取消",
     "action.reset": "重設",

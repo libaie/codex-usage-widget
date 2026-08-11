@@ -13,6 +13,8 @@
     "menu.theme": "테마",
     "menu.chooseDirectory": "데이터 폴더 선택",
     "menu.resetState": "로컬 상태 초기화",
+    "menu.enableReminders": "낮은 사용량 알림 사용",
+    "menu.remindersDenied": "알림 권한이 거부됨",
     "menu.exit": "위젯 종료",
     "action.cancel": "취소",
     "action.reset": "초기화",

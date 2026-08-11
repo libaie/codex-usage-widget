@@ -13,6 +13,8 @@
     "menu.theme": "Theme",
     "menu.chooseDirectory": "Choose data directory",
     "menu.resetState": "Reset local state",
+    "menu.enableReminders": "Enable low-usage reminders",
+    "menu.remindersDenied": "Notifications denied",
     "menu.exit": "Exit widget",
     "action.cancel": "Cancel",
     "action.reset": "Reset",
