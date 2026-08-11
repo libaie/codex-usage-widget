@@ -7,7 +7,10 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Assert-Stability([bool]$Condition, [string]$Message) {
-    if (-not $Condition) { throw "Worker stability assertion failed: $Message" }
+    if (-not $Condition) {
+        if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "::error title=Windows worker stability::$Message" }
+        throw "Worker stability assertion failed: $Message"
+    }
 }
 
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
@@ -97,9 +100,11 @@ try {
     $simulatedSeconds = 15.0 * $Iterations
     $parentCpuPercent = 100.0 * $parentCpuSeconds / $simulatedSeconds
     $combinedCpuPercent = 100.0 * ($parentCpuSeconds + $workerCpuSeconds) / $simulatedSeconds
-    Write-Output ('Stability metrics: p95={0:N3}s; handles={1:+#;-#;0}; private={2:N1}MiB; workerPeak={3:N1}MiB; parentCpu={4:N2}%; combinedCpu={5:N2}%.' -f
+    $metricsLine = 'Stability metrics: p95={0:N3}s; handles={1:+#;-#;0}; private={2:N1}MiB; workerPeak={3:N1}MiB; parentCpu={4:N2}%; combinedCpu={5:N2}%.' -f
         $p95, ($hostProcess.HandleCount - $baselineHandles), (($hostProcess.PrivateMemorySize64 - $baselineMemory) / 1MB),
-        ($workerPeakBytes / 1MB), $parentCpuPercent, $combinedCpuPercent)
+        ($workerPeakBytes / 1MB), $parentCpuPercent, $combinedCpuPercent
+    Write-Output $metricsLine
+    if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "::notice title=Windows worker stability::$metricsLine" }
     Assert-Stability ($alive -eq 0 -and $residualFiles -eq 0 -and $residualDirectories -eq 0) 'workers or private channel paths remained after refresh completion.'
     Assert-Stability ($hostProcess.HandleCount -le $baselineHandles + 8) 'parent handle count grew by more than eight after warmup.'
     Assert-Stability ($hostProcess.PrivateMemorySize64 -le $baselineMemory + 20971520) 'parent private memory grew by more than 20 MiB after warmup.'
