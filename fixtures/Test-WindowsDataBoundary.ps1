@@ -200,6 +200,7 @@ try {
     $workerEnvironmentNames = 'CODEX_WIDGET_DATA_DIRECTORY', 'CODEX_WIDGET_RESULT_PATH', 'CODEX_WIDGET_GENERATION'
     $workerEnvironmentBefore = @{}
     foreach ($name in $workerEnvironmentNames) { $workerEnvironmentBefore[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
+    $workerWatch = [Diagnostics.Stopwatch]::StartNew()
     $workerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') -DataDirectory $workerData -Generation $generation
     $channelDirectory = Join-Path $workerRoot ('CodexUsageWidget-scan-' + $generation)
     $workerOutput = Join-Path $channelDirectory 'result.json'
@@ -219,7 +220,11 @@ try {
     while (-not [IO.File]::Exists($workerOutput) -and -not $worker.HasExited -and [datetime]::UtcNow -lt $workerDeadlineAt) {
         Start-Sleep -Milliseconds 50
     }
-    Assert-Boundary (-not $worker.HasExited) 'the isolated worker host must remain alive after completing a request.'
+    $workerWatch.Stop()
+    $workerHasExited = $worker.HasExited
+    $workerExitCode = if ($workerHasExited) { $worker.ExitCode } else { $null }
+    Assert-Boundary (-not $workerHasExited) ('the isolated worker host must remain alive after completing a request; exit={0}; result={1}; elapsed={2:N3}s.' -f
+        $workerExitCode, [IO.File]::Exists($workerOutput), $workerWatch.Elapsed.TotalSeconds)
     Assert-Boundary ([IO.File]::Exists($workerOutput) -and ([IO.FileInfo]$workerOutput).Length -le 262144) 'the worker result must fit the 256 KiB protocol limit.'
     $workerResult = [IO.File]::ReadAllText($workerOutput) | ConvertFrom-Json -ErrorAction Stop
     Assert-Boundary ($workerResult.schemaVersion -eq 1 -and $workerResult.generation -ceq $generation -and $workerResult.snapshot.Classification -ceq 'complete') 'the worker result must bind schema, generation, and normalized snapshot.'
