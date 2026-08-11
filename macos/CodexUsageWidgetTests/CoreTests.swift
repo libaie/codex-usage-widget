@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 import XCTest
 @testable import CodexUsageWidget
 
@@ -193,7 +194,7 @@ final class CoreTests: XCTestCase {
         XCTAssertThrowsError(try ScanSupervisor.decodeEnvelope(Data(repeating: 0x20, count: ScanWorker.maximumResultBytes + 1), generation: generation))
 
         var oversizedState = state
-        oversizedState.tasks = (0..<30).map { index in
+        oversizedState.tasks = (0..<30).reversed().map { index in
             UsageTaskSnapshot(
                 id: String(format: "00000000-0000-0000-0000-%012d", index),
                 name: String(repeating: "🧪", count: 500),

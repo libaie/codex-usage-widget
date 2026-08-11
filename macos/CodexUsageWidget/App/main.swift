@@ -15,6 +15,7 @@ do {
     _exit(1)
 }
 guard lock.acquired else { _exit(0) }
+ScanSupervisor.cleanupOrphans()
 
 let application = NSApplication.shared
 let delegate = CoreAppDelegate()
