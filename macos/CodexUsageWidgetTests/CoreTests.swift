@@ -24,6 +24,23 @@ final class CoreTests: XCTestCase {
         try Data(contentsOf: contractRoot.appendingPathComponent("inputs/\(name).jsonl"))
     }
 
+    private func percentile95(_ values: [TimeInterval]) -> TimeInterval {
+        let sorted = values.sorted()
+        return sorted[max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+    }
+
+    private func scanTemporaryDirectories() -> Set<String> {
+        let prefix = "CodexUsageWidget-scan-"
+        return Set((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path))?
+            .filter { $0.hasPrefix(prefix) } ?? [])
+    }
+
+    private func resourceHighWaterBytes() throws -> Int64 {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { throw CoreError.unavailable }
+        return Int64(usage.ru_maxrss)
+    }
+
     private func writeSession(_ data: Data, named name: String, to sessions: URL, modified: Date) throws -> URL {
         let url = sessions.appendingPathComponent(name)
         try data.write(to: url)
@@ -283,5 +300,82 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
+    func testWorkerPerformanceAndResourceStability() throws {
+        let executable = try XCTUnwrap(Bundle.main.executableURL)
+        let emptyRoot = try temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: emptyRoot.appendingPathComponent("sessions", isDirectory: true),
+            withIntermediateDirectories: false
+        )
+        func duration(for root: URL) throws -> TimeInterval {
+            let started = ProcessInfo.processInfo.systemUptime
+            _ = try ScanSupervisor.scan(executableURL: executable, dataDirectory: root)
+            return ProcessInfo.processInfo.systemUptime - started
+        }
+
+        let coldDurations = try (0..<20).map { _ in try duration(for: emptyRoot) }
+        XCTAssertLessThan(percentile95(coldDurations), 0.300)
+
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let demo = try fixture("demo")
+        var maximumTail = Data(repeating: 0x20, count: 256 * 1024 - demo.count - 1)
+        maximumTail.append(0x0a)
+        maximumTail.append(demo)
+        let now = Date()
+        for index in 0..<30 {
+            try writeSession(
+                maximumTail,
+                named: String(format: "maximum-%02d.jsonl", index),
+                to: sessions,
+                modified: now.addingTimeInterval(TimeInterval(index))
+            )
+        }
+
+        let temporaryBefore = scanTemporaryDirectories()
+        var refreshDurations: [TimeInterval] = []
+        for _ in 0..<10 { refreshDurations.append(try duration(for: root)) }
+        let descriptorsBefore = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        let memoryBefore = try resourceHighWaterBytes()
+        for _ in 10..<120 { refreshDurations.append(try duration(for: root)) }
+        let descriptorsAfter = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        let memoryAfter = try resourceHighWaterBytes()
+
+        XCTAssertLessThan(percentile95(refreshDurations), 2.0)
+        XCTAssertLessThanOrEqual(descriptorsAfter - descriptorsBefore, 8)
+        XCTAssertLessThanOrEqual(memoryAfter - memoryBefore, 20 * 1024 * 1024)
+        XCTAssertTrue(scanTemporaryDirectories().subtracting(temporaryBefore).isEmpty)
+
+        let generation = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let channel = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexUsageWidget-scan-\(generation)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: channel,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: channel) }
+        let timedWorker = Process()
+        timedWorker.executableURL = URL(fileURLWithPath: "/usr/bin/time")
+        timedWorker.arguments = ["-l", executable.path, "--scan-worker"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_WIDGET_DATA_DIRECTORY"] = root.path
+        environment["CODEX_WIDGET_RESULT_PATH"] = channel.appendingPathComponent("result.json").path
+        environment["CODEX_WIDGET_GENERATION"] = generation
+        timedWorker.environment = environment
+        timedWorker.standardOutput = FileHandle.nullDevice
+        let diagnostics = Pipe()
+        timedWorker.standardError = diagnostics
+        try timedWorker.run()
+        timedWorker.waitUntilExit()
+        let diagnosticText = String(decoding: diagnostics.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let peakLine = try XCTUnwrap(diagnosticText.split(whereSeparator: { $0.isNewline })
+            .first { $0.contains("maximum resident set size") })
+        let peakBytes = try XCTUnwrap(Int64(peakLine.split(whereSeparator: { $0.isWhitespace }).first ?? ""))
+        XCTAssertEqual(timedWorker.terminationStatus, 0)
+        XCTAssertLessThanOrEqual(peakBytes, 128 * 1024 * 1024)
     }
 }
