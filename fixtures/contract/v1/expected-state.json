@@ -166,13 +166,13 @@
       "id": "late-old-cycle",
       "input": "inputs/late-old-cycle.jsonl",
       "nowUtc": "2026-08-11T00:01:01.000Z",
-      "fixtureStats": { "validJsonLines": 2, "malformedJsonLines": 0 },
+      "fixtureStats": { "validJsonLines": 3, "malformedJsonLines": 0 },
       "expected": {
         "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
         "selectedWindow": "primary", "remainingPercent": "60.0", "cumulativeTokens": null, "cacheHitTokens": null,
         "cacheMissTokens": null, "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
         "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406400000, "tasks": [], "taskNamesAvailable": false,
-        "metrics": { "validEventCount": 2, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+        "metrics": { "validEventCount": 3, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
       }
     },
     {
