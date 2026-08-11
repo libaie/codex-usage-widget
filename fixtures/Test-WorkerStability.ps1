@@ -24,6 +24,31 @@ try {
     $dataRoot = Join-Path $testRoot 'codex'
     $sessions = Join-Path $dataRoot 'sessions'
     [void][IO.Directory]::CreateDirectory($sessions)
+    $emptyDataRoot = Join-Path $testRoot 'empty-codex'
+    [void][IO.Directory]::CreateDirectory((Join-Path $emptyDataRoot 'sessions'))
+    $killHandle = New-UsageWorkerJob
+    $coldDurations = [Collections.Generic.List[double]]::new()
+    for ($round = 0; $round -lt 20; $round++) {
+        $roundWatch = [Diagnostics.Stopwatch]::StartNew()
+        $workerJob = Start-UsageScanProcess -ScriptPath (Join-Path $package 'CodexUsageWidget.ps1') `
+            -DataDirectory $emptyDataRoot -Generation ([guid]::NewGuid().ToString('N')) -WorkerJobHandle $killHandle
+        do {
+            $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
+            if ($received.Status -ceq 'pending') { Start-Sleep -Milliseconds 10 }
+        } while ($received.Status -ceq 'pending')
+        $roundWatch.Stop()
+        Assert-Stability ($received.Status -ceq 'completed' -and $received.Snapshot.Classification -ceq 'empty') "cold worker $round did not return a validated empty result."
+        $coldDurations.Add($roundWatch.Elapsed.TotalSeconds)
+        $workerProcess = $workerJob.Process
+        $script:UsageWorkerHost = $null
+        Assert-Stability (Stop-UsageWorkerProcess -Process $workerProcess) "cold worker $round did not stop."
+        $workerJob = $null
+    }
+    $sortedColdDurations = @($coldDurations.ToArray() | Sort-Object)
+    $coldP95 = $sortedColdDurations[[int]([math]::Ceiling($sortedColdDurations.Count * 0.95) - 1)]
+    # ponytail: hosted PowerShell startup is noisy; restore one 750 ms limit only if the worker becomes native.
+    $coldP95Limit = if ($env:GITHUB_ACTIONS -eq 'true') { 15.0 } else { 3.0 }
+    Assert-Stability ($coldP95 -lt $coldP95Limit) ('95th-percentile empty-input cold start exceeded {0:N0} seconds: {1:N3}s.' -f $coldP95Limit, $coldP95)
     $demoLine = [IO.File]::ReadAllText((Join-Path $package 'fixtures\contract\v1\inputs\demo.jsonl')).Trim()
     $tailPadding = (' ' * 262144) + "`n"
     for ($index = 0; $index -lt 30; $index++) {
@@ -32,7 +57,6 @@ try {
             $tailPadding + $demoLine + "`n",
             [Text.UTF8Encoding]::new($false))
     }
-    $killHandle = New-UsageWorkerJob
     $hostProcess = [Diagnostics.Process]::GetCurrentProcess()
     $workerIds = [Collections.Generic.List[int]]::new()
     $durations = [Collections.Generic.List[double]]::new()
@@ -108,8 +132,8 @@ try {
     $simulatedSeconds = 15.0 * $Iterations
     $parentCpuPercent = 100.0 * $parentCpuSeconds / $simulatedSeconds
     $combinedCpuPercent = 100.0 * ($parentCpuSeconds + $workerCpuSeconds) / $simulatedSeconds
-    $metricsLine = 'Stability metrics: p95={0:N3}s; handles={1:+#;-#;0}; private={2:N1}MiB; workerPeak={3:N1}MiB; parentCpu={4:N2}%; combinedCpu={5:N2}%.' -f
-        $p95, ($hostProcess.HandleCount - $baselineHandles), (($hostProcess.PrivateMemorySize64 - $baselineMemory) / 1MB),
+    $metricsLine = 'Stability metrics: coldP95={0:N3}s; refreshP95={1:N3}s; handles={2:+#;-#;0}; private={3:N1}MiB; workerPeak={4:N1}MiB; parentCpu={5:N2}%; combinedCpu={6:N2}%.' -f
+        $coldP95, $p95, ($hostProcess.HandleCount - $baselineHandles), (($hostProcess.PrivateMemorySize64 - $baselineMemory) / 1MB),
         ($workerPeakBytes / 1MB), $parentCpuPercent, $combinedCpuPercent
     Write-Output $metricsLine
     if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "::notice title=Windows worker stability::$metricsLine" }

@@ -15,7 +15,7 @@ This map binds all 32 release checks to an automated command or a named P9 E2E g
 | 9 | Windows parser and UI self-test | `CodexUsageWidget.ps1 -SelfTest` |
 | 10 | Windows state, classification, path, and invalid-file boundaries | `fixtures/Test-WindowsDataBoundary.ps1` |
 | 11 | Windows worker protocol and 256 KiB producer/consumer limits | `fixtures/Test-WindowsDataBoundary.ps1` producer and consumer rejection cases |
-| 12 | Windows 30-file and 120-refresh stability | `fixtures/Test-WorkerStability.ps1` |
+| 12 | Windows fresh-process empty-input cold start, 30-file, and 120-refresh stability | `fixtures/Test-WorkerStability.ps1` |
 | 13 | Hidden launcher, single instance, and bounded cleanup | `fixtures/Test-Launcher.ps1` |
 | 14 | Windows EXE/ZIP same bytes, exact payload, checksum, concurrency, and state isolation | CI executes `fixtures/Test-Bootstrap.ps1` |
 | 15 | Windows demo uses reviewed data and writes no state | `-Demo` assertions in `-SelfTest` plus isolated native smoke |
