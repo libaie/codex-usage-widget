@@ -31,8 +31,9 @@ final class CoreTests: XCTestCase {
             let input = contractRoot.appendingPathComponent(fixture["input"] as! String)
             let now = formatter.date(from: fixture["nowUtc"] as! String)!
             let actual = try UsageContract.evaluate(fileURL: input, now: now).jsonObject()
+            let metrics = actual["metrics"] as! [String: Any]
             for (key, expected) in fixture["expected"] as! [String: Any] {
-                let got = actual[key]
+                let got = actual[key] ?? metrics[key]
                 if expected is NSNull {
                     XCTAssertTrue(got is NSNull, "[contract/\(identifier)] expected \(key)=null, got \(String(describing: got))")
                 } else if let number = expected as? NSNumber {
