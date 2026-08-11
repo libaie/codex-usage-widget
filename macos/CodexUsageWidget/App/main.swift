@@ -21,5 +21,5 @@ if !demo {
 let application = NSApplication.shared
 let delegate = WidgetAppDelegate(demo: demo)
 application.delegate = delegate
-application.setActivationPolicy(.accessory)
+application.setActivationPolicy(demo ? .regular : .accessory)
 withExtendedLifetime((delegate, lock)) { application.run() }

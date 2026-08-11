@@ -174,7 +174,7 @@ private struct ParsedWindow {
     let remaining: Decimal
     let resetAt: Int64
     let windowMinutes: Int64?
-    let observedAt: Int64
+    var observedAt: Int64
 }
 
 enum UsageContract {
@@ -248,7 +248,9 @@ enum UsageContract {
                     )
                     if let previous = windows[name] {
                         if parsed.resetAt == previous.resetAt {
-                            if parsed.used > previous.used { windows[name] = parsed }
+                            var retained = parsed.used > previous.used ? parsed : previous
+                            retained.observedAt = max(parsed.observedAt, previous.observedAt)
+                            windows[name] = retained
                         } else if parsed.resetAt > previous.resetAt {
                             windows[name] = parsed
                         }

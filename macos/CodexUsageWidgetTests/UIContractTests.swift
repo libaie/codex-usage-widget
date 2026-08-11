@@ -25,7 +25,7 @@ final class UIContractTests: XCTestCase {
     func testFiveLanguagePacksAreStrictAndFormatPlaceholders() throws {
         let localization = try WidgetLocalization.load(directory: repositoryRoot.appendingPathComponent("locales"))
         XCTAssertEqual(localization.packs.count, 5)
-        XCTAssertEqual(localization.requiredKeys.count, 117)
+        XCTAssertEqual(localization.requiredKeys.count, 118)
         XCTAssertEqual(localization.resolve(preferred: ["fr-FR", "zh-TW"]), "zh-TW")
         XCTAssertEqual(localization.resolve(preferred: ["fr-FR"]), "en-US")
         XCTAssertEqual(localization.pack(code: "en-US").text("cache.value", ["42", "95.4"]), "42 (95.4%)")
