@@ -4,7 +4,7 @@
 
 A draggable usage ring for Windows and macOS. Hover to see locally observed Codex usage details.
 
-[v1.0.0 release](https://github.com/libaie/codex-usage-widget/releases/latest) · [v1.1.0 CI builds](https://github.com/libaie/codex-usage-widget/actions/workflows/ci.yml) · [MIT license](LICENSE) · **English** · [简体中文](README.zh-CN.md)
+[v1.1.0 prerelease](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0) · [CI builds](https://github.com/libaie/codex-usage-widget/actions/workflows/ci.yml) · [MIT license](LICENSE) · **English** · [简体中文](README.zh-CN.md)
 
 </div>
 
@@ -14,17 +14,17 @@ A draggable usage ring for Windows and macOS. Hover to see locally observed Code
 ## Install
 
 > [!NOTE]
-> Version 1.1.0 source is on `main`. Successful CI runs retain the combined unsigned Windows and macOS candidate for 30 days. A signed public v1.1.0 release has not been published yet.
+> Version 1.1.0 is available as an unsigned GitHub prerelease. Windows and macOS builds share the same feature version; signed and notarized files will replace or supplement them when signing identities are available.
 
 ### Windows
 
-Open the latest successful [v1.1.0 CI run](https://github.com/libaie/codex-usage-widget/actions/workflows/ci.yml), download `unsigned-candidate-v1.1.0-<commit SHA>`, and verify the included SHA-256 checksum before running `CodexUsageWidget-v1.1.0-windows.exe`. GitHub requires sign-in to download workflow artifacts.
+Open the [v1.1.0 prerelease](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0), download `CodexUsageWidget-v1.1.0-windows.exe`, and verify its SHA-256 file before running it.
 
 The portable alternative is `CodexUsageWidget-v1.1.0-windows.zip`. Extract it and double-click `Start-CodexUsageWidget.vbs`; this launcher starts the widget without leaving a terminal window. `Start-CodexUsageWidget.cmd` is kept as a compatibility entry point.
 
 ### macOS
 
-From the same combined candidate, verify `CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256`, extract the ZIP, and move `CodexUsageWidget.app` to Applications. This Universal build supports Apple silicon and Intel Macs on macOS 13 or later.
+From the [v1.1.0 prerelease](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0), verify `CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256`, extract the ZIP, and move `CodexUsageWidget.app` to Applications. This Universal build supports Apple silicon and Intel Macs on macOS 13 or later.
 
 The CI app is not signed or notarized. On first launch, use Finder's **Open** command; if macOS still blocks it, use **System Settings → Privacy & Security → Open Anyway**. A Developer ID is not required to build, test, or run this unsigned build. It is required only for the planned signed and notarized `CodexUsageWidget-v1.1.0-macos.dmg`. Source-build commands are in [Contributing](CONTRIBUTING.md).
 
@@ -32,11 +32,11 @@ The CI app is not signed or notarized. On first launch, use Finder's **Open** co
 
 | Channel | Files | Status |
 |---|---|---|
-| Windows CI | `CodexUsageWidget-v1.1.0-windows.exe`, `.exe.sha256`, `.zip`, and `.zip.sha256` | Included in the combined CI candidate |
-| macOS CI | `CodexUsageWidget-v1.1.0-macos-unsigned.zip` and `.zip.sha256` | Included in the combined CI candidate |
-| Planned public release | Authenticode-signed Windows files and notarized `CodexUsageWidget-v1.1.0-macos.dmg` with `CodexUsageWidget-v1.1.0-macos.dmg.sha256` | Waiting for signing identities |
+| v1.1.0 prerelease for Windows | `CodexUsageWidget-v1.1.0-windows.exe`, `.exe.sha256`, `.zip`, and `.zip.sha256` | Public, unsigned |
+| v1.1.0 prerelease for macOS | `CodexUsageWidget-v1.1.0-macos-unsigned.zip` and `.zip.sha256` | Public, unsigned and not notarized |
+| Planned signed files | Authenticode-signed Windows files and notarized `CodexUsageWidget-v1.1.0-macos.dmg` with `CodexUsageWidget-v1.1.0-macos.dmg.sha256` | Waiting for signing identities |
 
-Both platforms use version 1.1.0 because the version describes the feature set, not the operating system. A `v1.1.0` tag and its source archives will be created only with the signed public release; current source is on `main`.
+Both platforms use version 1.1.0 because the version describes the feature set, not the operating system. The `v1.1.0` tag also provides GitHub-generated source archives.
 
 ## Screenshots
 
@@ -131,7 +131,7 @@ Only `preferences.json`, `cache-token-ledger.json`, and reminder deduplication s
 - [Architecture and trust boundaries](DESIGN.md)
 - [Version history](CHANGELOG.md)
 
-Public v1.1.0 publishing remains intentionally untagged until the Windows and macOS artifacts can be signed and the macOS build notarized. CI artifacts are testable unsigned candidates, not a public release.
+The public v1.1.0 prerelease contains unsigned Windows and macOS files. A signed Windows build and a Developer ID-signed, notarized macOS build remain pending signing identities.
 
 The built-in Windows self-test is:
 

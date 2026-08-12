@@ -4,7 +4,7 @@
 
 适用于 Windows 和 macOS 的可拖拽用量圆环。悬停即可查看本机观测到的 Codex 用量详情。
 
-[v1.0.0 正式版](https://github.com/libaie/codex-usage-widget/releases/latest) · [v1.1.0 CI 构建](https://github.com/libaie/codex-usage-widget/actions/workflows/ci.yml) · [MIT 许可证](LICENSE) · [English](README.md) · **简体中文**
+[v1.1.0 预发布版](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0) · [CI 构建](https://github.com/libaie/codex-usage-widget/actions/workflows/ci.yml) · [MIT 许可证](LICENSE) · [English](README.md) · **简体中文**
 
 </div>
 
@@ -14,17 +14,17 @@
 ## 安装
 
 > [!NOTE]
-> v1.1.0 源码已进入 `main`。成功的 CI 运行会将 Windows 和 macOS 未签名候选包合并保留 30 天；v1.1.0 签名正式版尚未发布。
+> v1.1.0 已作为未签名的 GitHub 预发布版提供。Windows 和 macOS 使用相同的功能版本；取得签名身份后，再替换或补充签名、公证文件。
 
 ### Windows
 
-打开最近一次成功的 [v1.1.0 CI 运行](https://github.com/libaie/codex-usage-widget/actions/workflows/ci.yml)，下载 `unsigned-candidate-v1.1.0-<提交 SHA>`，核对随附的 SHA-256 后运行 `CodexUsageWidget-v1.1.0-windows.exe`。下载 GitHub Actions 构建产物需要登录 GitHub。
+打开 [v1.1.0 预发布页](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0)，下载 `CodexUsageWidget-v1.1.0-windows.exe`，核对随附的 SHA-256 后再运行。
 
 也可以下载 `CodexUsageWidget-v1.1.0-windows.zip`。解压后双击 `Start-CodexUsageWidget.vbs`，启动时不会遗留终端窗口；`Start-CodexUsageWidget.cmd` 作为兼容入口保留。
 
 ### macOS
 
-从同一个合并候选包中核对 `CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256`，解压后将 `CodexUsageWidget.app` 移入“应用程序”。这是 Universal 构建，支持 macOS 13 及以上版本的 Apple 芯片和 Intel Mac。
+从 [v1.1.0 预发布页](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0) 下载并核对 `CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256`，解压后将 `CodexUsageWidget.app` 移入“应用程序”。这是 Universal 构建，支持 macOS 13 及以上版本的 Apple 芯片和 Intel Mac。
 
 CI 应用尚未签名和公证。首次启动请在访达中右键选择“打开”；如果仍被拦截，可前往“系统设置 → 隐私与安全性 → 仍要打开”。构建、测试和运行未签名版本不需要 Developer ID；只有计划中的签名公证版 `CodexUsageWidget-v1.1.0-macos.dmg` 需要。源码构建方法见[参与开发](CONTRIBUTING.md)。
 
@@ -32,11 +32,11 @@ CI 应用尚未签名和公证。首次启动请在访达中右键选择“打�
 
 | 渠道 | 文件 | 状态 |
 |---|---|---|
-| Windows CI | `CodexUsageWidget-v1.1.0-windows.exe`、`.exe.sha256`、`.zip` 和 `.zip.sha256` | 包含在合并 CI 候选包中 |
-| macOS CI | `CodexUsageWidget-v1.1.0-macos-unsigned.zip` 和 `.zip.sha256` | 包含在合并 CI 候选包中 |
-| 计划中的正式版 | 经过 Authenticode 签名的 Windows 文件，以及经过苹果公证的 `CodexUsageWidget-v1.1.0-macos.dmg` 和 `CodexUsageWidget-v1.1.0-macos.dmg.sha256` | 等待签名身份 |
+| v1.1.0 Windows 预发布版 | `CodexUsageWidget-v1.1.0-windows.exe`、`.exe.sha256`、`.zip` 和 `.zip.sha256` | 已公开，未签名 |
+| v1.1.0 macOS 预发布版 | `CodexUsageWidget-v1.1.0-macos-unsigned.zip` 和 `.zip.sha256` | 已公开，未签名且未公证 |
+| 计划中的签名文件 | 经过 Authenticode 签名的 Windows 文件，以及经过苹果公证的 `CodexUsageWidget-v1.1.0-macos.dmg` 和 `CodexUsageWidget-v1.1.0-macos.dmg.sha256` | 等待签名身份 |
 
-两端统一使用 v1.1.0，因为版本号表示功能集合，不区分操作系统。`v1.1.0` 标签及其源码归档会在签名正式版发布时创建；当前源码位于 `main`。
+两端统一使用 v1.1.0，因为版本号表示功能集合，不区分操作系统。`v1.1.0` 标签同时提供 GitHub 自动生成的源码归档。
 
 ## 产品截图
 
@@ -131,7 +131,7 @@ open CodexUsageWidget.app --args --demo
 - [架构与信任边界](DESIGN.md)
 - [版本记录](CHANGELOG.md)
 
-在 Windows 和 macOS 构建完成签名、且 macOS 构建通过苹果公证前，v1.1.0 不创建公开标签。CI 构建是可测试的未签名候选包，不是正式版。
+公开的 v1.1.0 预发布版包含未签名的 Windows 和 macOS 文件。Windows 签名版以及经过 Developer ID 签名和苹果公证的 macOS 版本，仍需等待签名身份。
 
 Windows 内置自检命令：
 

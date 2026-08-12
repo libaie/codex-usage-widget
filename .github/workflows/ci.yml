@@ -268,3 +268,39 @@ jobs:
           echo "Artifact ID: ${{ steps.upload.outputs.artifact-id }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Artifact digest: ${{ steps.upload.outputs.artifact-digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Manifest SHA-256: ${{ steps.manifest.outputs.manifest_sha }}" >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [candidate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-candidate-v1.1.0-${{ github.sha }}
+          path: candidate
+      - name: Publish unsigned prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          ## v1.1.0 unsigned preview / 未签名预发布版
+
+          - Windows: unsigned EXE and portable ZIP
+          - macOS: unsigned Universal app ZIP for Apple silicon and Intel Macs, macOS 13+
+          - Five interface languages and eight themes
+          - Local session observation only; no Web API calls or telemetry
+
+          Windows files are not Authenticode-signed. The macOS app is not signed or notarized. On first launch, use Finder → Open, or System Settings → Privacy & Security → Open Anyway. Verify the included SHA-256 files before running.
+
+          Windows 文件尚未进行 Authenticode 签名；macOS 应用尚未进行 Developer ID 签名与苹果公证。首次打开 macOS 应用时，请使用访达右键“打开”，或前往“系统设置 → 隐私与安全性 → 仍要打开”。运行前请核对随附的 SHA-256。
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            candidate/CodexUsageWidget-v1.1.0-* \
+            --prerelease \
+            --verify-tag \
+            --title "Codex Usage Widget v1.1.0 (Unsigned Preview)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --repo "$GITHUB_REPOSITORY"
