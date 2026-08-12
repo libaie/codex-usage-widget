@@ -412,7 +412,7 @@ final class WidgetModel: ObservableObject {
     private var taskHideWorkItem: DispatchWorkItem?
     private let stateDirectory: URL
     private let resolveDataDirectory: (String?) -> URL?
-    private let scanDataDirectory: (URL, URL) throws -> UsageScanResult
+    private let scanDataDirectory: (URL, URL, URL) throws -> UsageScanResult
     private(set) var dataDirectory: URL?
     var remindersEnabled = false
     var onReminder: ((UsageLimitSnapshot, Int) -> Void)?
@@ -426,8 +426,12 @@ final class WidgetModel: ObservableObject {
         bundle: Bundle = .main,
         stateDirectory: URL = ApplicationPaths.supportDirectory,
         resolveDataDirectory: @escaping (String?) -> URL? = { DataDirectoryResolver.resolve(savedPath: $0) },
-        scanDataDirectory: @escaping (URL, URL) throws -> UsageScanResult = {
-            try ScanSupervisor.scan(executableURL: $0, dataDirectory: $1)
+        scanDataDirectory: @escaping (URL, URL, URL) throws -> UsageScanResult = {
+            try ScanSupervisor.scan(
+                executableURL: $0,
+                dataDirectory: $1,
+                cacheLedgerURL: $2
+            )
         }
     ) throws {
         guard let resources = bundle.resourceURL else { throw WidgetUIError.invalidResource }
@@ -525,8 +529,9 @@ final class WidgetModel: ObservableObject {
         scanGeneration += 1
         let generation = scanGeneration
         let scanDataDirectory = scanDataDirectory
+        let cacheURL = cacheURL
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let scanned = Result { try scanDataDirectory(executable, directory) }
+            let scanned = Result { try scanDataDirectory(executable, directory, cacheURL) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.scanInFlight = false

@@ -129,8 +129,9 @@ final class UIContractTests: XCTestCase {
                 savedPaths.append(savedPath)
                 return resolvedDirectories.removeFirst()
             },
-            scanDataDirectory: { _, directory in
+            scanDataDirectory: { _, directory, ledger in
                 XCTAssertEqual(directory, migratedDirectory)
+                XCTAssertEqual(ledger, stateDirectory.appendingPathComponent("cache-token-ledger.json"))
                 scanFinished.fulfill()
                 return scanResult
             }

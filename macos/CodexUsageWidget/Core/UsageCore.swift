@@ -37,12 +37,18 @@ struct SessionTokenSnapshot: Equatable {
     var id: String
     var cacheHitTokens: String?
     var cacheMissTokens: String?
+    var cacheHitBaselineTokens: String? = nil
+    var cacheMissBaselineTokens: String? = nil
+    var cacheBaselineAttempts: Int64 = 0
 
     func jsonObject() -> [String: Any] {
         [
             "id": id,
             "cacheHitTokens": jsonValue(cacheHitTokens),
-            "cacheMissTokens": jsonValue(cacheMissTokens)
+            "cacheMissTokens": jsonValue(cacheMissTokens),
+            "cacheHitBaselineTokens": jsonValue(cacheHitBaselineTokens),
+            "cacheMissBaselineTokens": jsonValue(cacheMissBaselineTokens),
+            "cacheBaselineAttempts": cacheBaselineAttempts
         ]
     }
 }
@@ -534,7 +540,18 @@ struct WidgetPreferences: Codable, StateValidating {
 struct CacheRecord: Codable, StateValidating {
     var hitTokens: String
     var missTokens: String
-    var isValid: Bool { validToken(hitTokens) && validToken(missTokens) }
+    var hitBaselineTokens: String? = nil
+    var missBaselineTokens: String? = nil
+    var baselineAttempts: Int64? = nil
+    var isValid: Bool {
+        guard validToken(hitTokens), validToken(missTokens),
+              (hitBaselineTokens == nil) == (missBaselineTokens == nil),
+              (0...CacheLedger.maximumBaselineAttempts).contains(baselineAttempts ?? 0)
+        else { return false }
+        guard let hitBaselineTokens, let missBaselineTokens else { return true }
+        return validToken(hitBaselineTokens) && validToken(missBaselineTokens) &&
+            Int64(hitBaselineTokens)! <= Int64(hitTokens)! && Int64(missBaselineTokens)! <= Int64(missTokens)!
+    }
 }
 
 struct CacheTotals: Equatable {
@@ -546,9 +563,10 @@ struct CacheLedger: Codable, StateValidating {
     var schemaVersion: Int
     var sessions: [String: CacheRecord]
 
-    static let defaultValue = CacheLedger(schemaVersion: 1, sessions: [:])
+    static let maximumBaselineAttempts: Int64 = 10_000
+    static let defaultValue = CacheLedger(schemaVersion: 2, sessions: [:])
     var isValid: Bool {
-        schemaVersion == 1 && sessions.count <= 10_000 && sessions.allSatisfy {
+        (schemaVersion == 1 || schemaVersion == 2) && sessions.count <= 10_000 && sessions.allSatisfy {
             validSessionIdentifier($0.key) && $0.value.isValid
         }
     }
@@ -562,16 +580,36 @@ struct CacheLedger: Codable, StateValidating {
             guard let hit = Int64(rawHit), let miss = Int64(rawMiss), hit >= 0, miss >= 0 else {
                 throw CoreError.invalidData
             }
+            let baselineHit = try snapshot.cacheHitBaselineTokens.map {
+                guard let value = Int64($0), value >= 0, value <= hit else { throw CoreError.invalidData }
+                return value
+            }
+            let baselineMiss = try snapshot.cacheMissBaselineTokens.map {
+                guard let value = Int64($0), value >= 0, value <= miss else { throw CoreError.invalidData }
+                return value
+            }
+            guard (baselineHit == nil) == (baselineMiss == nil),
+                  (0...Self.maximumBaselineAttempts).contains(snapshot.cacheBaselineAttempts) else {
+                throw CoreError.invalidData
+            }
             let previous = updated[snapshot.id]
             let previousHit = previous.flatMap { Int64($0.hitTokens) } ?? 0
             let previousMiss = previous.flatMap { Int64($0.missTokens) } ?? 0
+            let previousBaselineHit = previous.flatMap { $0.hitBaselineTokens }.flatMap { Int64($0) }
+            let previousBaselineMiss = previous.flatMap { $0.missBaselineTokens }.flatMap { Int64($0) }
+            if let previousBaselineHit, let previousBaselineMiss, let baselineHit, let baselineMiss,
+               (previousBaselineHit != baselineHit || previousBaselineMiss != baselineMiss) { continue }
             updated[snapshot.id] = CacheRecord(
                 hitTokens: String(max(previousHit, hit)),
-                missTokens: String(max(previousMiss, miss))
+                missTokens: String(max(previousMiss, miss)),
+                hitBaselineTokens: (previousBaselineHit ?? baselineHit).map { String($0) },
+                missBaselineTokens: (previousBaselineMiss ?? baselineMiss).map { String($0) },
+                baselineAttempts: max(previous?.baselineAttempts ?? 0, snapshot.cacheBaselineAttempts)
             )
-            guard updated.count <= 10_000 else { throw CoreError.invalidData }
         }
-        sessions = updated
+        let candidate = CacheLedger(schemaVersion: 2, sessions: updated)
+        guard candidate.isValid else { throw CoreError.invalidData }
+        self = candidate
         return totals()
     }
 
@@ -580,8 +618,11 @@ struct CacheLedger: Codable, StateValidating {
         var miss: Int64 = 0
         for record in sessions.values {
             guard let nextHit = Int64(record.hitTokens), let nextMiss = Int64(record.missTokens) else { return nil }
-            let hitResult = hit.addingReportingOverflow(nextHit)
-            let missResult = miss.addingReportingOverflow(nextMiss)
+            let hitBaseline = record.hitBaselineTokens.flatMap { Int64($0) } ?? 0
+            let missBaseline = record.missBaselineTokens.flatMap { Int64($0) } ?? 0
+            guard hitBaseline <= nextHit, missBaseline <= nextMiss else { return nil }
+            let hitResult = hit.addingReportingOverflow(nextHit - hitBaseline)
+            let missResult = miss.addingReportingOverflow(nextMiss - missBaseline)
             guard !hitResult.overflow, !missResult.overflow else { return nil }
             hit = hitResult.partialValue
             miss = missResult.partialValue
@@ -716,8 +757,14 @@ enum SessionScanner {
         let taskID: String?
     }
 
-    static func scan(dataDirectory: URL, now: Date = Date(), maximumEntries: Int = 10_000) throws -> UsageScanResult {
+    static func scan(
+        dataDirectory: URL,
+        now: Date = Date(),
+        maximumEntries: Int = 10_000,
+        cacheLedger: CacheLedger = .defaultValue
+    ) throws -> UsageScanResult {
         guard maximumEntries > 0 else { throw CoreError.invalidData }
+        guard cacheLedger.isValid else { throw CoreError.invalidData }
         guard let root = DataDirectoryResolver.validated(dataDirectory) else { throw CoreError.unavailable }
         let sessions = root.appendingPathComponent("sessions", isDirectory: true).resolvingSymlinksInPath()
         let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey]
@@ -726,6 +773,11 @@ enum SessionScanner {
         var activeCandidates: [Candidate] = []
         var enumerationFailures = 0
         var inspectedEntries = 0
+        let pendingMigrationIDs = Set(cacheLedger.sessions.keys.filter {
+            cacheLedger.sessions[$0]?.hitBaselineTokens == nil &&
+                (cacheLedger.sessions[$0]?.baselineAttempts ?? 0) < CacheLedger.maximumBaselineAttempts
+        })
+        var migrationCandidate: Candidate?
         let entryLimit = min(maximumEntries, 10_000)
         let activeCutoff = now.addingTimeInterval(-30 * 60)
         func retain(_ candidate: Candidate, in list: inout [Candidate]) {
@@ -768,6 +820,16 @@ enum SessionScanner {
                 taskID: trailingUUID(from: id)
             )
             retain(candidate, in: &candidates)
+            if pendingMigrationIDs.contains(candidate.id) {
+                let attempts = cacheLedger.sessions[candidate.id]?.baselineAttempts ?? 0
+                let currentAttempts = migrationCandidate.flatMap {
+                    cacheLedger.sessions[$0.id]?.baselineAttempts
+                } ?? 0
+                if migrationCandidate == nil || attempts < currentAttempts ||
+                   (attempts == currentAttempts && candidate.id < migrationCandidate!.id) {
+                    migrationCandidate = candidate
+                }
+            }
             if candidate.modified >= activeCutoff { retain(candidate, in: &activeCandidates) }
         }
         metrics.candidateFileCount = candidates.count
@@ -776,12 +838,30 @@ enum SessionScanner {
         let taskNames = readTaskNames(at: root.appendingPathComponent("session_index.jsonl"), containedBy: root)
         var readCandidates = candidates
         var readPaths = Set(candidates.map { $0.url.path })
+        var migrationOnlyPath: String?
+        if let migrationCandidate, readPaths.insert(migrationCandidate.url.path).inserted {
+            readCandidates.append(migrationCandidate)
+            migrationOnlyPath = migrationCandidate.url.path
+        }
         if let taskNames {
             for candidate in activeCandidates where candidate.taskID.flatMap({ taskNames[$0] }) != nil {
                 if readPaths.insert(candidate.url.path).inserted { readCandidates.append(candidate) }
             }
         }
         let usagePaths = Set(candidates.map { $0.url.path })
+        let activePaths = Set(activeCandidates.map { $0.url.path })
+        var ledgerPaths = usagePaths
+        if let migrationCandidate { ledgerPaths.insert(migrationCandidate.url.path) }
+        let baselineTargetID = migrationCandidate?.id ?? candidates
+            .filter {
+                cacheLedger.sessions[$0.id]?.hitBaselineTokens == nil &&
+                    (cacheLedger.sessions[$0.id]?.baselineAttempts ?? 0) < CacheLedger.maximumBaselineAttempts
+            }
+            .min {
+                let left = cacheLedger.sessions[$0.id]?.baselineAttempts ?? 0
+                let right = cacheLedger.sessions[$1.id]?.baselineAttempts ?? 0
+                return left == right ? $0.id < $1.id : left < right
+            }?.id
         var combined = Data()
         var sessionSnapshots: [SessionTokenSnapshot] = []
         var tasks: [UsageTaskSnapshot] = []
@@ -797,16 +877,52 @@ enum SessionScanner {
                 if usagePaths.contains(candidate.url.path) {
                     combined.append(data)
                     combined.append(0x0a)
-                    sessionSnapshots.append(SessionTokenSnapshot(
-                        id: candidate.id,
-                        cacheHitTokens: fileState?.cacheHitTokens,
-                        cacheMissTokens: fileState?.cacheMissTokens
-                    ))
+                }
+                if ledgerPaths.contains(candidate.url.path) {
+                    let known = cacheLedger.sessions[candidate.id]
+                    let observedHit = fileState?.cacheHitTokens.flatMap({ Int64($0) })
+                    let observedMiss = fileState?.cacheMissTokens.flatMap({ Int64($0) })
+                    if known != nil || (observedHit != nil && observedMiss != nil) {
+                        let baseline: (hit: Int64, miss: Int64)?
+                        if let hit = known?.hitBaselineTokens.flatMap({ Int64($0) }),
+                           let miss = known?.missBaselineTokens.flatMap({ Int64($0) }) {
+                            baseline = (hit, miss)
+                        } else if candidate.id == baselineTargetID {
+                            baseline = try forkCacheBaseline(at: candidate.url)
+                        } else { baseline = nil }
+                        let rawHit = max(observedHit ?? 0, known.flatMap { Int64($0.hitTokens) } ?? 0)
+                        let rawMiss = max(observedMiss ?? 0, known.flatMap { Int64($0.missTokens) } ?? 0)
+                        let attempts = known?.baselineAttempts ?? 0
+                        let nextAttempts = candidate.id == baselineTargetID &&
+                            attempts < CacheLedger.maximumBaselineAttempts
+                            ? attempts + 1 : attempts
+                        sessionSnapshots.append(SessionTokenSnapshot(
+                            id: candidate.id,
+                            cacheHitTokens: String(rawHit),
+                            cacheMissTokens: String(rawMiss),
+                            cacheHitBaselineTokens: baseline.map { String($0.hit) },
+                            cacheMissBaselineTokens: baseline.map { String($0.miss) },
+                            cacheBaselineAttempts: nextAttempts
+                        ))
+                    }
                 }
             } catch {
-                metrics.readFailureCount += 1
+                if candidate.id == baselineTargetID,
+                   let known = cacheLedger.sessions[candidate.id],
+                   known.hitBaselineTokens == nil {
+                    let attempts = known.baselineAttempts ?? 0
+                    sessionSnapshots.append(SessionTokenSnapshot(
+                        id: candidate.id,
+                        cacheHitTokens: known.hitTokens,
+                        cacheMissTokens: known.missTokens,
+                        cacheBaselineAttempts: attempts < CacheLedger.maximumBaselineAttempts
+                            ? attempts + 1 : attempts
+                    ))
+                }
+                if candidate.url.path != migrationOnlyPath { metrics.readFailureCount += 1 }
             }
             if
+                activePaths.contains(candidate.url.path),
                 let taskID = candidate.taskID,
                 let name = taskNames?[taskID]
             {
@@ -894,6 +1010,97 @@ enum SessionScanner {
         }
         return data
     }
+
+    private static func forkCacheBaseline(
+        at url: URL,
+        maximumBytes: Int = 4 * 1024 * 1024
+    ) throws -> (hit: Int64, miss: Int64)? {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let initialLength = try handle.seekToEnd()
+        try handle.seek(toOffset: 0)
+        var forked: Bool?
+        var ordinary = false
+        var invalid = false
+        var legacy: (hit: Int64, miss: Int64)?
+        func parse(_ line: Data) -> (hit: Int64, miss: Int64, explicit: Bool)? {
+            guard
+                let decoded = try? JSONSerialization.jsonObject(with: line),
+                let event = decoded as? [String: Any],
+                let payload = event["payload"] as? [String: Any]
+            else { return nil }
+            if event["type"] as? String == "session_meta" {
+                guard let raw = payload["forked_from_id"] else { forked = false; ordinary = true; return nil }
+                guard let id = raw as? String, UUID(uuidString: id) != nil else { invalid = true; return nil }
+                forked = true
+                return nil
+            }
+            if forked == nil, payload["type"] as? String == "token_count" {
+                ordinary = true
+                return nil
+            }
+            guard forked == true, payload["type"] as? String == "token_count",
+                  let limits = payload["rate_limits"] as? [String: Any]
+            else { return nil }
+            let explicit: Bool
+            if let rawLimit = limits["limit_id"], !(rawLimit is NSNull) {
+                guard let limit = rawLimit as? String, limit == "codex" else { return nil }
+                explicit = true
+            } else { explicit = false }
+            guard
+                let info = payload["info"] as? [String: Any],
+                let total = info["total_token_usage"] as? [String: Any],
+                let last = info["last_token_usage"] as? [String: Any],
+                let totalInput = token(total["input_tokens"]),
+                let totalCached = token(total["cached_input_tokens"]),
+                let lastInput = token(last["input_tokens"]),
+                let lastCached = token(last["cached_input_tokens"]),
+                totalInput >= totalCached, lastInput >= lastCached,
+                totalCached >= lastCached,
+                totalInput - totalCached >= lastInput - lastCached
+            else { invalid = true; return nil }
+            return (
+                hit: totalCached - lastCached,
+                miss: (totalInput - totalCached) - (lastInput - lastCached),
+                explicit: explicit
+            )
+        }
+
+        // ponytail: Stream at most 4 MiB; preserve raw totals if a session prologue grows beyond that bound.
+        var bytesRead = 0
+        var buffer = Data()
+        var reachedEnd = false
+        while bytesRead < maximumBytes {
+            let count = min(64 * 1024, maximumBytes - bytesRead)
+            let chunk = try handle.read(upToCount: count) ?? Data()
+            reachedEnd = chunk.isEmpty
+            if reachedEnd {
+                if !buffer.isEmpty { buffer.append(0x0a) }
+            } else {
+                bytesRead += chunk.count
+                buffer.append(chunk)
+            }
+            while let newline = buffer.firstIndex(of: 0x0a) {
+                let candidate = parse(Data(buffer[..<newline]))
+                buffer.removeSubrange(...newline)
+                if invalid { return nil }
+                if ordinary { return (0, 0) }
+                if let candidate {
+                    if candidate.explicit { return (candidate.hit, candidate.miss) }
+                    if legacy == nil { legacy = (candidate.hit, candidate.miss) }
+                }
+            }
+            if reachedEnd { break }
+        }
+        return (reachedEnd || initialLength <= UInt64(maximumBytes)) ? legacy : nil
+    }
+
+    private static func token(_ raw: Any?) -> Int64? {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              validToken(number.stringValue)
+        else { return nil }
+        return Int64(number.stringValue)
+    }
 }
 
 private func validPercentage(_ text: String) -> Bool {
@@ -918,7 +1125,7 @@ private func jsonInt64(_ raw: Any?) -> Int64? {
 
 private extension UsageScanResult {
     func conservativeJSONByteUpperBound() throws -> Int {
-        guard sessions.count <= 30, state.tasks.count <= 30,
+        guard sessions.count <= 31, state.tasks.count <= 30,
               state.metrics.validEventCount >= 0, state.metrics.validEventCount <= 100_000,
               state.metrics.malformedLineCount >= 0, state.metrics.malformedLineCount <= 100_000,
               state.metrics.unknownEventCount >= 0, state.metrics.unknownEventCount <= 100_000,
@@ -959,12 +1166,24 @@ private extension UsageScanResult {
         guard sessions == sessions.sorted(by: { $0.id < $1.id }) else { throw CoreError.invalidData }
         for session in sessions {
             guard validSessionIdentifier(session.id),
-                  session.cacheHitTokens == nil || validToken(session.cacheHitTokens!),
-                  session.cacheMissTokens == nil || validToken(session.cacheMissTokens!)
+                   session.cacheHitTokens == nil || validToken(session.cacheHitTokens!),
+                   session.cacheMissTokens == nil || validToken(session.cacheMissTokens!),
+                   session.cacheHitBaselineTokens == nil || validToken(session.cacheHitBaselineTokens!),
+                   session.cacheMissBaselineTokens == nil || validToken(session.cacheMissBaselineTokens!),
+                   (session.cacheHitBaselineTokens == nil) == (session.cacheMissBaselineTokens == nil),
+                   (0...CacheLedger.maximumBaselineAttempts).contains(session.cacheBaselineAttempts)
             else { throw CoreError.invalidData }
+            if let baselineHit = session.cacheHitBaselineTokens.flatMap({ Int64($0) }),
+               let baselineMiss = session.cacheMissBaselineTokens.flatMap({ Int64($0) }) {
+                guard let hit = session.cacheHitTokens.flatMap({ Int64($0) }), baselineHit <= hit,
+                      let miss = session.cacheMissTokens.flatMap({ Int64($0) }), baselineMiss <= miss
+                else { throw CoreError.invalidData }
+            }
             try add(session.id, maximumUTF8Bytes: 2_000)
             try add(session.cacheHitTokens, maximumUTF8Bytes: 19)
             try add(session.cacheMissTokens, maximumUTF8Bytes: 19)
+            try add(session.cacheHitBaselineTokens, maximumUTF8Bytes: 19)
+            try add(session.cacheMissBaselineTokens, maximumUTF8Bytes: 19)
         }
         guard state.tasks == state.tasks.sorted(by: {
             if $0.observedAt != $1.observedAt { return $0.observedAt > $1.observedAt }
@@ -1008,7 +1227,19 @@ enum ScanWorker {
         defer { watchdog.cancel() }
 
         do {
-            let result = try SessionScanner.scan(dataDirectory: URL(fileURLWithPath: directory, isDirectory: true))
+            let ledger: CacheLedger
+            if let path = environment["CODEX_WIDGET_CACHE_LEDGER_PATH"] {
+                let loaded = LocalStateStore.load(
+                    CacheLedger.self,
+                    from: URL(fileURLWithPath: path),
+                    defaultValue: .defaultValue
+                )
+                ledger = loaded.condition == .valid ? loaded.value : .defaultValue
+            } else { ledger = .defaultValue }
+            let result = try SessionScanner.scan(
+                dataDirectory: URL(fileURLWithPath: directory, isDirectory: true),
+                cacheLedger: ledger
+            )
             let data = try encodePayload(result, generation: generation)
             try writePayload(data, to: URL(fileURLWithPath: output))
             return 0
@@ -1064,7 +1295,12 @@ enum ScanWorker {
 }
 
 enum ScanSupervisor {
-    static func scan(executableURL: URL, dataDirectory: URL, timeout: TimeInterval = 10) throws -> UsageScanResult {
+    static func scan(
+        executableURL: URL,
+        dataDirectory: URL,
+        cacheLedgerURL: URL? = nil,
+        timeout: TimeInterval = 10
+    ) throws -> UsageScanResult {
         let generation = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let channel = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexUsageWidget-scan-\(generation)", isDirectory: true)
@@ -1082,6 +1318,7 @@ enum ScanSupervisor {
         environment["CODEX_WIDGET_DATA_DIRECTORY"] = dataDirectory.path
         environment["CODEX_WIDGET_RESULT_PATH"] = result.path
         environment["CODEX_WIDGET_GENERATION"] = generation
+        if let cacheLedgerURL { environment["CODEX_WIDGET_CACHE_LEDGER_PATH"] = cacheLedgerURL.path }
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -1132,7 +1369,7 @@ enum ScanSupervisor {
             jsonInt64(object["schemaVersion"]) == 1,
             object["generation"] as? String == generation,
             let stateObject = object["state"] as? [String: Any],
-            let sessionObjects = object["sessions"] as? [[String: Any]], sessionObjects.count <= 30
+            let sessionObjects = object["sessions"] as? [[String: Any]], sessionObjects.count <= 31
         else { throw CoreError.invalidData }
         var state = try normalizedState(from: stateObject)
         let sessions = try sessionObjects.map { try sessionSnapshot(from: $0) }
@@ -1161,8 +1398,13 @@ enum ScanSupervisor {
     }
 
     private static func sessionSnapshot(from object: [String: Any]) throws -> SessionTokenSnapshot {
-        guard Set(object.keys) == Set(["id", "cacheHitTokens", "cacheMissTokens"]),
-              let id = object["id"] as? String, validSessionIdentifier(id)
+        guard Set(object.keys) == Set([
+            "id", "cacheHitTokens", "cacheMissTokens", "cacheHitBaselineTokens", "cacheMissBaselineTokens",
+            "cacheBaselineAttempts"
+        ]),
+              let id = object["id"] as? String, validSessionIdentifier(id),
+              let attempts = jsonInt64(object["cacheBaselineAttempts"]),
+              (0...CacheLedger.maximumBaselineAttempts).contains(attempts)
         else { throw CoreError.invalidData }
         func token(_ key: String) throws -> String? {
             guard let raw = object[key] else { throw CoreError.invalidData }
@@ -1170,7 +1412,14 @@ enum ScanSupervisor {
             guard let text = raw as? String, validToken(text) else { throw CoreError.invalidData }
             return text
         }
-        return SessionTokenSnapshot(id: id, cacheHitTokens: try token("cacheHitTokens"), cacheMissTokens: try token("cacheMissTokens"))
+        return SessionTokenSnapshot(
+            id: id,
+            cacheHitTokens: try token("cacheHitTokens"),
+            cacheMissTokens: try token("cacheMissTokens"),
+            cacheHitBaselineTokens: try token("cacheHitBaselineTokens"),
+            cacheMissBaselineTokens: try token("cacheMissBaselineTokens"),
+            cacheBaselineAttempts: attempts
+        )
     }
 
     private static func limitSnapshot(from object: [String: Any]) throws -> UsageLimitSnapshot {

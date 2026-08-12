@@ -48,6 +48,20 @@ final class CoreTests: XCTestCase {
         return url
     }
 
+    private func tokenEvent(
+        totalInput: Int,
+        cachedInput: Int,
+        lastInput: Int,
+        lastCached: Int,
+        limitID: String? = "codex"
+    ) -> Data {
+        let limit = limitID.map { "\"limit_id\":\"\($0)\"," } ?? ""
+        return Data("""
+        {"timestamp":"2026-08-11T00:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":\(totalInput),"cached_input_tokens":\(cachedInput),"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":\(totalInput + 10)},"last_token_usage":{"input_tokens":\(lastInput),"cached_input_tokens":\(lastCached),"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":\(lastInput + 10)},"model_context_window":258400},"rate_limits":{\(limit)"primary":{"used_percent":45,"window_minutes":300,"resets_at":4102441200},"secondary":null}}}
+
+        """.utf8)
+    }
+
     func testReviewedContractFixtures() throws {
         let document = try JSONSerialization.jsonObject(
             with: Data(contentsOf: contractRoot.appendingPathComponent("expected-state.json"))) as! [String: Any]
@@ -186,6 +200,379 @@ final class CoreTests: XCTestCase {
             ]
         )
         XCTAssertNil(overflow.totals())
+        XCTAssertFalse(CacheLedger(
+            schemaVersion: 2,
+            sessions: ["attempts": CacheRecord(hitTokens: "1", missTokens: "1", baselineAttempts: 10_001)]
+        ).isValid)
+    }
+
+    func testForkHistoryPrefixIsSeparatedFromRawTaskAndLedgerTotals() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let id = "33333333-3333-3333-3333-333333333333"
+        var data = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        data.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        data.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(data, named: "rollout-\(id).jsonl", to: sessions, modified: Date())
+        try Data("{\"id\":\"\(id)\",\"thread_name\":\"Fork task\"}\n".utf8)
+            .write(to: root.appendingPathComponent("session_index.jsonl"))
+
+        let result = try SessionScanner.scan(dataDirectory: root)
+
+        XCTAssertEqual(result.sessions, [SessionTokenSnapshot(
+            id: "rollout-\(id)",
+            cacheHitTokens: "1200",
+            cacheMissTokens: "300",
+            cacheHitBaselineTokens: "720",
+            cacheMissBaselineTokens: "180",
+            cacheBaselineAttempts: 1
+        )])
+        XCTAssertEqual(result.state.tasks.first?.cacheHitTokens, "1200")
+        XCTAssertEqual(result.state.tasks.first?.cacheMissTokens, "300")
+    }
+
+    func testOrdinarySessionKeepsItsFullLedgerSnapshot() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        var data = Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"44444444-4444-4444-4444-444444444444\"}}\n".utf8)
+        data.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(data, named: "ordinary.jsonl", to: sessions, modified: Date())
+
+        let result = try SessionScanner.scan(dataDirectory: root)
+
+        XCTAssertEqual(result.sessions, [SessionTokenSnapshot(
+            id: "ordinary",
+            cacheHitTokens: "1200",
+            cacheMissTokens: "300",
+            cacheHitBaselineTokens: "0",
+            cacheMissBaselineTokens: "0",
+            cacheBaselineAttempts: 1
+        )])
+    }
+
+    func testForkBaselineStreamingHeadReadsBeyondOneMiB() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        var data = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        data.append(Data(repeating: 0x78, count: 1024 * 1024))
+        data.append(0x0a)
+        data.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        data.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(data, named: "bounded.jsonl", to: sessions, modified: Date())
+
+        let result = try SessionScanner.scan(dataDirectory: root)
+
+        XCTAssertEqual(result.sessions, [SessionTokenSnapshot(
+            id: "bounded",
+            cacheHitTokens: "1200",
+            cacheMissTokens: "300",
+            cacheHitBaselineTokens: "720",
+            cacheMissBaselineTokens: "180",
+            cacheBaselineAttempts: 1
+        )])
+    }
+
+    func testForkBaselineReadDoesNotCrossFourMiBHeadBoundary() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        var data = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        data.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80, limitID: nil))
+        data.append(Data(repeating: 0x78, count: 4 * 1024 * 1024))
+        data.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        data.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(data, named: "four-mib.jsonl", to: sessions, modified: Date())
+
+        let result = try SessionScanner.scan(dataDirectory: root)
+
+        XCTAssertEqual(result.sessions, [SessionTokenSnapshot(
+            id: "four-mib",
+            cacheHitTokens: "1200",
+            cacheMissTokens: "300",
+            cacheHitBaselineTokens: nil,
+            cacheMissBaselineTokens: nil,
+            cacheBaselineAttempts: 1
+        )])
+    }
+
+    func testForkBaselinePrefersExplicitCodexAndFallsBackToLegacy() throws {
+        let meta = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        var explicit = meta
+        explicit.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80, limitID: nil))
+        explicit.append(tokenEvent(totalInput: 1_100, cachedInput: 850, lastInput: 100, lastCached: 70))
+        explicit.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 400, lastCached: 350))
+        var legacy = meta
+        legacy.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80, limitID: nil))
+        legacy.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400, limitID: nil))
+        func scan(_ data: Data, named name: String) throws -> SessionTokenSnapshot {
+            let root = try temporaryDirectory()
+            let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+            try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+            try writeSession(data, named: "\(name).jsonl", to: sessions, modified: Date())
+            return try XCTUnwrap(SessionScanner.scan(dataDirectory: root).sessions.first)
+        }
+
+        XCTAssertEqual(try scan(explicit, named: "explicit"),
+                       SessionTokenSnapshot(id: "explicit", cacheHitTokens: "1200", cacheMissTokens: "300", cacheHitBaselineTokens: "780", cacheMissBaselineTokens: "220", cacheBaselineAttempts: 1))
+        XCTAssertEqual(try scan(legacy, named: "legacy"),
+                       SessionTokenSnapshot(id: "legacy", cacheHitTokens: "1200", cacheMissTokens: "300", cacheHitBaselineTokens: "720", cacheMissBaselineTokens: "180", cacheBaselineAttempts: 1))
+    }
+
+    func testCacheLedgerMigratesV1BaselineOnceAndPreservesStaleSession() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("cache-token-ledger.json")
+        try Data("""
+        {"schemaVersion":1,"sessions":{"fork":{"hitTokens":"1200","missTokens":"300"},"stale":{"hitTokens":"50","missTokens":"25"}}}
+        """.utf8).write(to: url)
+        let loaded = LocalStateStore.load(CacheLedger.self, from: url, defaultValue: .defaultValue)
+        XCTAssertEqual(loaded.condition, .valid)
+        var ledger = loaded.value
+        let snapshot = SessionTokenSnapshot(
+            id: "fork",
+            cacheHitTokens: "1200",
+            cacheMissTokens: "300",
+            cacheHitBaselineTokens: "720",
+            cacheMissBaselineTokens: "180"
+        )
+
+        XCTAssertEqual(try ledger.merge([snapshot]), CacheTotals(hitTokens: 530, missTokens: 145))
+        XCTAssertEqual(ledger.schemaVersion, 2)
+        XCTAssertTrue(try LocalStateStore.save(ledger, to: url, previous: .valid))
+        var reloaded = LocalStateStore.load(CacheLedger.self, from: url, defaultValue: .defaultValue).value
+        XCTAssertEqual(try reloaded.merge([snapshot]), CacheTotals(hitTokens: 530, missTokens: 145))
+        XCTAssertEqual(reloaded.sessions["fork"]?.hitBaselineTokens, "720")
+        XCTAssertNil(reloaded.sessions["stale"]?.hitBaselineTokens)
+    }
+
+    func testScannerMigratesOneOldLedgerSessionBeforeUnknownLatestSessions() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date()
+        let oldID = "old-ledger"
+        var fork = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        fork.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        fork.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(fork, named: "\(oldID).jsonl", to: sessions, modified: now.addingTimeInterval(-3_600))
+        for index in 0..<30 {
+            try writeSession(
+                fork,
+                named: String(format: "latest-%02d.jsonl", index),
+                to: sessions,
+                modified: now.addingTimeInterval(TimeInterval(index))
+            )
+        }
+        let ledger = CacheLedger(
+            schemaVersion: 1,
+            sessions: [
+                "aaa-stale": CacheRecord(hitTokens: "50", missTokens: "25"),
+                oldID: CacheRecord(hitTokens: "1200", missTokens: "300")
+            ]
+        )
+
+        let first = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+
+        XCTAssertEqual(first.sessions.count, 31)
+        XCTAssertEqual(first.sessions.first(where: { $0.id == oldID })?.cacheHitBaselineTokens, "720")
+        XCTAssertEqual(first.sessions.filter { $0.id.hasPrefix("latest-") && $0.cacheHitBaselineTokens != nil }.count, 0)
+
+        var migrated = ledger
+        _ = try migrated.merge(first.sessions)
+        XCTAssertNil(migrated.sessions["aaa-stale"]?.hitBaselineTokens)
+        let second = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: migrated)
+        XCTAssertNil(second.sessions.first(where: { $0.id == oldID }))
+        XCTAssertEqual(second.sessions.filter { $0.id.hasPrefix("latest-") && $0.cacheHitBaselineTokens != nil }.count, 1)
+    }
+
+    func testIndeterminateBaselineDoesNotStarveNextMigratableSession() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date()
+        let meta = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        var indeterminate = meta
+        indeterminate.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80, limitID: nil))
+        indeterminate.append(Data(repeating: 0x78, count: 4 * 1024 * 1024))
+        var migratable = meta
+        migratable.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        migratable.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(indeterminate, named: "a.jsonl", to: sessions, modified: now)
+        try writeSession(migratable, named: "b.jsonl", to: sessions, modified: now)
+        var ledger = CacheLedger(schemaVersion: 1, sessions: [
+            "a": CacheRecord(hitTokens: "1200", missTokens: "300"),
+            "b": CacheRecord(hitTokens: "1200", missTokens: "300")
+        ])
+
+        let first = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+        XCTAssertNil(first.sessions.first(where: { $0.id == "a" })?.cacheHitBaselineTokens)
+        XCTAssertEqual(first.sessions.first(where: { $0.id == "a" })?.cacheBaselineAttempts, 1)
+        _ = try ledger.merge(first.sessions)
+
+        let second = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+        XCTAssertEqual(second.sessions.first(where: { $0.id == "b" })?.cacheHitBaselineTokens, "720")
+        XCTAssertEqual(second.sessions.first(where: { $0.id == "b" })?.cacheBaselineAttempts, 1)
+    }
+
+    func testUnreadableHistoricalMigrationAdvancesWithoutPollutingCurrentUsage() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date()
+        var fork = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        fork.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        fork.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        let unreadable = try writeSession(fork, named: "a.jsonl", to: sessions, modified: now.addingTimeInterval(-3_600))
+        try writeSession(fork, named: "b.jsonl", to: sessions, modified: now.addingTimeInterval(-3_600))
+        for index in 0..<30 {
+            try writeSession(
+                try fixture("demo"),
+                named: String(format: "latest-%02d.jsonl", index),
+                to: sessions,
+                modified: now.addingTimeInterval(TimeInterval(index))
+            )
+        }
+        XCTAssertEqual(chmod(unreadable.path, 0o000), 0)
+        defer { chmod(unreadable.path, 0o600) }
+        var ledger = CacheLedger(schemaVersion: 1, sessions: [
+            "a": CacheRecord(hitTokens: "1200", missTokens: "300"),
+            "b": CacheRecord(hitTokens: "1200", missTokens: "300")
+        ])
+
+        let first = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+
+        XCTAssertEqual(first.state.metrics.readFailureCount, 0)
+        XCTAssertEqual(first.state.classification, .complete)
+        XCTAssertEqual(first.sessions.first(where: { $0.id == "a" })?.cacheHitTokens, "1200")
+        XCTAssertNil(first.sessions.first(where: { $0.id == "a" })?.cacheHitBaselineTokens)
+        XCTAssertEqual(first.sessions.first(where: { $0.id == "a" })?.cacheBaselineAttempts, 1)
+        _ = try ledger.merge(first.sessions)
+
+        let second = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+        XCTAssertEqual(second.sessions.first(where: { $0.id == "b" })?.cacheHitBaselineTokens, "720")
+        XCTAssertEqual(second.sessions.first(where: { $0.id == "b" })?.cacheBaselineAttempts, 1)
+    }
+
+    func testUnreadableCurrentSessionStillCountsAsReadFailure() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let unreadable = try writeSession(
+            try fixture("demo"), named: "current.jsonl", to: sessions, modified: Date()
+        )
+        XCTAssertEqual(chmod(unreadable.path, 0o000), 0)
+        defer { chmod(unreadable.path, 0o600) }
+
+        let result = try SessionScanner.scan(dataDirectory: root)
+
+        XCTAssertEqual(result.state.metrics.readFailureCount, 1)
+        XCTAssertEqual(result.state.classification, .error)
+    }
+
+    func testSaturatedAttemptsRemainUnknownAndAreRejectedAtEveryBoundary() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        var fork = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        fork.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        fork.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(fork, named: "a.jsonl", to: sessions, modified: Date())
+        try writeSession(fork, named: "b.jsonl", to: sessions, modified: Date())
+        let maximum: Int64 = 10_000
+        let saturated = CacheLedger(schemaVersion: 2, sessions: [
+            "a": CacheRecord(hitTokens: "1200", missTokens: "300", baselineAttempts: maximum),
+            "b": CacheRecord(hitTokens: "1200", missTokens: "300", baselineAttempts: maximum)
+        ])
+
+        let scanned = try SessionScanner.scan(dataDirectory: root, cacheLedger: saturated)
+        XCTAssertTrue(scanned.sessions.allSatisfy {
+            $0.cacheHitBaselineTokens == nil && $0.cacheBaselineAttempts == maximum
+        })
+        let oneAvailable = CacheLedger(schemaVersion: 2, sessions: [
+            "a": CacheRecord(hitTokens: "1200", missTokens: "300", baselineAttempts: maximum),
+            "b": CacheRecord(hitTokens: "1200", missTokens: "300", baselineAttempts: maximum - 1)
+        ])
+        let advanced = try SessionScanner.scan(dataDirectory: root, cacheLedger: oneAvailable)
+        XCTAssertNil(advanced.sessions.first(where: { $0.id == "a" })?.cacheHitBaselineTokens)
+        XCTAssertEqual(advanced.sessions.first(where: { $0.id == "b" })?.cacheHitBaselineTokens, "720")
+        XCTAssertEqual(advanced.sessions.first(where: { $0.id == "b" })?.cacheBaselineAttempts, maximum)
+
+        let invalid = SessionTokenSnapshot(
+            id: "invalid",
+            cacheHitTokens: "1",
+            cacheMissTokens: "1",
+            cacheBaselineAttempts: maximum + 1
+        )
+        var ledger = CacheLedger.defaultValue
+        XCTAssertThrowsError(try ledger.merge([invalid]))
+        var corrupt = CacheLedger(schemaVersion: 2, sessions: [
+            "corrupt": CacheRecord(hitTokens: "1", missTokens: "1", baselineAttempts: maximum + 1)
+        ])
+        XCTAssertThrowsError(try corrupt.merge([]))
+        let state = UsageContract.evaluate(data: try fixture("demo"), now: Date())
+        let generation = "0123456789abcdef0123456789abcdef"
+        XCTAssertThrowsError(try ScanWorker.encodePayload(
+            UsageScanResult(state: state, sessions: [invalid]), generation: generation
+        ))
+        let valid = SessionTokenSnapshot(id: "valid", cacheHitTokens: "1", cacheMissTokens: "1")
+        var envelope = try JSONSerialization.jsonObject(with: ScanWorker.encodePayload(
+            UsageScanResult(state: state, sessions: [valid]), generation: generation
+        )) as! [String: Any]
+        var objects = envelope["sessions"] as! [[String: Any]]
+        objects[0]["cacheBaselineAttempts"] = maximum + 1
+        envelope["sessions"] = objects
+        XCTAssertThrowsError(try ScanSupervisor.decodeEnvelope(
+            JSONSerialization.data(withJSONObject: envelope), generation: generation
+        ))
+    }
+
+    func testLegacyTokenOnlySessionUsesZeroBaseline() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        var data = tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80)
+        data.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(data, named: "legacy-token-only.jsonl", to: sessions, modified: Date())
+
+        let snapshot = try XCTUnwrap(SessionScanner.scan(dataDirectory: root).sessions.first)
+
+        XCTAssertEqual(snapshot.cacheHitBaselineTokens, "0")
+        XCTAssertEqual(snapshot.cacheMissBaselineTokens, "0")
+        XCTAssertEqual(snapshot.cacheBaselineAttempts, 1)
+    }
+
+    func testOldNamedUUIDMigrationIsExcludedFromActiveTasks() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date()
+        let id = "55555555-5555-5555-5555-555555555555"
+        let oldName = "rollout-\(id)"
+        var fork = Data("{\"type\":\"session_meta\",\"payload\":{\"forked_from_id\":\"11111111-1111-1111-1111-111111111111\"}}\n".utf8)
+        fork.append(tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80))
+        fork.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        try writeSession(fork, named: "\(oldName).jsonl", to: sessions, modified: now.addingTimeInterval(-3_600))
+        for index in 0..<30 {
+            try writeSession(
+                tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80),
+                named: String(format: "new-%02d.jsonl", index),
+                to: sessions,
+                modified: now.addingTimeInterval(TimeInterval(index))
+            )
+        }
+        try Data("{\"id\":\"\(id)\",\"thread_name\":\"Old migration\"}\n".utf8)
+            .write(to: root.appendingPathComponent("session_index.jsonl"))
+        let ledger = CacheLedger(
+            schemaVersion: 1,
+            sessions: [oldName: CacheRecord(hitTokens: "1200", missTokens: "300")]
+        )
+
+        let result = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+
+        XCTAssertNotNil(result.sessions.first(where: { $0.id == oldName }))
+        XCTAssertFalse(result.state.tasks.contains(where: { $0.id == id }))
     }
 
     func testReminderLedgerDeduplicatesEachResetCycle() {
@@ -206,10 +593,19 @@ final class CoreTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let state = UsageContract.evaluate(data: try fixture("demo"), now: formatter.date(from: "2026-08-11T00:00:01.000Z")!)
         let generation = "0123456789abcdef0123456789abcdef"
-        let result = UsageScanResult(state: state, sessions: [])
+        let session = SessionTokenSnapshot(
+            id: "worker",
+            cacheHitTokens: "1200",
+            cacheMissTokens: "300",
+            cacheHitBaselineTokens: "720",
+            cacheMissBaselineTokens: "180"
+        )
+        let result = UsageScanResult(state: state, sessions: [session])
         let payload = try ScanWorker.encodePayload(result, generation: generation)
         XCTAssertLessThanOrEqual(payload.count, ScanWorker.maximumResultBytes)
-        XCTAssertEqual(try ScanSupervisor.decodeEnvelope(payload, generation: generation).state.remainingPercent, "55.0")
+        let decoded = try ScanSupervisor.decodeEnvelope(payload, generation: generation)
+        XCTAssertEqual(decoded.state.remainingPercent, "55.0")
+        XCTAssertEqual(decoded.sessions, [session])
 
         var envelope = try JSONSerialization.jsonObject(with: payload) as! [String: Any]
         var stateObject = envelope["state"] as! [String: Any]

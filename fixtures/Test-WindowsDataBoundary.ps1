@@ -142,6 +142,8 @@ try {
     finally { $reminderLock.Dispose() }
     Assert-Boundary (-not $reminderRegistered -and @($script:ReminderGateCache.SentKeys).Count -eq 0) 'a failed reminder write must not publish or retain an unsaved notification gate.'
     Assert-Boundary ([IO.File]::ReadAllText($reminderPath) -ceq $reminderBaseline) 'a failed reminder write must leave the persisted reminder gate byte-identical.'
+    Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'later scan boundaries must start with an empty cumulative ledger.'
+    $script:CacheTokenLedger = $null
 
     $boundedRoot = Join-Path $testRoot 'bounded-sessions'
     [void][IO.Directory]::CreateDirectory($boundedRoot)
@@ -178,8 +180,201 @@ try {
     }
     [IO.File]::WriteAllLines((Join-Path $splitRoot 'session_index.jsonl'), $indexRows)
     $splitSnapshot = Get-CodexUsageSnapshot -DataDirectory $splitRoot -ReadOnly
-    Assert-Boundary (@($splitSnapshot.State.SessionTokenSnapshots).Count -eq 30 -and
-        @($splitSnapshot.State.ActiveTasks).Count -eq 30) 'usage and named activity candidates must be selected independently and read at most sixty files.'
+    Assert-Boundary (@($splitSnapshot.State.SessionTokenSnapshots).Count -eq 1 -and
+        @($splitSnapshot.State.ActiveTasks).Count -eq 30) ('a first scan must bound new-session baseline work to one file without dropping active tasks; sessions={0}, tasks={1}.' -f
+            @($splitSnapshot.State.SessionTokenSnapshots).Count, @($splitSnapshot.State.ActiveTasks).Count)
+
+    $forkRoot = Join-Path $testRoot 'fork-prefix'
+    $forkSessions = Join-Path $forkRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($forkSessions)
+    $forkPath = Join-Path $forkSessions 'rollout-44444444-4444-4444-4444-444444444444.jsonl'
+    $forkRows = @(
+        '{"timestamp":"2026-08-11T00:00:00.000Z","type":"session_meta","payload":{"id":"44444444-4444-4444-4444-444444444444","forked_from_id":"33333333-3333-3333-3333-333333333333"}}',
+        '{"timestamp":"2026-08-11T00:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"total_tokens":120},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":45,"window_minutes":10080,"resets_at":4102444800},"secondary":null}}}',
+        '{"timestamp":"2026-08-11T00:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":1200,"output_tokens":200,"total_tokens":1700},"last_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":100,"total_tokens":600},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":46,"window_minutes":10080,"resets_at":4102444800},"secondary":null}}}'
+    )
+    [IO.File]::WriteAllLines($forkPath, $forkRows, [Text.UTF8Encoding]::new($false))
+    $legacyForkLedger = '{"Sessions":[{"Id":"rollout-44444444-4444-4444-4444-444444444444","CacheHitTokens":1200,"CacheMissTokens":300}]}'
+    [IO.File]::WriteAllText($ledgerPath, $legacyForkLedger, [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $forkSnapshot = Get-CodexUsageSnapshot -DataDirectory $forkRoot -ReadOnly
+    $forkTokens = @($forkSnapshot.State.SessionTokenSnapshots)[0]
+    Assert-Boundary ($forkTokens.CacheHitTokens -eq 1200 -and $forkTokens.CacheMissTokens -eq 300 -and
+        $forkTokens.CacheHitBaselineTokens -eq 720 -and $forkTokens.CacheMissBaselineTokens -eq 180) `
+        ('a forked session must expose its raw cumulative values and only the copied prefix needed by the ledger; hit={0}, miss={1}, baseHit={2}, baseMiss={3}.' -f
+            $forkTokens.CacheHitTokens, $forkTokens.CacheMissTokens, $forkTokens.CacheHitBaselineTokens, $forkTokens.CacheMissBaselineTokens)
+    $script:CacheTokenLedger = $null
+    if ([IO.File]::Exists($ledgerPath)) { [IO.File]::Delete($ledgerPath) }
+    $forkTotals = Update-CumulativeCacheTokens @($forkTokens)
+    Assert-Boundary ($forkTotals.CacheHitTokens -eq 480 -and $forkTotals.CacheMissTokens -eq 120) `
+        'the cumulative ledger must subtract the copied fork prefix while retaining the first real request.'
+    $legacyLedger = '{"Sessions":[{"Id":"rollout-44444444-4444-4444-4444-444444444444","CacheHitTokens":1400,"CacheMissTokens":350},{"Id":"missing","CacheHitTokens":50,"CacheMissTokens":10}]}'
+    [IO.File]::WriteAllText($ledgerPath, $legacyLedger, [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $legacyIds = Get-CumulativeCacheBaselineMigrationIds
+    Assert-Boundary ($legacyIds['rollout-44444444-4444-4444-4444-444444444444'].CacheHitTokens -eq 1400) `
+        'legacy migration must expose the previously observed raw maximum to prevent a lower tail snapshot from losing tokens.'
+    $migratedTotals = Update-CumulativeCacheTokens @([pscustomobject]@{
+        Id = 'rollout-44444444-4444-4444-4444-444444444444'
+        CacheHitTokens = 1400; CacheMissTokens = 350
+        CacheHitBaselineTokens = 720; CacheMissBaselineTokens = 180
+    })
+    Assert-Boundary ($migratedTotals.CacheHitTokens -eq 730 -and $migratedTotals.CacheMissTokens -eq 180) `
+        'legacy migration must subtract the proven prefix, retain missing sessions, and never clear the ledger.'
+    Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'the migration fixture must restore an empty ledger before unrelated scan boundaries.'
+    $script:CacheTokenLedger = $null
+    [IO.File]::SetLastWriteTimeUtc($ledgerPath, [datetime]::UtcNow)
+
+    $legacyOnlyRow = $forkRows[1].Replace('"limit_id":"codex",', '')
+    $legacyCompletePath = Join-Path $testRoot 'legacy-baseline-complete.jsonl'
+    [IO.File]::WriteAllLines($legacyCompletePath, @($forkRows[0], $legacyOnlyRow), [Text.UTF8Encoding]::new($false))
+    $legacyCompleteBaseline = Get-SessionCacheTokenBaseline -Path $legacyCompletePath
+    Assert-Boundary ($legacyCompleteBaseline.CacheHitTokens -eq 720 -and $legacyCompleteBaseline.CacheMissTokens -eq 180) `
+        'a complete file with no explicit limit id may use its first legacy cache baseline.'
+    $legacyNullPath = Join-Path $testRoot 'legacy-baseline-null.jsonl'
+    $legacyNullRow = $forkRows[1].Replace('"limit_id":"codex"', '"limit_id":null')
+    [IO.File]::WriteAllLines($legacyNullPath, @($forkRows[0], $legacyNullRow), [Text.UTF8Encoding]::new($false))
+    $legacyNullBaseline = Get-SessionCacheTokenBaseline -Path $legacyNullPath
+    Assert-Boundary ($legacyNullBaseline.CacheHitTokens -eq $legacyCompleteBaseline.CacheHitTokens -and
+        $legacyNullBaseline.CacheMissTokens -eq $legacyCompleteBaseline.CacheMissTokens) `
+        'a null limit id must have the same legacy baseline semantics as an omitted limit id.'
+    $legacyTruncatedPath = Join-Path $testRoot 'legacy-baseline-truncated.jsonl'
+    [IO.File]::WriteAllLines($legacyTruncatedPath, @(
+        $forkRows[0], $legacyOnlyRow, ('{"padding":"' + ('x' * 4194304) + '"}'), $forkRows[1]
+    ), [Text.UTF8Encoding]::new($false))
+    Assert-Boundary ($null -eq (Get-SessionCacheTokenBaseline -Path $legacyTruncatedPath)) `
+        'a truncated head that has only legacy usage must remain unknown because an explicit Codex record may follow.'
+
+    $rotationRoot = Join-Path $testRoot 'baseline-rotation'
+    $rotationSessions = Join-Path $rotationRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($rotationSessions)
+    $blockedId = '00000000-0000-0000-0000-000000000001'
+    $readyId = '00000000-0000-0000-0000-000000000002'
+    $blockedMeta = '{"timestamp":"2026-08-11T00:00:00.000Z","type":"session_meta","payload":{"id":"' +
+        $blockedId + '","forked_from_id":"33333333-3333-3333-3333-333333333333","padding":"' + ('x' * 4194304) + '"}}'
+    $readyMeta = '{"timestamp":"2026-08-11T00:00:00.000Z","type":"session_meta","payload":{"id":"' + $readyId + '"}}'
+    $rotationUsage = $forkRows[1]
+    $blockedPath = Join-Path $rotationSessions ('rollout-' + $blockedId + '.jsonl')
+    $readyPath = Join-Path $rotationSessions ('rollout-' + $readyId + '.jsonl')
+    [IO.File]::WriteAllLines($blockedPath, @($blockedMeta, $rotationUsage), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines($readyPath, @($readyMeta, $rotationUsage), [Text.UTF8Encoding]::new($false))
+    $rotationNow = [datetime]::UtcNow
+    [IO.File]::SetLastWriteTimeUtc($blockedPath, $rotationNow)
+    [IO.File]::SetLastWriteTimeUtc($readyPath, $rotationNow.AddSeconds(-1))
+    [IO.File]::WriteAllLines((Join-Path $rotationRoot 'session_index.jsonl'), @(
+        ('{"id":"' + $blockedId + '","thread_name":"blocked"}'),
+        ('{"id":"' + $readyId + '","thread_name":"ready"}')
+    ))
+    $script:CacheTokenBaselineCursor = $null
+    $blockedRound = Get-CodexUsageSnapshot -DataDirectory $rotationRoot -ReadOnly
+    Assert-Boundary ($blockedRound.State.LimitWindows[0].RemainingPercent -eq 55 -and
+        @($blockedRound.State.ActiveTasks).Count -eq 2 -and @($blockedRound.State.SessionTokenSnapshots).Count -eq 0) `
+        'an indeterminate baseline must not become zero or hide the current percentage and active tasks.'
+    $advancedRound = Get-CodexUsageSnapshot -DataDirectory $rotationRoot -ReadOnly
+    $advancedSessions = @($advancedRound.State.SessionTokenSnapshots)
+    Assert-Boundary ($advancedSessions.Count -eq 1 -and $advancedSessions[0].Id -ceq ('rollout-' + $readyId) -and
+        $advancedSessions[0].CacheHitBaselineTokens -eq 0 -and $advancedSessions[0].CacheMissBaselineTokens -eq 0) `
+        'one unreadable 4 MiB prefix must not permanently consume the only baseline-read budget.'
+
+    $transientRoot = Join-Path $testRoot 'transient-migration'
+    $transientSessions = Join-Path $transientRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($transientSessions)
+    [IO.File]::Copy($blockedPath, (Join-Path $transientSessions ('rollout-' + $blockedId + '.jsonl')))
+    [IO.File]::WriteAllText((Join-Path $transientSessions 'current.jsonl'), $rotationUsage, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($ledgerPath,
+        ('{"Sessions":[{"Id":"rollout-' + $blockedId + '","CacheHitTokens":800,"CacheMissTokens":200}]}'),
+        [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $script:CacheTokenBaselineCursor = $null
+    $transientSnapshot = Get-CodexUsageSnapshot -DataDirectory $transientRoot -ReadOnly
+    Assert-Boundary (@($transientSnapshot.State.SessionTokenSnapshots | Where-Object Id -eq ('rollout-' + $blockedId)).Count -eq 0 -and
+        @($transientSnapshot.State.SessionTokenSnapshots | Where-Object Id -eq 'current').Count -eq 1) `
+        'a present session whose head is temporarily unreadable must remain pending instead of being frozen at baseline zero.'
+
+    $nullRawRoot = Join-Path $testRoot 'null-raw-cache'
+    $nullRawSessions = Join-Path $nullRawRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($nullRawSessions)
+    $nullRawUsage = '{"timestamp":"2026-08-11T00:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":45,"window_minutes":10080,"resets_at":4102444800},"secondary":null}}}'
+    [IO.File]::WriteAllText((Join-Path $nullRawSessions 'null-cache.jsonl'), $nullRawUsage, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($ledgerPath, '{"SchemaVersion":2,"Sessions":[]}', [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $nullRawSnapshot = Get-CodexUsageSnapshot -DataDirectory $nullRawRoot -ReadOnly
+    Assert-Boundary ($nullRawSnapshot.State.LimitWindows[0].RemainingPercent -eq 55 -and
+        @($nullRawSnapshot.State.SessionTokenSnapshots).Count -eq 0) `
+        'a valid limit observation with unknown raw cache counters must remain visible without entering the cache ledger.'
+
+    $directoryAForkId = 'rollout-44444444-4444-4444-4444-444444444444'
+    $directoryARoot = Join-Path $testRoot 'migration-directory-a'
+    $directoryASessions = Join-Path $directoryARoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($directoryASessions)
+    [IO.File]::WriteAllText((Join-Path $directoryASessions 'current.jsonl'), $rotationUsage, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($ledgerPath,
+        ('{"Sessions":[{"Id":"' + $directoryAForkId + '","CacheHitTokens":1400,"CacheMissTokens":350}]}'),
+        [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $script:CacheTokenBaselineCursor = $null
+    $directoryASnapshot = Get-CodexUsageSnapshot -DataDirectory $directoryARoot -ReadOnly
+    Assert-Boundary (@($directoryASnapshot.State.SessionTokenSnapshots | Where-Object Id -eq $directoryAForkId).Count -eq 0) `
+        'a pending fork missing only from the currently selected Codex directory must not be emitted with baseline zero.'
+    $directoryAPersisted = Apply-UsageSnapshotPersistence $directoryASnapshot
+    $directoryALedger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json -ErrorAction Stop
+    $directoryAFork = @($directoryALedger.Sessions | Where-Object Id -eq $directoryAForkId)[0]
+    Assert-Boundary ($null -ne $directoryAPersisted -and
+        $null -eq $directoryAFork.CacheHitBaselineTokens -and $null -eq $directoryAFork.CacheMissBaselineTokens) `
+        'a scan of another Codex directory must preserve an unknown fork baseline on disk.'
+
+    $directoryBRoot = Join-Path $testRoot 'migration-directory-b'
+    $directoryBSessions = Join-Path $directoryBRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($directoryBSessions)
+    [IO.File]::Copy($forkPath, (Join-Path $directoryBSessions ($directoryAForkId + '.jsonl')))
+    [IO.File]::WriteAllText((Join-Path $directoryBSessions 'current.jsonl'), $rotationUsage, [Text.UTF8Encoding]::new($false))
+    $directoryBSnapshot = Get-CodexUsageSnapshot -DataDirectory $directoryBRoot -ReadOnly
+    $directoryBFork = @($directoryBSnapshot.State.SessionTokenSnapshots | Where-Object Id -eq $directoryAForkId)[0]
+    Assert-Boundary ($directoryBFork.CacheHitBaselineTokens -eq 720 -and $directoryBFork.CacheMissBaselineTokens -eq 180) `
+        'when the pending fork appears in a different Codex directory its proven copied prefix must still be recovered.'
+    $null = Apply-UsageSnapshotPersistence $directoryBSnapshot
+    $directoryBLedger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json -ErrorAction Stop
+    $directoryBStoredFork = @($directoryBLedger.Sessions | Where-Object Id -eq $directoryAForkId)[0]
+    Assert-Boundary ($directoryBStoredFork.CacheHitBaselineTokens -eq 720 -and $directoryBStoredFork.CacheMissBaselineTokens -eq 180) `
+        'the recovered fork baseline must replace the pending unknown value rather than a guessed zero.'
+
+    $protocolRoot = Join-Path $testRoot 'migration-protocol-limit'
+    $protocolSessions = Join-Path $protocolRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($protocolSessions)
+    for ($index = 0; $index -lt 30; $index++) {
+        [IO.File]::WriteAllText((Join-Path $protocolSessions ('session-{0:D2}.jsonl' -f $index)), $rotationUsage, [Text.UTF8Encoding]::new($false))
+    }
+    $ordinaryMigrationId = 'ordinary-old'
+    [IO.File]::WriteAllLines((Join-Path $protocolSessions ($ordinaryMigrationId + '.jsonl')), @(
+        '{"timestamp":"2026-08-11T00:00:00.000Z","type":"session_meta","payload":{"id":"55555555-5555-5555-5555-555555555555"}}',
+        $rotationUsage
+    ), [Text.UTF8Encoding]::new($false))
+    [IO.File]::SetLastWriteTimeUtc((Join-Path $protocolSessions ($ordinaryMigrationId + '.jsonl')), [datetime]'2020-01-01T00:00:00Z')
+    [IO.File]::WriteAllText($ledgerPath,
+        ('{"Sessions":[{"Id":"' + $ordinaryMigrationId + '","CacheHitTokens":50,"CacheMissTokens":10}]}'),
+        [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $script:CacheTokenBaselineCursor = $null
+    $protocolSnapshot = Get-CodexUsageSnapshot -DataDirectory $protocolRoot -ReadOnly
+    $ordinaryMigration = @($protocolSnapshot.State.SessionTokenSnapshots | Where-Object Id -eq $ordinaryMigrationId)
+    Assert-Boundary (@($protocolSnapshot.State.SessionTokenSnapshots).Count -eq 31 -and $ordinaryMigration.Count -eq 1 -and
+        $ordinaryMigration[0].CacheHitBaselineTokens -eq 0 -and $ordinaryMigration[0].CacheMissBaselineTokens -eq 0 -and
+        (Test-UsageScanSnapshot $protocolSnapshot)) `
+        'a found ordinary legacy session may use zero baseline without exceeding the thirty-plus-one protocol bound.'
+    Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'baseline migration boundary tests must restore an empty ledger.'
+    $script:CacheTokenLedger = $null
+
+    $filteredRoot = Join-Path $testRoot 'filtered-session-tokens'
+    $filteredSessions = Join-Path $filteredRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($filteredSessions)
+    [IO.File]::Copy(
+        (Join-Path $package 'fixtures\contract\v1\inputs\reset-jitter.jsonl'),
+        (Join-Path $filteredSessions 'contract.jsonl'))
+    $filteredSnapshot = Get-CodexUsageSnapshot -DataDirectory $filteredRoot -ReadOnly
+    $filteredTokens = @($filteredSnapshot.State.SessionTokenSnapshots)[0]
+    Assert-Boundary ($filteredTokens.CacheHitTokens -eq 80 -and $filteredTokens.CacheMissTokens -eq 120) `
+        ('per-session cache totals must use the same current Codex cycle as the global state; hit={0}, miss={1}.' -f
+            $filteredTokens.CacheHitTokens, $filteredTokens.CacheMissTokens)
 
     $outside = Join-Path $testRoot 'outside-sessions'
     [void][IO.Directory]::CreateDirectory($outside)

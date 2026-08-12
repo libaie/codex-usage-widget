@@ -441,6 +441,127 @@ function Read-SessionEvents {
     return $events.ToArray()
 }
 
+function Get-SessionCacheTokenBaseline {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateRange(1, 4194304)][int]$MaxBytes = 4194304
+    )
+
+    try {
+        $complete = $false
+        $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+        try {
+            $count = [int][math]::Min([long]$MaxBytes, $stream.Length)
+            $bytes = [byte[]]::new($count)
+            $offset = 0
+            while ($offset -lt $count) {
+                $read = $stream.Read($bytes, $offset, $count - $offset)
+                if ($read -le 0) { break }
+                $offset += $read
+            }
+            $complete = $stream.Length -le $offset
+            if (-not $complete) {
+                while ($offset -gt 0 -and $bytes[$offset - 1] -ne 10) { $offset-- }
+            }
+            if ($offset -eq 0) { return $null }
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $offset)
+        }
+        finally { $stream.Dispose() }
+
+        $forked = $null
+        $legacyBaseline = $null
+        foreach ($line in $text -split "`n") {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    try { $event = $line.TrimEnd("`r") | ConvertFrom-Json -ErrorAction Stop }
+                    catch { continue }
+                    $payload = $event.PSObject.Properties['payload']
+                    if ($null -eq $payload -or $payload.Value -isnot [pscustomobject]) { continue }
+                    $type = $payload.Value.PSObject.Properties['type']
+                    $eventType = $event.PSObject.Properties['type']
+                    if ($null -eq $forked -and $null -ne $eventType -and $eventType.Value -ceq 'session_meta') {
+                        $fork = $payload.Value.PSObject.Properties['forked_from_id']
+                        if ($null -eq $fork) {
+                            return [pscustomobject]@{ CacheHitTokens = 0L; CacheMissTokens = 0L }
+                        }
+                        $parsedFork = [guid]::Empty
+                        if ($fork.Value -isnot [string] -or -not [guid]::TryParse($fork.Value, [ref]$parsedFork)) { return $null }
+                        $forked = $true
+                        continue
+                    }
+                    if ($null -eq $type -or $type.Value -cne 'token_count') { continue }
+
+                    $limits = $payload.Value.PSObject.Properties['rate_limits']
+                    if ($null -eq $limits -or $limits.Value -isnot [pscustomobject]) { continue }
+                    $limitId = $limits.Value.PSObject.Properties['limit_id']
+                    $isLegacyLimit = $null -eq $limitId -or $null -eq $limitId.Value
+                    if (-not $isLegacyLimit -and ($limitId.Value -isnot [string] -or $limitId.Value -cne 'codex')) { continue }
+                    if ($null -eq $forked) {
+                        return [pscustomobject]@{ CacheHitTokens = 0L; CacheMissTokens = 0L }
+                    }
+
+                    $info = $payload.Value.PSObject.Properties['info']
+                    if ($null -eq $info -or $info.Value -isnot [pscustomobject]) { return $null }
+                    $total = $info.Value.PSObject.Properties['total_token_usage']
+                    $last = $info.Value.PSObject.Properties['last_token_usage']
+                    if ($null -eq $total -or $null -eq $last) { return $null }
+                    $totalInput = Get-TokenNumber $total.Value 'input_tokens'
+                    $totalCached = Get-TokenNumber $total.Value 'cached_input_tokens'
+                    $lastInput = Get-TokenNumber $last.Value 'input_tokens'
+                    $lastCached = Get-TokenNumber $last.Value 'cached_input_tokens'
+                    if ($null -eq $totalInput -or $null -eq $totalCached -or $null -eq $lastInput -or $null -eq $lastCached -or
+                        $totalCached -gt $totalInput -or $lastCached -gt $lastInput) { return $null }
+                    $hit = [decimal]$totalCached - [decimal]$lastCached
+                    $miss = ([decimal]$totalInput - [decimal]$totalCached) - ([decimal]$lastInput - [decimal]$lastCached)
+                    if ($hit -lt 0 -or $miss -lt 0 -or $hit -gt [long]::MaxValue -or $miss -gt [long]::MaxValue) { return $null }
+                    $candidate = [pscustomobject]@{ CacheHitTokens = [long]$hit; CacheMissTokens = [long]$miss }
+                    if (-not $isLegacyLimit) { return $candidate }
+                    if ($null -eq $legacyBaseline) { $legacyBaseline = $candidate }
+        }
+        return $(if ($complete) { $legacyBaseline } else { $null })
+    }
+    catch { }
+    return $null
+}
+
+function Get-CumulativeCacheBaselineMigrationIds {
+    $ids = @{}
+    try {
+        $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
+        $file = [IO.FileInfo]::new($path)
+        if (-not $file.Exists -or $file.Length -lt 1 -or $file.Length -gt 4194304) { return $ids }
+        $stored = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json -ErrorAction Stop
+        $sessions = $stored.PSObject.Properties['Sessions']
+        $version = $stored.PSObject.Properties['SchemaVersion']
+        if ($stored -isnot [pscustomobject] -or $null -eq $sessions -or
+            ($null -ne $version -and ([decimal]$version.Value -ne 2))) { return @{} }
+        $loaded = 0
+        foreach ($item in @($sessions.Value)) {
+            if ($loaded++ -ge 10000) { return @{} }
+            $id = $item.PSObject.Properties['Id']
+            $hit = $item.PSObject.Properties['CacheHitTokens']
+            $miss = $item.PSObject.Properties['CacheMissTokens']
+            if ($null -eq $id -or $id.Value -isnot [string] -or $id.Value -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
+                $null -eq (Get-TokenNumber $item 'CacheHitTokens') -or $null -eq (Get-TokenNumber $item 'CacheMissTokens')) { return @{} }
+            $baselineHit = $item.PSObject.Properties['CacheHitBaselineTokens']
+            $baselineMiss = $item.PSObject.Properties['CacheMissBaselineTokens']
+            if (($null -eq $baselineHit -and $null -ne $baselineMiss) -or ($null -ne $baselineHit -and $null -eq $baselineMiss)) { return @{} }
+            $hitValue = Get-TokenNumber $item 'CacheHitTokens'
+            $missValue = Get-TokenNumber $item 'CacheMissTokens'
+            $hasBaseline = $null -ne $baselineHit -and $null -ne $baselineMiss -and
+                $null -ne $baselineHit.Value -and $null -ne $baselineMiss.Value
+            $ids[$id.Value] = [pscustomobject]@{
+                CacheHitTokens = $hitValue
+                CacheMissTokens = $missValue
+                CacheHitBaselineTokens = if ($hasBaseline) { Get-TokenNumber $item 'CacheHitBaselineTokens' } else { $null }
+                CacheMissBaselineTokens = if ($hasBaseline) { Get-TokenNumber $item 'CacheMissBaselineTokens' } else { $null }
+                NeedsBaseline = -not $hasBaseline
+            }
+        }
+    }
+    catch { return @{} }
+    return $ids
+}
+
 function Get-NewestUsageState {
     param(
         [object[]]$Events,
@@ -592,6 +713,7 @@ function Get-BoundedSessionFiles {
         [ValidateRange(1, 1000)][int]$MaxFiles = 30,
         [ValidateRange(1, 100000)][int]$MaxEntries = 10000,
         [AllowNull()]$TaskNames,
+        [AllowNull()]$MigrationIds,
         [datetime]$NowUtc = [datetime]::UtcNow,
         [Parameter(Mandatory)][datetime]$DeadlineUtc
     )
@@ -599,6 +721,7 @@ function Get-BoundedSessionFiles {
     $result = [pscustomobject]@{
         Files = @()
         ActiveFiles = @()
+        MigrationFiles = @()
         EntriesVisited = 0
         RejectedPathCount = 0
         ReadFailureCount = 0
@@ -619,6 +742,7 @@ function Get-BoundedSessionFiles {
     $directories = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
     $files = [Collections.Generic.List[IO.FileInfo]]::new()
     $activeFiles = [Collections.Generic.List[IO.FileInfo]]::new()
+    $migrationFiles = [Collections.Generic.List[IO.FileInfo]]::new()
     $activityCutoff = $NowUtc.ToUniversalTime().AddMinutes(-30)
     $insertNewest = {
         param([Collections.Generic.List[IO.FileInfo]]$List, [IO.FileInfo]$File, [int]$Capacity)
@@ -661,6 +785,9 @@ function Get-BoundedSessionFiles {
                 }
                 elseif ($entry -is [IO.FileInfo] -and $entry.Extension.Equals('.jsonl', [StringComparison]::OrdinalIgnoreCase)) {
                     & $insertNewest $files ([IO.FileInfo]$entry) $MaxFiles
+                    if ($null -ne $MigrationIds -and $MigrationIds.ContainsKey($entry.BaseName)) {
+                        $migrationFiles.Add([IO.FileInfo]$entry)
+                    }
                     if ($null -ne $TaskNames -and $entry.LastWriteTimeUtc -ge $activityCutoff -and
                         $entry.BaseName -match '([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$') {
                         $taskId = ([guid]$Matches[1]).ToString()
@@ -673,6 +800,7 @@ function Get-BoundedSessionFiles {
     }
     $result.Files = $files.ToArray()
     $result.ActiveFiles = $activeFiles.ToArray()
+    $result.MigrationFiles = $migrationFiles.ToArray()
     return $result
 }
 
@@ -709,8 +837,13 @@ function Get-CodexUsageState {
     $taskIndexPath = [IO.Path]::Combine($DataDirectory, 'session_index.jsonl')
     $taskNames = Read-TaskNameIndex $taskIndexPath
     $scanNow = [datetime]::UtcNow
+    $migrationIds = Get-CumulativeCacheBaselineMigrationIds
+    $pendingMigrationIds = @{}
+    foreach ($id in @($migrationIds.Keys | Sort-Object)) {
+        if ($migrationIds[$id].NeedsBaseline) { $pendingMigrationIds[$id] = $migrationIds[$id] }
+    }
     $discovery = Get-BoundedSessionFiles -SessionsPath $sessionsPath -MaxFiles 30 -MaxEntries 10000 `
-        -TaskNames $taskNames -NowUtc $scanNow -DeadlineUtc $scanNow.AddSeconds(3)
+        -TaskNames $taskNames -MigrationIds $pendingMigrationIds -NowUtc $scanNow -DeadlineUtc $scanNow.AddSeconds(3)
     $script:CodexUsageMetrics.ReadFailureCount += $discovery.ReadFailureCount
     $script:CodexUsageMetrics.RejectedPathCount = $discovery.RejectedPathCount
     $script:CodexUsageMetrics.EnumerationTruncated = $discovery.Truncated
@@ -745,32 +878,87 @@ function Get-CodexUsageState {
         })
         $readPaths[$candidate.FullName] = $true
     }
-
+    $baselineCandidates = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($id in $pendingMigrationIds.Keys) { [void]$baselineCandidates.Add($id) }
+    foreach ($file in $files) {
+        if ($file.BaseName -notmatch '^rollout-' -or $file.BaseName -notmatch '^[A-Za-z0-9._-]{1,200}$') { continue }
+        $known = if ($migrationIds.ContainsKey($file.BaseName)) { $migrationIds[$file.BaseName] } else { $null }
+        if ($null -eq $known -or $known.NeedsBaseline) { [void]$baselineCandidates.Add($file.BaseName) }
+    }
+    $baselineId = $null
+    $orderedBaselineIds = @($baselineCandidates | Sort-Object)
+    if ($orderedBaselineIds.Count -gt 0) {
+        $baselineId = $orderedBaselineIds[0]
+        if ($script:CacheTokenBaselineCursor -is [string]) {
+            foreach ($id in $orderedBaselineIds) {
+                if ([string]::CompareOrdinal($id, $script:CacheTokenBaselineCursor) -gt 0) { $baselineId = $id; break }
+            }
+        }
+        # ponytail: the worker is persistent, so one in-memory cursor gives bounded fair scans without another state file.
+        $script:CacheTokenBaselineCursor = $baselineId
+    }
     $readFailed = $discovery.ReadFailureCount -gt 0
     $isNewestCandidate = $true
+    $snapshotIds = @{}
+    $baselineAttempted = $false
+    $baselineAttemptResult = $null
     foreach ($file in $filesToRead) {
         $fileReadFailed = $false
         $fileMetrics = $null
         $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 262144 -ReadFailed ([ref]$fileReadFailed) -Metrics ([ref]$fileMetrics))
         if ($fileReadFailed) { $readFailed = $true }
-        $fileState = Get-NewestUsageState -Events $fileEvents
+        $fileState = Get-NewestUsageState -Events $fileEvents -LimitId 'codex'
         if ($isNewestCandidate -and $null -eq $fileState) {
             # ponytail: one 1 MiB retry bounds fallback I/O; enlarge only if Codex records outgrow it.
             $fileEvents = @(Read-SessionEvents -Path $file.FullName -TailBytes 1048576 -ReadFailed ([ref]$fileReadFailed) -Metrics ([ref]$fileMetrics))
             if ($fileReadFailed) { $readFailed = $true }
-            $fileState = Get-NewestUsageState -Events $fileEvents
+            $fileState = Get-NewestUsageState -Events $fileEvents -LimitId 'codex'
         }
         foreach ($metricName in 'CandidateLineCount', 'UsageEventCount', 'MalformedLineCount', 'UnknownEventCount', 'ReadFailureCount', 'InvalidValueCount') {
             $script:CodexUsageMetrics.$metricName += [int]$fileMetrics.$metricName
         }
-        if ($usagePaths.ContainsKey($file.FullName)) {
-            if ($null -ne $fileState -and $null -ne $fileState.TokenDetails) {
-                $sessionTokenSnapshots.Add([pscustomobject]@{
-                    Id              = $file.BaseName
-                    CacheHitTokens  = $fileState.TokenDetails.CacheHitTokens
-                    CacheMissTokens = $fileState.TokenDetails.CacheMissTokens
-                })
+        $isUsageFile = $usagePaths.ContainsKey($file.FullName)
+        if ($isUsageFile) {
+            if ($null -ne $fileState -and $null -ne $fileState.TokenDetails -and
+                $file.BaseName -match '^[A-Za-z0-9._-]{1,200}$') {
+                $known = if ($migrationIds.ContainsKey($file.BaseName)) { $migrationIds[$file.BaseName] } else { $null }
+                $needsBaseline = ($null -eq $known -and $file.BaseName -match '^rollout-') -or
+                    ($null -ne $known -and $known.NeedsBaseline)
+                $mustReadBaseline = $needsBaseline -and $file.BaseName -ceq $baselineId
+                $baseline = if ($mustReadBaseline) { Get-SessionCacheTokenBaseline -Path $file.FullName }
+                elseif (-not $needsBaseline) {
+                    [pscustomobject]@{
+                        CacheHitTokens = if ($null -ne $known) { $known.CacheHitBaselineTokens } else { 0L }
+                        CacheMissTokens = if ($null -ne $known) { $known.CacheMissBaselineTokens } else { 0L }
+                    }
+                }
+                $rawHit = $fileState.TokenDetails.CacheHitTokens
+                $rawMiss = $fileState.TokenDetails.CacheMissTokens
+                if ($mustReadBaseline) {
+                    $baselineAttempted = $true
+                    $baselineAttemptResult = $baseline
+                }
+                if ($null -ne $rawHit -and $null -ne $rawMiss -and $null -ne $baseline -and
+                    $null -ne $baseline.CacheHitTokens -and $null -ne $baseline.CacheMissTokens) {
+                    if ($null -ne $known) {
+                        $rawHit = [math]::Max([long]$rawHit, [long]$known.CacheHitTokens)
+                        $rawMiss = [math]::Max([long]$rawMiss, [long]$known.CacheMissTokens)
+                    }
+                    if ([decimal]$baseline.CacheHitTokens -le [decimal]$rawHit -and
+                        [decimal]$baseline.CacheMissTokens -le [decimal]$rawMiss) {
+                        $sessionTokenSnapshots.Add([pscustomobject]@{
+                            Id              = $file.BaseName
+                            CacheHitTokens  = $rawHit
+                            CacheMissTokens = $rawMiss
+                            CacheHitBaselineTokens = $baseline.CacheHitTokens
+                            CacheMissBaselineTokens = $baseline.CacheMissTokens
+                        })
+                        $snapshotIds[$file.BaseName] = $true
+                    }
+                }
             }
+        }
+        if ($isUsageFile) {
             foreach ($event in $fileEvents) { $events.Add($event) }
         }
         if ($activeByPath.ContainsKey($file.FullName)) {
@@ -783,6 +971,26 @@ function Get-CodexUsageState {
             })
         }
         $isNewestCandidate = $false
+    }
+    $migrationFiles = @{}
+    foreach ($migrationFile in @($discovery.MigrationFiles)) { $migrationFiles[$migrationFile.BaseName] = $migrationFile.FullName }
+    if ($null -ne $baselineId -and $pendingMigrationIds.ContainsKey($baselineId) -and
+        -not $snapshotIds.ContainsKey($baselineId)) {
+        $legacy = $pendingMigrationIds[$baselineId]
+        $baseline = if ($baselineAttempted -and $baselineId -ceq $script:CacheTokenBaselineCursor) { $baselineAttemptResult }
+        elseif ($migrationFiles.ContainsKey($baselineId)) {
+            Get-SessionCacheTokenBaseline -Path $migrationFiles[$baselineId]
+        }
+        if ($null -ne $baseline -and [decimal]$baseline.CacheHitTokens -le [decimal]$legacy.CacheHitTokens -and
+            [decimal]$baseline.CacheMissTokens -le [decimal]$legacy.CacheMissTokens) {
+            $sessionTokenSnapshots.Add([pscustomobject]@{
+                Id = $baselineId
+                CacheHitTokens = [long]$legacy.CacheHitTokens
+                CacheMissTokens = [long]$legacy.CacheMissTokens
+                CacheHitBaselineTokens = $baseline.CacheHitTokens
+                CacheMissBaselineTokens = $baseline.CacheMissTokens
+            })
+        }
     }
     $state = Get-NewestUsageState -Events $events.ToArray() -LimitId 'codex'
     if ($null -ne $state) {
@@ -970,16 +1178,23 @@ function Test-UsageScanSnapshot {
         if ($windows.Count -eq 2 -and ($windows[0].Name -cne 'primary' -or $windows[1].Name -cne 'secondary')) { return $false }
 
         $sessions = @($Snapshot.State.SessionTokenSnapshots)
-        if ($sessions.Count -gt 30) { return $false }
+        if ($sessions.Count -gt 31) { return $false }
         $previousId = $null
         $sessionIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($session in $sessions) {
-            if (-not (& $hasExactProperties $session 'CacheHitTokens,CacheMissTokens,Id') -or
+            if (-not (& $hasExactProperties $session 'CacheHitBaselineTokens,CacheHitTokens,CacheMissBaselineTokens,CacheMissTokens,Id') -or
                 $session.Id -isnot [string] -or $session.Id -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
                 -not $sessionIds.Add($session.Id) -or
                 ($null -ne $previousId -and [string]::CompareOrdinal($previousId, $session.Id) -ge 0) -or
                 -not (& $isCounter $session.CacheHitTokens -Nullable) -or
-                -not (& $isCounter $session.CacheMissTokens -Nullable)) { return $false }
+                -not (& $isCounter $session.CacheMissTokens -Nullable) -or
+                -not (& $isCounter $session.CacheHitBaselineTokens -Nullable) -or
+                -not (& $isCounter $session.CacheMissBaselineTokens -Nullable) -or
+                (($null -eq $session.CacheHitBaselineTokens) -ne ($null -eq $session.CacheMissBaselineTokens)) -or
+                ($null -ne $session.CacheHitBaselineTokens -and
+                    ($null -eq $session.CacheHitTokens -or $null -eq $session.CacheMissTokens -or
+                        [decimal]$session.CacheHitBaselineTokens -gt [decimal]$session.CacheHitTokens -or
+                        [decimal]$session.CacheMissBaselineTokens -gt [decimal]$session.CacheMissTokens))) { return $false }
             $previousId = $session.Id
         }
 
@@ -1347,7 +1562,8 @@ function Get-UsageWorkerScriptText {
     $functionNames = @(
         'Get-TokenNumber', 'Get-TokenPercent', 'ConvertTo-LimitWindow', 'ConvertTo-UsageState',
         'Get-EventTokenDetails', 'ConvertTo-ObservedAt', 'Get-EventRateLimits', 'Read-TaskNameIndex',
-        'Get-ActiveTaskCandidates', 'Read-SessionEvents', 'Get-NewestUsageState',
+        'Get-ActiveTaskCandidates', 'Read-SessionEvents', 'Get-SessionCacheTokenBaseline',
+        'Get-CumulativeCacheBaselineMigrationIds', 'Get-NewestUsageState',
         'ConvertTo-CodexDataDirectoryPath', 'Resolve-CodexDataDirectory', 'Get-BoundedSessionFiles',
         'Get-CodexUsageState', 'Get-CodexUsageDiagnostic', 'Get-CodexUsageSnapshot',
         'Test-UsageScanSnapshot', 'Get-UsageJsonWorstCaseByteCount', 'Save-TextAtomically',
@@ -1832,6 +2048,8 @@ function Update-CumulativeCacheTokens {
             if ([System.IO.File]::Exists($path)) {
                 $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
                 if ($stored -isnot [pscustomobject]) { throw 'Cache ledger root must be an object.' }
+                $versionProperty = $stored.PSObject.Properties['SchemaVersion']
+                if ($null -ne $versionProperty -and ([decimal]$versionProperty.Value -ne 2)) { throw 'Unsupported cache ledger schema.' }
                 $storedSessions = $stored.PSObject.Properties['Sessions']
                 if ($null -eq $storedSessions) { throw 'Missing sessions.' }
                 $loaded = 0
@@ -1846,9 +2064,20 @@ function Update-CumulativeCacheTokens {
                     $hit = & $toCounter $hitProperty.Value
                     $miss = & $toCounter $missProperty.Value
                     if ($null -eq $hit -or $null -eq $miss) { throw 'Invalid stored counters.' }
+                    $baselineHitProperty = $item.PSObject.Properties['CacheHitBaselineTokens']
+                    $baselineMissProperty = $item.PSObject.Properties['CacheMissBaselineTokens']
+                    $hasBaselineHit = $null -ne $baselineHitProperty -and $null -ne $baselineHitProperty.Value
+                    $hasBaselineMiss = $null -ne $baselineMissProperty -and $null -ne $baselineMissProperty.Value
+                    if ($hasBaselineHit -ne $hasBaselineMiss) { throw 'Invalid stored baseline.' }
+                    $baselineHit = if ($hasBaselineHit) { & $toCounter $baselineHitProperty.Value } else { $null }
+                    $baselineMiss = if ($hasBaselineMiss) { & $toCounter $baselineMissProperty.Value } else { $null }
+                    if (($null -eq $baselineHit) -ne ($null -eq $baselineMiss) -or
+                        ($null -ne $baselineHit -and ($baselineHit -gt $hit -or $baselineMiss -gt $miss))) { throw 'Invalid stored baseline.' }
                     $knownSessions[$idProperty.Value] = [pscustomobject]@{
                         CacheHitTokens  = $hit
                         CacheMissTokens = $miss
+                        CacheHitBaselineTokens = $baselineHit
+                        CacheMissBaselineTokens = $baselineMiss
                     }
                 }
                 $storeStatus = 'valid'
@@ -1865,6 +2094,8 @@ function Update-CumulativeCacheTokens {
         $candidateSessions[$id] = [pscustomobject]@{
             CacheHitTokens = [long]$tokens.CacheHitTokens
             CacheMissTokens = [long]$tokens.CacheMissTokens
+            CacheHitBaselineTokens = $tokens.CacheHitBaselineTokens
+            CacheMissBaselineTokens = $tokens.CacheMissBaselineTokens
         }
     }
     $dirty = $false
@@ -1873,20 +2104,33 @@ function Update-CumulativeCacheTokens {
         $idProperty = $session.PSObject.Properties['Id']
         $hitProperty = $session.PSObject.Properties['CacheHitTokens']
         $missProperty = $session.PSObject.Properties['CacheMissTokens']
+        $baselineHitProperty = $session.PSObject.Properties['CacheHitBaselineTokens']
+        $baselineMissProperty = $session.PSObject.Properties['CacheMissBaselineTokens']
         if ($null -eq $idProperty -or $idProperty.Value -isnot [string] -or
             $idProperty.Value -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
             $null -eq $hitProperty -or $null -eq $missProperty) { continue }
         $hit = & $toCounter $hitProperty.Value
         $miss = & $toCounter $missProperty.Value
         if ($null -eq $hit -or $null -eq $miss) { continue }
+        $baselineHit = if ($null -ne $baselineHitProperty -and $null -ne $baselineHitProperty.Value) { & $toCounter $baselineHitProperty.Value } else { $null }
+        $baselineMiss = if ($null -ne $baselineMissProperty -and $null -ne $baselineMissProperty.Value) { & $toCounter $baselineMissProperty.Value } else { $null }
+        if (($null -eq $baselineHit) -ne ($null -eq $baselineMiss) -or
+            ($null -ne $baselineHit -and ($baselineHit -gt $hit -or $baselineMiss -gt $miss))) { continue }
 
         $previous = $candidateSessions[$idProperty.Value]
         $nextHit = if ($null -eq $previous -or $hit -gt $previous.CacheHitTokens) { $hit } else { [long]$previous.CacheHitTokens }
         $nextMiss = if ($null -eq $previous -or $miss -gt $previous.CacheMissTokens) { $miss } else { [long]$previous.CacheMissTokens }
-        if ($null -eq $previous -or $nextHit -ne $previous.CacheHitTokens -or $nextMiss -ne $previous.CacheMissTokens) {
+        $nextBaselineHit = if ($null -ne $previous -and $null -ne $previous.CacheHitBaselineTokens) { $previous.CacheHitBaselineTokens } else { $baselineHit }
+        $nextBaselineMiss = if ($null -ne $previous -and $null -ne $previous.CacheMissBaselineTokens) { $previous.CacheMissBaselineTokens } else { $baselineMiss }
+        if ($null -ne $previous -and $null -ne $previous.CacheHitBaselineTokens -and $null -ne $baselineHit -and
+            ($baselineHit -ne $previous.CacheHitBaselineTokens -or $baselineMiss -ne $previous.CacheMissBaselineTokens)) { continue }
+        if ($null -eq $previous -or $nextHit -ne $previous.CacheHitTokens -or $nextMiss -ne $previous.CacheMissTokens -or
+            $nextBaselineHit -ne $previous.CacheHitBaselineTokens -or $nextBaselineMiss -ne $previous.CacheMissBaselineTokens) {
             $candidateSessions[$idProperty.Value] = [pscustomobject]@{
                 CacheHitTokens  = $nextHit
                 CacheMissTokens = $nextMiss
+                CacheHitBaselineTokens = $nextBaselineHit
+                CacheMissBaselineTokens = $nextBaselineMiss
             }
             $dirty = $true
         }
@@ -1902,10 +2146,12 @@ function Update-CumulativeCacheTokens {
                         Id              = $id
                         CacheHitTokens  = [long]$tokens.CacheHitTokens
                         CacheMissTokens = [long]$tokens.CacheMissTokens
+                        CacheHitBaselineTokens = $tokens.CacheHitBaselineTokens
+                        CacheMissBaselineTokens = $tokens.CacheMissBaselineTokens
                     }
                 }
             )
-            $json = [pscustomobject]@{ Sessions = $storedSessions } | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop
+            $json = [pscustomobject]@{ SchemaVersion = 2; Sessions = $storedSessions } | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop
             $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
             if (-not (Save-TextAtomically -Path $path -Text $json)) { return $null }
         }
@@ -1920,8 +2166,8 @@ function Update-CumulativeCacheTokens {
     $cacheHitTokens = [decimal]0
     $cacheMissTokens = [decimal]0
     foreach ($tokens in $script:CacheTokenLedger.Sessions.Values) {
-        $cacheHitTokens += [decimal]$tokens.CacheHitTokens
-        $cacheMissTokens += [decimal]$tokens.CacheMissTokens
+        $cacheHitTokens += [decimal]$tokens.CacheHitTokens - [decimal]$(if ($null -ne $tokens.CacheHitBaselineTokens) { $tokens.CacheHitBaselineTokens } else { 0 })
+        $cacheMissTokens += [decimal]$tokens.CacheMissTokens - [decimal]$(if ($null -ne $tokens.CacheMissBaselineTokens) { $tokens.CacheMissBaselineTokens } else { 0 })
     }
     if ($cacheHitTokens -gt [long]::MaxValue -or $cacheMissTokens -gt [long]::MaxValue) { return $null }
     $cacheHitTokens = [long]$cacheHitTokens
@@ -4672,9 +4918,14 @@ if ($SelfTest) {
             payload = [pscustomobject]@{ info = $otherInfo; rate_limits = ($valid | ConvertFrom-Json) }
         }
         [System.IO.File]::WriteAllText($otherFile, ($otherEvent | ConvertTo-Json -Depth 10 -Compress))
-        $aggregate = Get-CodexUsageState
+        [System.IO.File]::SetLastWriteTimeUtc($otherFile, [datetime]::UtcNow.AddMinutes(1))
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            $aggregate = Get-CodexUsageState
+            if ($aggregate.TokenDetails.CacheHitTokens -eq 19917800 -and $aggregate.TokenDetails.CacheMissTokens -eq 709400) { break }
+        }
         Assert-Widget ($aggregate.TokenDetails.CacheHitTokens -eq 19917800 -and
-            $aggregate.TokenDetails.CacheMissTokens -eq 709400) 'different session snapshots should be added instead of replacing each other.'
+            $aggregate.TokenDetails.CacheMissTokens -eq 709400) ('different session snapshots should be added instead of replacing each other; hit={0}, miss={1}.' -f
+                $aggregate.TokenDetails.CacheHitTokens, $aggregate.TokenDetails.CacheMissTokens)
         $otherInfo.total_token_usage.input_tokens = 990
         $otherInfo.total_token_usage.cached_input_tokens = 900
         $otherEvent.timestamp = [DateTimeOffset]::UtcNow.AddSeconds(2).ToString('o')
