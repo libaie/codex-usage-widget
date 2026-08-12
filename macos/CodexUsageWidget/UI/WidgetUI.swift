@@ -410,23 +410,37 @@ final class WidgetModel: ObservableObject {
     private var scanGeneration = 0
     private var refreshTimer: Timer?
     private var taskHideWorkItem: DispatchWorkItem?
+    private let stateDirectory: URL
+    private let resolveDataDirectory: (String?) -> URL?
+    private let scanDataDirectory: (URL, URL) throws -> UsageScanResult
     private(set) var dataDirectory: URL?
     var remindersEnabled = false
     var onReminder: ((UsageLimitSnapshot, Int) -> Void)?
 
-    private var preferenceURL: URL { ApplicationPaths.supportDirectory.appendingPathComponent("preferences.json") }
-    private var cacheURL: URL { ApplicationPaths.supportDirectory.appendingPathComponent("cache-token-ledger.json") }
-    private var reminderURL: URL { ApplicationPaths.supportDirectory.appendingPathComponent("reminders.json") }
+    private var preferenceURL: URL { stateDirectory.appendingPathComponent("preferences.json") }
+    private var cacheURL: URL { stateDirectory.appendingPathComponent("cache-token-ledger.json") }
+    private var reminderURL: URL { stateDirectory.appendingPathComponent("reminders.json") }
 
-    init(demo: Bool, bundle: Bundle = .main) throws {
+    init(
+        demo: Bool,
+        bundle: Bundle = .main,
+        stateDirectory: URL = ApplicationPaths.supportDirectory,
+        resolveDataDirectory: @escaping (String?) -> URL? = { DataDirectoryResolver.resolve(savedPath: $0) },
+        scanDataDirectory: @escaping (URL, URL) throws -> UsageScanResult = {
+            try ScanSupervisor.scan(executableURL: $0, dataDirectory: $1)
+        }
+    ) throws {
         guard let resources = bundle.resourceURL else { throw WidgetUIError.invalidResource }
         localization = try WidgetLocalization.load(directory: resources.appendingPathComponent("locales", isDirectory: true))
         catalog = try WidgetThemeCatalog.load(from: resources.appendingPathComponent("theme-catalog.json"))
         self.demo = demo
+        self.stateDirectory = stateDirectory
+        self.resolveDataDirectory = resolveDataDirectory
+        self.scanDataDirectory = scanDataDirectory
 
         let loadedPreferences = demo
             ? LoadedState(condition: .missing, value: WidgetPreferences.defaultValue)
-            : LocalStateStore.load(WidgetPreferences.self, from: ApplicationPaths.supportDirectory.appendingPathComponent("preferences.json"), defaultValue: .defaultValue)
+            : LocalStateStore.load(WidgetPreferences.self, from: stateDirectory.appendingPathComponent("preferences.json"), defaultValue: .defaultValue)
         var initialPreferences = loadedPreferences.value
         if loadedPreferences.condition != .valid {
             initialPreferences.language = localization.resolve(preferred: Locale.preferredLanguages)
@@ -439,18 +453,18 @@ final class WidgetModel: ObservableObject {
 
         let loadedCache = demo
             ? LoadedState(condition: .missing, value: CacheLedger.defaultValue)
-            : LocalStateStore.load(CacheLedger.self, from: ApplicationPaths.supportDirectory.appendingPathComponent("cache-token-ledger.json"), defaultValue: .defaultValue)
+            : LocalStateStore.load(CacheLedger.self, from: stateDirectory.appendingPathComponent("cache-token-ledger.json"), defaultValue: .defaultValue)
         cacheLedger = loadedCache.value
         cacheCondition = loadedCache.condition
         cacheTotals = loadedCache.value.totals()
 
         let loadedReminders = demo
             ? LoadedState(condition: .missing, value: ReminderLedger.defaultValue)
-            : LocalStateStore.load(ReminderLedger.self, from: ApplicationPaths.supportDirectory.appendingPathComponent("reminders.json"), defaultValue: .defaultValue)
+            : LocalStateStore.load(ReminderLedger.self, from: stateDirectory.appendingPathComponent("reminders.json"), defaultValue: .defaultValue)
         reminderLedger = loadedReminders.value
         reminderCondition = loadedReminders.condition
 
-        dataDirectory = demo ? nil : DataDirectoryResolver.resolve(savedPath: initialPreferences.codexDataDirectory)
+        dataDirectory = demo ? nil : resolveDataDirectory(initialPreferences.codexDataDirectory)
         if demo {
             let demoResult = try WidgetDemo.load(fixtureURL: resources.appendingPathComponent("demo.jsonl"), now: now)
             result = demoResult
@@ -502,9 +516,7 @@ final class WidgetModel: ObservableObject {
             return
         }
         now = Date()
-        if dataDirectory == nil {
-            dataDirectory = DataDirectoryResolver.resolve(savedPath: preferences.codexDataDirectory)
-        }
+        dataDirectory = resolveDataDirectory(preferences.codexDataDirectory)
         guard let directory = dataDirectory, let executable = Bundle.main.executableURL else {
             diagnosticKey = "diagnostic.missingDirectory"
             return
@@ -512,8 +524,9 @@ final class WidgetModel: ObservableObject {
         scanInFlight = true
         scanGeneration += 1
         let generation = scanGeneration
+        let scanDataDirectory = scanDataDirectory
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let scanned = Result { try ScanSupervisor.scan(executableURL: executable, dataDirectory: directory) }
+            let scanned = Result { try scanDataDirectory(executable, directory) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.scanInFlight = false

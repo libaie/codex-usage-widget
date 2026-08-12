@@ -109,6 +109,46 @@ final class UIContractTests: XCTestCase {
         XCTAssertEqual(decoded.selectedLimit, result.selectedLimit)
     }
 
+    func testRefreshResolvesTheDataDirectoryAgainAfterRuntimeMigration() throws {
+        let temporary = FileManager.default.temporaryDirectory
+        let stateDirectory = temporary.appendingPathComponent("CodexUsageWidget-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let oldDirectory = temporary.appendingPathComponent("CodexUsageWidget-old-\(UUID().uuidString)")
+        let migratedDirectory = temporary.appendingPathComponent("CodexUsageWidget-migrated-\(UUID().uuidString)")
+        var resolvedDirectories = [oldDirectory, migratedDirectory]
+        var savedPaths: [String?] = []
+        let scanResult = try WidgetDemo.load(
+            fixtureURL: repositoryRoot.appendingPathComponent("fixtures/contract/v1/inputs/demo.jsonl"),
+            now: fixedNow
+        )
+        let scanFinished = expectation(description: "scan uses migrated directory")
+        let model = try WidgetModel(
+            demo: false,
+            stateDirectory: stateDirectory,
+            resolveDataDirectory: { savedPath in
+                savedPaths.append(savedPath)
+                return resolvedDirectories.removeFirst()
+            },
+            scanDataDirectory: { _, directory in
+                XCTAssertEqual(directory, migratedDirectory)
+                scanFinished.fulfill()
+                return scanResult
+            }
+        )
+
+        XCTAssertEqual(model.dataDirectory, oldDirectory)
+        model.refresh()
+
+        wait(for: [scanFinished], timeout: 2)
+        let deadline = Date().addingTimeInterval(2)
+        while model.result == nil && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertEqual(model.dataDirectory, migratedDirectory)
+        XCTAssertEqual(savedPaths, [String?](repeating: nil, count: 2))
+        XCTAssertEqual(model.result?.state.remainingPercent, scanResult.state.remainingPercent)
+    }
+
     func testHoverPinDragAndEscapeShareOneInteractionStateMachine() {
         var interaction = WidgetInteractionState()
         interaction.pointerEnteredRing(at: 0)
