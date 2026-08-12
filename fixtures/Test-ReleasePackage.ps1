@@ -11,7 +11,6 @@ $tempPathPattern = '(?i)AppData[\\/]+Local[\\/]+Temp'
 $commonRuntimePaths = @(
     'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs',
     'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md', 'DESIGN.md',
-    'docs\releasing.md', 'docs\releases\v1.1.0.md',
     'locales\en-US.json', 'locales\zh-CN.json', 'locales\zh-TW.json',
     'locales\ja-JP.json', 'locales\ko-KR.json',
     'assets\screenshots\widget-ring.png', 'assets\screenshots\widget-details.png',
@@ -61,7 +60,7 @@ if (-not [IO.Directory]::Exists($package)) { Fail-ReleasePackage 'package root i
 $requiredPaths = @($commonRuntimePaths)
 if (-not $RuntimeArchive) {
     $requiredPaths += @(
-        'SECURITY.md', 'docs\qa-v1.1.0.md',
+        'SECURITY.md',
         'assets\social-preview.png', 'fixtures\Test-Contract.ps1', 'fixtures\Test-WindowsDataBoundary.ps1',
         'fixtures\Test-WorkerStability.ps1', 'fixtures\Test-Bootstrap.ps1',
         'fixtures\contract\v1\schema.md', 'fixtures\contract\v1\expected-state.json',
@@ -107,6 +106,10 @@ else {
     $trackedPaths = @($trackedPaths | ForEach-Object { $_ -replace '/', '\' })
 }
 
+if (-not $RuntimeArchive -and @($trackedPaths | Where-Object { $_ -cmatch '^docs\\' }).Count -gt 0) {
+    Fail-ReleasePackage 'the docs directory must not be tracked in the public repository'
+}
+
 $missingPaths = @($requiredPaths | Where-Object {
     ($RuntimeArchive -and $scanPaths -cnotcontains $_) -or
     (-not $RuntimeArchive -and $trackedPaths -cnotcontains $_) -or
@@ -140,8 +143,9 @@ $commonReadmeRequirements = @(
     'assets/screenshots/widget-ring.png', 'assets/screenshots/widget-details.png',
     'assets/screenshots/widget-ring-macos.png', 'assets/screenshots/widget-details-macos.png',
     'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-windows.zip',
-    'CodexUsageWidget-v1.1.0-macos.dmg', 'CONTRIBUTING.md', 'DESIGN.md', 'docs/releasing.md',
-    'docs/releases/v1.1.0.md', '-Demo', '--demo', 'Developer ID'
+    'CodexUsageWidget-v1.1.0-macos-unsigned.zip', 'CodexUsageWidget-v1.1.0-macos.dmg',
+    'CONTRIBUTING.md', 'DESIGN.md', 'CHANGELOG.md', 'actions/workflows/ci.yml',
+    '-Demo', '--demo', 'Developer ID'
 )
 $zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
 $zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +
@@ -204,11 +208,8 @@ if (-not $RuntimeArchive) {
     $documentationRequirements = @{
         'CONTRIBUTING.md' = @('Test-Contract.ps1', 'Build-Windows.ps1', 'xcodebuild', '-Demo', '--demo', 'CODE_SIGNING_ALLOWED=NO')
         'DESIGN.md' = @('local-session-observation', '-ScanWorker', '--scan-worker', 'cache-token-ledger.json')
-        'docs\releasing.md' = @('Developer ID Application', 'notar', 'Gatekeeper', 'manifest', 'CodexUsageWidget-v1.1.0-macos.dmg')
-        'docs\releases\v1.1.0.md' = @('Windows', 'macOS', 'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-macos.dmg', 'Developer ID')
-        'docs\qa-v1.1.0.md' = @('32/32', 'P9 E2E', 'Test-WorkerStability.ps1', '-Demo', '--demo')
         'CHANGELOG.md' = @('## 1.1.0', 'macOS', '-Demo', '--demo')
-        '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest', 'Test-Bootstrap.ps1')
+        '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'readmeSha256', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest', 'Test-Bootstrap.ps1')
     }
     foreach ($documentationPath in $documentationRequirements.Keys) {
         $documentationContent = [IO.File]::ReadAllText((Join-Path $package $documentationPath))

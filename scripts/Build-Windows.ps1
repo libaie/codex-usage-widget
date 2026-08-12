@@ -25,7 +25,6 @@ if ($version -cne '1.1.0') { throw 'VERSION must be 1.1.0.' }
 $runtimePaths = @(
     'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs', 'VERSION',
     'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md', 'DESIGN.md',
-    'docs\releasing.md', 'docs\releases\v1.1.0.md',
     'locales\en-US.json', 'locales\zh-CN.json', 'locales\zh-TW.json',
     'locales\ja-JP.json', 'locales\ko-KR.json',
     'assets\screenshots\widget-ring.png', 'assets\screenshots\widget-details.png',

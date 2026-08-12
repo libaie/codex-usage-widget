@@ -238,15 +238,15 @@ jobs:
               sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
             }
           })
-          $qaPlan = Join-Path $PWD 'docs/qa-v1.1.0.md'
-          Copy-Item -LiteralPath $qaPlan -Destination (Join-Path $candidate 'qa-plan.md')
+          $readme = Join-Path $PWD 'README.md'
+          Copy-Item -LiteralPath $readme -Destination (Join-Path $candidate 'README.md')
           $manifest = [ordered]@{
             schemaVersion = 1
             stage = 'unsigned-candidate'
             version = '1.1.0'
             commitSha = $env:CANDIDATE_SHA
             workflowRunId = [long]$env:GITHUB_RUN_ID
-            qaPlanSha256 = (Get-FileHash -LiteralPath $qaPlan -Algorithm SHA256).Hash.ToLowerInvariant()
+            readmeSha256 = (Get-FileHash -LiteralPath $readme -Algorithm SHA256).Hash.ToLowerInvariant()
             assets = $assets
           }
           $manifestPath = Join-Path $candidate 'candidate-manifest.json'

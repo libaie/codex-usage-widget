@@ -39,7 +39,7 @@ Both `-Demo` and `--demo` use `fixtures/contract/v1/inputs/demo.jsonl`. Demo mod
 | Shared behavior contract | `fixtures/contract/v1/` |
 | Five locale packs | `locales/` |
 | Cross-platform CI | `.github/workflows/ci.yml` |
-| Architecture and release rules | `DESIGN.md`, `docs/releasing.md` |
+| Architecture and release rules | `DESIGN.md`, `README.md` |
 
 The contract is the cross-platform source of truth. When changing parsing or selection behavior, add or update the smallest fixture and make both implementations produce the same normalized state.
 
@@ -92,4 +92,4 @@ Every locale must contain the same keys and format placeholders as `locales/en-U
 
 Screenshots and fixtures must use fictional demo data. Never include real task names, session records, account information, credentials, preferences, cache ledgers, reminders, or local paths. Bug reports should include the platform, app version, exact steps, expected and actual behavior, and sanitized logs only.
 
-Before submitting, check `git diff --check` and confirm the relevant commands above pass. Public signing and notarization are handled only by the protected release process in `docs/releasing.md`.
+Before submitting, check `git diff --check` and confirm the relevant commands above pass. Public signing and notarization remain maintainer-only steps; unsigned CI candidates must not be presented as a public release.
