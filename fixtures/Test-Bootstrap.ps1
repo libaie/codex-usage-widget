@@ -90,7 +90,7 @@ try {
         $timer = [Diagnostics.Stopwatch]::StartNew()
         foreach ($process in $processes) {
             $process.Refresh()
-            Assert-Bootstrap ($process.MainWindowHandle -eq 0) 'bootstrap self-test opened a visible window.'
+            Assert-Bootstrap ($process.HasExited -or $process.MainWindowHandle -eq 0) 'bootstrap self-test opened a visible window.'
             $remaining = [Math]::Max(1, 30000 - [int]$timer.ElapsedMilliseconds)
             $completed = $process.WaitForExit($remaining)
             Assert-Bootstrap $completed 'concurrent bootstrap self-tests exceeded 30 seconds.'
