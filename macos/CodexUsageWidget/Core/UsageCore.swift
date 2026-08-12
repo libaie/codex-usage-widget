@@ -175,6 +175,16 @@ private struct ParsedWindow {
     let resetAt: Int64
     let windowMinutes: Int64?
     var observedAt: Int64
+
+    func sharesResetCycle(with other: ParsedWindow) -> Bool {
+        guard windowMinutes == other.windowMinutes else { return false }
+        if resetAt == other.resetAt { return true }
+        guard let minutes = windowMinutes, minutes > 0 else { return false }
+        // ponytail: Cap clock-drift tolerance at 1% of a window so adjacent short cycles stay separate.
+        let tolerance = minutes >= 100 ? Int64(60_000) : minutes * 600
+        let difference = resetAt > other.resetAt ? resetAt - other.resetAt : other.resetAt - resetAt
+        return difference <= tolerance
+    }
 }
 
 private struct ParsedTokenDetails {
@@ -251,26 +261,20 @@ enum UsageContract {
                 return (rawLimitID == nil || rawLimitID is NSNull) && !candidate.windows.isEmpty
             }
         }
-        for candidate in selectedCandidates {
-            for parsed in candidate.windows {
-                let name = parsed.name
-                if let previous = windows[name] {
-                    if parsed.resetAt == previous.resetAt {
-                        var retained = parsed.used > previous.used ? parsed : previous
-                        retained.observedAt = max(parsed.observedAt, previous.observedAt)
-                        windows[name] = retained
-                    } else if parsed.resetAt > previous.resetAt {
-                        windows[name] = parsed
-                    }
-                } else {
-                    windows[name] = parsed
-                }
-            }
+        for name in ["primary", "secondary"] {
+            let observations = selectedCandidates.flatMap { $0.windows }.filter { $0.name == name }
+            guard let cycle = observations.max(by: { $0.resetAt < $1.resetAt }) else { continue }
+            let current = observations.filter { $0.sharesResetCycle(with: cycle) }
+            guard var winner = current.max(by: {
+                $0.used == $1.used ? $0.observedAt < $1.observedAt : $0.used < $1.used
+            }) else { continue }
+            winner.observedAt = current.map(\.observedAt).max()!
+            windows[name] = winner
         }
 
         var currentCandidateIndices = Set<Int>()
         for (index, candidate) in selectedCandidates.enumerated() where candidate.windows.contains(where: {
-            windows[$0.name]?.resetAt == $0.resetAt
+            windows[$0.name]?.sharesResetCycle(with: $0) == true
         }) {
             currentCandidateIndices.insert(index)
         }
@@ -598,7 +602,7 @@ struct ReminderLedger: Codable, StateValidating {
         }
     }
 
-    mutating func register(window: String, resetAt: Int64, remainingPercent: Decimal, threshold: Int, now: Int64) -> Bool {
+    mutating func register(window: String, resetAt: Int64, windowMinutes: Int64?, remainingPercent: Decimal, threshold: Int, now: Int64) -> Bool {
         guard
             (window == "primary" || window == "secondary"),
             threshold == 10 || threshold == 20,
@@ -608,7 +612,8 @@ struct ReminderLedger: Codable, StateValidating {
         else { return false }
         notifiedResetAt = notifiedResetAt.filter { $0.value > now }
         let key = "\(window)|\(threshold)"
-        guard notifiedResetAt[key] != resetAt else { return false }
+        let tolerance = windowMinutes.map { $0 >= 100 ? Int64(60_000) : max($0, 0) * 600 } ?? 0
+        if let previous = notifiedResetAt[key], abs(Decimal(previous) - Decimal(resetAt)) <= Decimal(tolerance) { return false }
         notifiedResetAt[key] = resetAt
         return true
     }

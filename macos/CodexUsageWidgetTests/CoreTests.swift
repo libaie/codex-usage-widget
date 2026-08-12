@@ -57,7 +57,7 @@ final class CoreTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         let cases = document["cases"] as! [[String: Any]]
-        XCTAssertEqual(cases.count, 15)
+        XCTAssertEqual(cases.count, 16)
         for fixture in cases {
             let identifier = fixture["id"] as! String
             let now = formatter.date(from: fixture["nowUtc"] as! String)!
@@ -192,12 +192,13 @@ final class CoreTests: XCTestCase {
         var ledger = ReminderLedger.defaultValue
         let now: Int64 = 1_786_406_400_000
         let reset = now + 3_600_000
-        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset, remainingPercent: 21, threshold: 20, now: now))
-        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset, remainingPercent: 20, threshold: 20, now: now))
-        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset, remainingPercent: 19, threshold: 20, now: now))
-        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset, remainingPercent: 10, threshold: 10, now: now))
-        XCTAssertFalse(ledger.register(window: "primary", resetAt: now, remainingPercent: 10, threshold: 10, now: now))
-        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset + 1, remainingPercent: 20, threshold: 20, now: now))
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset, windowMinutes: 10_080, remainingPercent: 21, threshold: 20, now: now))
+        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset, windowMinutes: 10_080, remainingPercent: 20, threshold: 20, now: now))
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset, windowMinutes: 10_080, remainingPercent: 19, threshold: 20, now: now))
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: reset - 3_000, windowMinutes: 10_080, remainingPercent: 19, threshold: 20, now: now))
+        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset, windowMinutes: 10_080, remainingPercent: 10, threshold: 10, now: now))
+        XCTAssertFalse(ledger.register(window: "primary", resetAt: now, windowMinutes: 10_080, remainingPercent: 10, threshold: 10, now: now))
+        XCTAssertTrue(ledger.register(window: "primary", resetAt: reset + 60_000, windowMinutes: 1, remainingPercent: 20, threshold: 20, now: now))
     }
 
     func testWorkerEnvelopeIsStrictAndSizeBounded() throws {

@@ -176,6 +176,19 @@
       }
     },
     {
+      "id": "reset-jitter",
+      "input": "inputs/reset-jitter.jsonl",
+      "nowUtc": "2026-08-11T00:10:01.000Z",
+      "fixtureStats": { "validJsonLines": 5, "malformedJsonLines": 0 },
+      "expected": {
+        "schemaVersion": 1, "sourceKind": "local-session-observation", "classification": "complete", "freshness": "current",
+        "selectedWindow": "primary", "remainingPercent": "35.0", "cumulativeTokens": "200", "cacheHitTokens": "80",
+        "cacheMissTokens": "120", "contextTokens": null, "contextLimit": null, "contextPercent": null, "inputPercent": null,
+        "outputPercent": null, "reasoningOutputPercent": null, "observedAt": 1786406940000, "tasks": [], "taskNamesAvailable": false,
+        "metrics": { "validEventCount": 5, "malformedLineCount": 0, "unknownEventCount": 0, "readFailureCount": 0, "candidateFileCount": 1, "limitWindowCount": 1 }
+      }
+    },
+    {
       "id": "limit-id-fallback",
       "input": "inputs/limit-id-fallback.jsonl",
       "nowUtc": "2026-08-11T00:01:01.000Z",

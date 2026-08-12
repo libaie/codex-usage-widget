@@ -99,7 +99,7 @@ Assert-Contract ($version -ceq '1.1.0') 'VERSION must be exactly 1.1.0.'
 $expected = [IO.File]::ReadAllText($expectedPath) | ConvertFrom-Json -ErrorAction Stop
 Assert-Contract ($expected.schemaVersion -eq 1) 'expected-state schemaVersion must be 1.'
 Assert-Contract ($expected.sourceKind -ceq 'local-session-observation') 'sourceKind must be local-session-observation.'
-Assert-Contract (@($expected.cases).Count -eq 15) 'the v1 contract must contain fifteen reviewed cases.'
+Assert-Contract (@($expected.cases).Count -eq 16) 'the v1 contract must contain sixteen reviewed cases.'
 
 . (Join-Path $package 'CodexUsageWidget.ps1') -SelfTest | Out-Null
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('CodexUsageWidget-contract-' + [guid]::NewGuid().ToString('N'))

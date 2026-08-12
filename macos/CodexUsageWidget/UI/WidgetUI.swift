@@ -591,7 +591,7 @@ final class WidgetModel: ObservableObject {
         let nowMilliseconds = Int64((now.timeIntervalSince1970 * 1_000).rounded())
         var updated = reminderLedger
         let triggered = [20, 10].filter {
-            updated.register(window: limit.name, resetAt: limit.resetAt, remainingPercent: remaining, threshold: $0, now: nowMilliseconds)
+            updated.register(window: limit.name, resetAt: limit.resetAt, windowMinutes: limit.windowMinutes, remainingPercent: remaining, threshold: $0, now: nowMilliseconds)
         }
         guard !triggered.isEmpty,
               (try? LocalStateStore.save(updated, to: reminderURL, previous: reminderCondition)) == true else { return }

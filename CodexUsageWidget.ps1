@@ -517,11 +517,20 @@ function Get-NewestUsageState {
         }
         if ($observations.Count -eq 0) { continue }
 
-        $cycle = ($observations.ToArray() |
+        $cycle = $observations.ToArray() |
             Sort-Object { [datetime]$_.Window.ResetAt } -Descending |
-            Select-Object -First 1).Window.ResetAt
-        $cycleObservations = @($observations.ToArray() |
-            Where-Object { [datetime]$_.Window.ResetAt -eq [datetime]$cycle })
+            Select-Object -First 1
+        $cycleMinutes = $cycle.Window.PSObject.Properties['WindowMinutes']
+        # ponytail: Cap clock-drift tolerance at 1% of a window so adjacent short cycles stay separate.
+        $toleranceSeconds = if ($null -ne $cycleMinutes -and [double]$cycleMinutes.Value -gt 0) {
+            [math]::Min(60.0, [double]$cycleMinutes.Value * 0.6)
+        } else { 0.0 }
+        $cycleObservations = @($observations.ToArray() | Where-Object {
+                $minutes = $_.Window.PSObject.Properties['WindowMinutes']
+                (($null -eq $cycleMinutes -and $null -eq $minutes) -or
+                    ($null -ne $cycleMinutes -and $null -ne $minutes -and [double]$minutes.Value -eq [double]$cycleMinutes.Value)) -and
+                [math]::Abs((([datetime]$_.Window.ResetAt) - ([datetime]$cycle.Window.ResetAt)).TotalSeconds) -le $toleranceSeconds
+            })
         $winner = $cycleObservations |
             Sort-Object @{ Expression = { [double]$_.Window.UsedPercent }; Descending = $true },
                         @{ Expression = { [datetime]$_.State.ObservedAt }; Descending = $true } |
@@ -1999,7 +2008,14 @@ function Register-UsageReminderThreshold {
     if ($resetAt -le $now -or $resetSeconds -le $now.ToUnixTimeSeconds()) { return $false }
     $key = '{0}|{1}|{2}' -f $name, $resetSeconds, $Threshold
     $gate = Get-ReminderGateState
-    if ($remainingPercent -gt $Threshold -or $gate.SentKeys -contains $key) { return $false }
+    $minutes = $State.PSObject.Properties['WindowMinutes']
+    $toleranceSeconds = if ($null -ne $minutes -and $minutes.Value -is [System.ValueType] -and
+        [double]$minutes.Value -gt 0) { [math]::Min(60.0, [double]$minutes.Value * 0.6) } else { 0.0 }
+    $sameCycleWasSent = @($gate.SentKeys | Where-Object {
+            if ($_ -cnotmatch "^$name\|([0-9]+)\|$Threshold$") { return $false }
+            return [math]::Abs([decimal]$Matches[1] - [decimal]$resetSeconds) -le $toleranceSeconds
+        }).Count -gt 0
+    if ($remainingPercent -gt $Threshold -or $sameCycleWasSent) { return $false }
     $candidate = [pscustomobject]@{ SentKeys = @($gate.SentKeys) + $key; StoreStatus = $gate.StoreStatus }
     if (-not (Save-ReminderGateState $candidate)) { return $false }
     $gate.SentKeys = @($candidate.SentKeys)
@@ -4756,12 +4772,14 @@ if ($SelfTest) {
         $script:ReminderGateCache = $null
         $primaryCycleTime = [DateTimeOffset]::UtcNow.AddHours(1)
         $secondaryCycleTime = $primaryCycleTime.AddMinutes(30)
-        $primaryReminder = [pscustomobject]@{ Name = 'primary'; RemainingPercent = 20; ResetAt = $primaryCycleTime }
-        $secondaryReminder = [pscustomobject]@{ Name = 'secondary'; RemainingPercent = 20; ResetAt = $secondaryCycleTime }
+        $primaryReminder = [pscustomobject]@{ Name = 'primary'; RemainingPercent = 20; ResetAt = $primaryCycleTime; WindowMinutes = 10080 }
+        $secondaryReminder = [pscustomobject]@{ Name = 'secondary'; RemainingPercent = 20; ResetAt = $secondaryCycleTime; WindowMinutes = 300 }
         foreach ($reminder in $primaryReminder, $secondaryReminder) {
             Assert-Widget (Register-UsageReminderThreshold -State $reminder -Threshold 20) 'each window should trigger its 20 percent reminder once.'
             Assert-Widget (-not (Register-UsageReminderThreshold -State $reminder -Threshold 20)) 'each window should suppress its repeated 20 percent reminder.'
         }
+        $jitteredPrimary = [pscustomobject]@{ Name = 'primary'; RemainingPercent = 19; ResetAt = $primaryCycleTime.AddSeconds(-3); WindowMinutes = 10080 }
+        Assert-Widget (-not (Register-UsageReminderThreshold -State $jitteredPrimary -Threshold 20)) 'reset timestamp jitter should not repeat a reminder for the same cycle.'
         foreach ($reminder in $primaryReminder, $secondaryReminder) {
             $reminder.RemainingPercent = 10
             Assert-Widget (Register-UsageReminderThreshold -State $reminder -Threshold 10) 'each window should trigger its 10 percent reminder once.'
@@ -4776,6 +4794,8 @@ if ($SelfTest) {
         $persisted = Get-Content -LiteralPath $reminderPath -Raw | ConvertFrom-Json
         Assert-Widget ((@($persisted.PSObject.Properties.Name) -join ',') -eq 'SentKeys') 'only SentKeys should be persisted.'
         Assert-Widget (@($persisted.SentKeys).Count -eq 4) 'both thresholds for both windows should survive persistence.'
+        $shortWindow = [pscustomobject]@{ Name = 'primary'; RemainingPercent = 20; ResetAt = $primaryCycleTime.AddMinutes(1); WindowMinutes = 1 }
+        Assert-Widget (Register-UsageReminderThreshold -State $shortWindow -Threshold 20) 'a real adjacent short cycle should reopen its reminder.'
 
         $oldJson = [System.IO.File]::ReadAllText($reminderPath)
         $lockedReminder = [System.IO.File]::Open($reminderPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
