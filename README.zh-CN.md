@@ -80,7 +80,7 @@ Codex 用量小组件读取本机 Codex 会话文件，以紧凑的圆环展示�
 
 ## 开源
 
-项目采用 [MIT 许可证](LICENSE)。源码构建方法见[参与开发](CONTRIBUTING.md)，安全问题请参阅[安全说明](SECURITY.md)，版本变化记录在[更新日志](CHANGELOG.md)中。
+项目采用 [MIT 许可证](LICENSE)。源码构建方法见[参与开发](CONTRIBUTING.md)，版本变化记录在[更新日志](CHANGELOG.md)中。
 
 ## 免责声明
 

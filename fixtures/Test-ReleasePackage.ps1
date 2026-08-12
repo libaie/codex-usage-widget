@@ -144,7 +144,7 @@ $commonReadmeRequirements = @(
     'assets/screenshots/widget-ring-macos.png', 'assets/screenshots/widget-details-macos.png',
     'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-windows.zip',
     'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
-    'CONTRIBUTING.md', 'SECURITY.md', 'CHANGELOG.md'
+    'CONTRIBUTING.md', 'CHANGELOG.md'
 )
 $zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
 $zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +

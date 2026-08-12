@@ -80,7 +80,7 @@ The widget reads only the selected Codex data folder. It does not scan the whole
 
 ## Open source
 
-The project is available under the [MIT license](LICENSE). See [Contributing](CONTRIBUTING.md) for source builds, [Security](SECURITY.md) for reporting vulnerabilities, and the [Changelog](CHANGELOG.md) for version history.
+The project is available under the [MIT license](LICENSE). See [Contributing](CONTRIBUTING.md) for source builds and the [Changelog](CHANGELOG.md) for version history.
 
 ## Disclaimer
 
