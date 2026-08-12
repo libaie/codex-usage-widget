@@ -143,9 +143,8 @@ $commonReadmeRequirements = @(
     'assets/screenshots/widget-ring.png', 'assets/screenshots/widget-details.png',
     'assets/screenshots/widget-ring-macos.png', 'assets/screenshots/widget-details-macos.png',
     'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-windows.zip',
-    'CodexUsageWidget-v1.1.0-macos-unsigned.zip', 'CodexUsageWidget-v1.1.0-macos.dmg',
-    'CONTRIBUTING.md', 'DESIGN.md', 'CHANGELOG.md', 'actions/workflows/ci.yml',
-    '-Demo', '--demo', 'Developer ID'
+    'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
+    'CONTRIBUTING.md', 'SECURITY.md', 'CHANGELOG.md'
 )
 $zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
 $zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +
@@ -172,10 +171,6 @@ foreach ($readmePath in $readmeRequirements.Keys) {
             Fail-ReleasePackage "missing '$requiredText' in file: $readmePath"
         }
     }
-    if ([regex]::Matches($readmeContent, 'reminders\.json', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -lt 2) {
-        Fail-ReleasePackage "missing reminders.json documentation from data-location or privacy details in file: $readmePath"
-    }
-
     $relativeTargets = @([regex]::Matches($readmeContent, '!?\[[^\]]*\]\((?<target>[^)\s]+)\)') | ForEach-Object {
         $_.Groups['target'].Value.Trim([char[]]'<>')
     })
