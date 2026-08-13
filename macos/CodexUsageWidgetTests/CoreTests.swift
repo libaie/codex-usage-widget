@@ -261,7 +261,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(totals, CacheTotals(hitTokens: 1_600, missTokens: 400))
     }
 
-    func testTreeTotalsUseIndependentRawHighWaterMarks() {
+    func testTreeTotalsChooseOneCompleteRawSnapshot() {
         let treeID = "11111111-1111-1111-1111-111111111111"
         let ledger = CacheLedger(schemaVersion: 3, sessions: [
             "a": CacheRecord(
@@ -271,10 +271,30 @@ final class CoreTests: XCTestCase {
             "b": CacheRecord(
                 hitTokens: "90", missTokens: "30",
                 hitBaselineTokens: "80", missBaselineTokens: "20", treeID: treeID
+            ),
+            "c": CacheRecord(
+                hitTokens: "110", missTokens: "5",
+                hitBaselineTokens: "100", missBaselineTokens: "0", treeID: treeID
             )
         ])
 
-        XCTAssertEqual(ledger.totals(), CacheTotals(hitTokens: 100, missTokens: 30))
+        XCTAssertEqual(ledger.totals(), CacheTotals(hitTokens: 100, missTokens: 20))
+    }
+
+    func testTreeMetadataIgnoresIncompleteUTF8AfterTheFirstLine() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let id = "11111111-1111-1111-1111-111111111111"
+        var data = try sessionMeta(id: id, sessionID: id)
+        data.append(Data(repeating: 0x78, count: 65_535 - data.count))
+        data.append(Data("中\n".utf8))
+        data.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(data, named: "rollout-\(id).jsonl", to: sessions, modified: Date())
+
+        let snapshot = try XCTUnwrap(SessionScanner.scan(dataDirectory: root).sessions.first)
+
+        XCTAssertEqual(snapshot.treeID, id)
     }
 
     func testTreeMetadataRejectsMismatchedIdentityAndUnsafeChildFallback() throws {

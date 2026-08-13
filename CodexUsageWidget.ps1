@@ -541,7 +541,12 @@ function Get-SessionTreeId {
                 if ($read -le 0) { break }
                 $offset += $read
             }
-            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $offset)
+            $lineLength = [Array]::IndexOf($bytes, [byte]0x0A, 0, $offset)
+            if ($lineLength -lt 0) {
+                if ($stream.Length -gt $offset) { return $null }
+                $lineLength = $offset
+            }
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $lineLength)
         }
         finally { $stream.Dispose() }
 
@@ -2251,14 +2256,20 @@ function Update-CumulativeCacheTokens {
         $adjustedMiss = if ($null -ne $tokens.TreeId) { [decimal]$tokens.CacheMissTokens }
         else { [decimal]$tokens.CacheMissTokens - [decimal]$(if ($null -ne $tokens.CacheMissBaselineTokens) { $tokens.CacheMissBaselineTokens } else { 0 }) }
         $treeKey = if ($null -ne $tokens.TreeId) { 'tree:' + $tokens.TreeId } else { 'session:' + $entry.Key }
+        $candidateTotal = $adjustedHit + $adjustedMiss
+        $candidateId = [string]$entry.Key
         $tree = $treeTotals[$treeKey]
-        if ($null -eq $tree) {
-            $treeTotals[$treeKey] = [pscustomobject]@{ CacheHitTokens = $adjustedHit; CacheMissTokens = $adjustedMiss }
-        }
-        else {
-            # ponytail: each cumulative counter keeps its tree maximum so later branch switches cannot make the display fall.
-            if ($adjustedHit -gt $tree.CacheHitTokens) { $tree.CacheHitTokens = $adjustedHit }
-            if ($adjustedMiss -gt $tree.CacheMissTokens) { $tree.CacheMissTokens = $adjustedMiss }
+        if ($null -eq $tree -or $candidateTotal -gt $tree.TotalTokens -or
+            ($candidateTotal -eq $tree.TotalTokens -and ($adjustedHit -gt $tree.CacheHitTokens -or
+                ($adjustedHit -eq $tree.CacheHitTokens -and ($adjustedMiss -gt $tree.CacheMissTokens -or
+                    ($adjustedMiss -eq $tree.CacheMissTokens -and [string]::CompareOrdinal($candidateId, $tree.Id) -lt 0)))))) {
+            # ponytail: one complete record per task tree prevents synthetic hit/miss combinations.
+            $treeTotals[$treeKey] = [pscustomobject]@{
+                Id = $candidateId
+                TotalTokens = $candidateTotal
+                CacheHitTokens = $adjustedHit
+                CacheMissTokens = $adjustedMiss
+            }
         }
     }
     $cacheHitTokens = [decimal]0
@@ -2643,12 +2654,6 @@ function Get-WidgetAppearance {
     if ($themeNumber -ne [Math]::Truncate($themeNumber) -or
         $themeNumber -lt 0 -or $themeNumber -ge $themes.Count) {
         throw [ArgumentException]::new('Theme must be an integer in the theme catalog.', 'Theme')
-    }
-    if ($remaining -le 10) {
-        return [pscustomobject]@{ NameKey = 'accessibility.criticalState'; Start = '#FF657D'; End = '#FF657D' }
-    }
-    if ($remaining -le 20) {
-        return [pscustomobject]@{ NameKey = 'accessibility.attentionState'; Start = '#FFD166'; End = '#FFD166' }
     }
     return $themes[[int]$themeNumber]
 }
@@ -3035,12 +3040,14 @@ function Set-WidgetAppearance {
         $startBrush = $gradientBrush
         $endBrush = [System.Windows.SystemColors]::GrayTextBrush
         $softBrush = [System.Windows.Media.Brushes]::Transparent
+        $statusBrush = $gradientBrush
     }
     elseif ($Unavailable) {
         $gradientBrush = [System.Windows.Media.Brushes]::SlateGray
         $startBrush = $gradientBrush
         $endBrush = $gradientBrush
         $softBrush = [System.Windows.Media.Brushes]::Transparent
+        $statusBrush = $gradientBrush
     }
     else {
         $appearance = Get-WidgetAppearance -RemainingPercent $RemainingPercent -Theme $script:WidgetPreferences.Theme
@@ -3055,7 +3062,12 @@ function Set-WidgetAppearance {
         $endBrush = [System.Windows.Media.SolidColorBrush]::new($endColor)
         $softBrush = [System.Windows.Media.SolidColorBrush]::new(
             [System.Windows.Media.Color]::FromArgb(28, $startColor.R, $startColor.G, $startColor.B))
-        foreach ($brush in $gradientBrush, $startBrush, $endBrush, $softBrush) {
+        $warningColor = if ([double]$RemainingPercent -le 10) { '#FF657D' }
+            elseif ([double]$RemainingPercent -le 20) { '#FFD166' }
+            else { $null }
+        $statusBrush = if ($null -eq $warningColor) { $gradientBrush }
+            else { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($warningColor)) }
+        foreach ($brush in $gradientBrush, $startBrush, $endBrush, $softBrush, $statusBrush) {
             if ($brush.CanFreeze) { $brush.Freeze() }
         }
     }
@@ -3066,13 +3078,13 @@ function Set-WidgetAppearance {
     $script:GlowRing.Stroke = $gradientBrush
     $script:RemainingDetailText.Foreground = $gradientBrush
     $script:RemainingDetailUnitText.Foreground = $gradientBrush
-    $script:DetailAccentDot.Fill = $gradientBrush
+    $script:DetailAccentDot.Fill = $statusBrush
     $script:TaskDetailAccentLine.Background = $gradientBrush
     $script:ContextAccentFill.Background = $gradientBrush
     $script:InputAccentFill.Background = $startBrush
     $script:OutputAccentFill.Background = $endBrush
     $script:DetailAccentGlow.Background = $gradientBrush
-    $script:DetailStatusText.Foreground = $gradientBrush
+    $script:DetailStatusText.Foreground = $statusBrush
     if ($null -ne $script:DemoBadge) {
         $script:DemoBadge.Background = $softBrush
         $script:DemoBadgeText.Foreground = $gradientBrush
@@ -4293,20 +4305,26 @@ if ($SelfTest) {
         -not [object]::ReferenceEquals($script:TaskTitleText.Foreground, $themeBrush)) 'theme appearance should color bars and the selected task capsule without tinting the detail title.'
 
     Set-WidgetAppearance 20 -HighContrast $false
-    Assert-Widget ($script:RingValue.Stroke.GradientStops[0].Color.ToString() -eq '#FFFFD166' -and
-        $script:RingValue.Stroke.GradientStops[1].Color.ToString() -eq '#FFFFD166' -and
+    Assert-Widget ($script:RingValue.Stroke.GradientStops[0].Color.ToString() -eq '#FF7CFFB2' -and
+        $script:RingValue.Stroke.GradientStops[1].Color.ToString() -eq '#FF38D989' -and
+        [object]::ReferenceEquals($script:GlowRing.Stroke, $script:RingValue.Stroke) -and
+        $script:DetailAccentDot.Fill.Color.ToString() -eq '#FFFFD166' -and
+        [object]::ReferenceEquals($script:DetailStatusText.Foreground, $script:DetailAccentDot.Fill) -and
         [object]::ReferenceEquals($selectedRow.Child.Foreground, $script:RingValue.Stroke) -and
         [object]::ReferenceEquals($selectedRow.BorderBrush, $script:RingValue.Stroke) -and
         [object]::ReferenceEquals($selectedRow.Background, $script:DetailAccentSoftBrush) -and
-        [object]::ReferenceEquals($script:RemainingDetailUnitText.Foreground, $script:RingValue.Stroke)) '20 percent should synchronize the gold warning accent.'
+        [object]::ReferenceEquals($script:RemainingDetailUnitText.Foreground, $script:RingValue.Stroke)) '20 percent should preserve the selected theme and move the gold warning to the existing status indicator.'
 
     Set-WidgetAppearance 10 -HighContrast $false
-    Assert-Widget ($script:RingValue.Stroke.GradientStops[0].Color.ToString() -eq '#FFFF657D' -and
-        $script:RingValue.Stroke.GradientStops[1].Color.ToString() -eq '#FFFF657D' -and
+    Assert-Widget ($script:RingValue.Stroke.GradientStops[0].Color.ToString() -eq '#FF7CFFB2' -and
+        $script:RingValue.Stroke.GradientStops[1].Color.ToString() -eq '#FF38D989' -and
+        [object]::ReferenceEquals($script:GlowRing.Stroke, $script:RingValue.Stroke) -and
+        $script:DetailAccentDot.Fill.Color.ToString() -eq '#FFFF657D' -and
+        [object]::ReferenceEquals($script:DetailStatusText.Foreground, $script:DetailAccentDot.Fill) -and
         [object]::ReferenceEquals($selectedRow.Child.Foreground, $script:RingValue.Stroke) -and
         [object]::ReferenceEquals($selectedRow.BorderBrush, $script:RingValue.Stroke) -and
         [object]::ReferenceEquals($selectedRow.Background, $script:DetailAccentSoftBrush) -and
-        [object]::ReferenceEquals($script:RemainingDetailUnitText.Foreground, $script:RingValue.Stroke)) '10 percent should synchronize the red warning accent.'
+        [object]::ReferenceEquals($script:RemainingDetailUnitText.Foreground, $script:RingValue.Stroke)) '10 percent should preserve the selected theme and move the red warning to the existing status indicator.'
 
     Set-WidgetAppearance -Unavailable -HighContrast $false
     $unavailableBrush = $script:RingValue.Stroke
@@ -4632,10 +4650,10 @@ if ($SelfTest) {
     }
     $attentionAppearance = Get-WidgetAppearance -RemainingPercent 20 -Theme 7
     $urgentAppearance = Get-WidgetAppearance -RemainingPercent 10 -Theme 6
-    Assert-Widget ($attentionAppearance.NameKey -ceq 'accessibility.attentionState' -and
-        $attentionAppearance.Start -eq '#FFD166' -and $attentionAppearance.End -eq '#FFD166') 'attention should override every theme.'
-    Assert-Widget ($urgentAppearance.NameKey -ceq 'accessibility.criticalState' -and
-        $urgentAppearance.Start -eq '#FF657D' -and $urgentAppearance.End -eq '#FF657D') 'urgent should override every theme.'
+    Assert-Widget ($attentionAppearance.NameKey -ceq 'theme.lime' -and
+        $attentionAppearance.Start -eq '#DCFF7C' -and $attentionAppearance.End -eq '#7DDB66') 'attention should retain the selected theme.'
+    Assert-Widget ($urgentAppearance.NameKey -ceq 'theme.sunset' -and
+        $urgentAppearance.Start -eq '#FFC28A' -and $urgentAppearance.End -eq '#FF806D') 'urgent should retain the selected theme.'
 
     Assert-Widget ((Format-TokenCount 40860000) -eq '4086 万') 'large token counts should use Chinese ten-thousand formatting.'
     Assert-Widget ((Format-TokenCount 206411) -eq '20.6 万') 'compact token counts should preserve one decimal place.'
@@ -5117,6 +5135,14 @@ if ($SelfTest) {
             [pscustomobject]@{ Id = 'session-b'; CacheHitTokens = 80; CacheMissTokens = 15 }
         )
         Assert-Widget ($cacheTotals.CacheHitTokens -eq 190 -and $cacheTotals.CacheMissTokens -eq 37) 'reloading the ledger must not count the same tokens twice.'
+        $script:CacheTokenLedger = [pscustomobject]@{ Sessions = @{}; Dirty = $false; StoreStatus = 'missing' }
+        $conflictingTreeId = '99999999-9999-9999-9999-999999999999'
+        $cacheTotals = Update-CumulativeCacheTokens @(
+            [pscustomobject]@{ Id = 'tree-high-hit'; CacheHitTokens = 800; CacheMissTokens = 200; TreeId = $conflictingTreeId },
+            [pscustomobject]@{ Id = 'tree-high-total'; CacheHitTokens = 700; CacheMissTokens = 400; TreeId = $conflictingTreeId },
+            [pscustomobject]@{ Id = 'unknown-tree'; CacheHitTokens = 10; CacheMissTokens = 5 }
+        )
+        Assert-Widget ($cacheTotals.CacheHitTokens -eq 710 -and $cacheTotals.CacheMissTokens -eq 405) 'one task tree must contribute one complete highest-total record while unknown trees remain independent.'
 
         $script:ReminderGateCache = $null
         $primaryCycleTime = [DateTimeOffset]::UtcNow.AddHours(1)

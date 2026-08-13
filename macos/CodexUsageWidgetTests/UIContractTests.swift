@@ -150,6 +150,76 @@ final class UIContractTests: XCTestCase {
         XCTAssertEqual(model.result?.state.remainingPercent, scanResult.state.remainingPercent)
     }
 
+    func testPartialCriticalQuotaKeepsTheSelectedThemeAccentAndCriticalStatusColor() throws {
+        let temporary = FileManager.default.temporaryDirectory
+        let stateDirectory = temporary.appendingPathComponent("CodexUsageWidget-theme-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let dataDirectory = temporary.appendingPathComponent("CodexUsageWidget-data-\(UUID().uuidString)")
+        var state = try demoState()
+        state.remainingPercent = "5.0"
+        state.classification = .partial
+        let scanResult = UsageScanResult(state: state, sessions: [])
+        let scanFinished = expectation(description: "critical quota scanned")
+        let model = try WidgetModel(
+            demo: false,
+            stateDirectory: stateDirectory,
+            resolveDataDirectory: { _ in dataDirectory },
+            scanDataDirectory: { _, _, _ in
+                scanFinished.fulfill()
+                return scanResult
+            }
+        )
+        model.setTheme(4)
+
+        model.refresh()
+        wait(for: [scanFinished], timeout: 2)
+        let deadline = Date().addingTimeInterval(2)
+        while model.result == nil && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        XCTAssertEqual(model.presentation.statusKey, "status.partial")
+        XCTAssertEqual(model.theme.id, "aurora")
+        XCTAssertEqual(model.accentHexes.0, "#7CFFB2")
+        XCTAssertEqual(model.accentHexes.1, "#38D989")
+        XCTAssertEqual(model.statusHex, "#FF5E6C")
+    }
+
+    func testPartialAttentionQuotaKeepsTheSelectedThemeAccentAndWarningStatusColor() throws {
+        let temporary = FileManager.default.temporaryDirectory
+        let stateDirectory = temporary.appendingPathComponent("CodexUsageWidget-theme-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let dataDirectory = temporary.appendingPathComponent("CodexUsageWidget-data-\(UUID().uuidString)")
+        var state = try demoState()
+        state.remainingPercent = "15.0"
+        state.classification = .partial
+        let scanResult = UsageScanResult(state: state, sessions: [])
+        let scanFinished = expectation(description: "attention quota scanned")
+        let model = try WidgetModel(
+            demo: false,
+            stateDirectory: stateDirectory,
+            resolveDataDirectory: { _ in dataDirectory },
+            scanDataDirectory: { _, _, _ in
+                scanFinished.fulfill()
+                return scanResult
+            }
+        )
+        model.setTheme(4)
+
+        model.refresh()
+        wait(for: [scanFinished], timeout: 2)
+        let deadline = Date().addingTimeInterval(2)
+        while model.result == nil && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        XCTAssertEqual(model.presentation.statusKey, "status.partial")
+        XCTAssertEqual(model.theme.id, "aurora")
+        XCTAssertEqual(model.accentHexes.0, "#7CFFB2")
+        XCTAssertEqual(model.accentHexes.1, "#38D989")
+        XCTAssertEqual(model.statusHex, "#FFC857")
+    }
+
     func testHoverPinDragAndEscapeShareOneInteractionStateMachine() {
         var interaction = WidgetInteractionState()
         interaction.pointerEnteredRing(at: 0)

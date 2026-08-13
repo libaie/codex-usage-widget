@@ -387,6 +387,21 @@ try {
     ), [Text.UTF8Encoding]::new($false))
     Assert-Boundary ($null -eq (Get-SessionTreeId -Path $lateMetaPath)) `
         'task-tree identity must come only from the first nonempty record, never a later metadata-shaped line.'
+    $splitUtf8SessionId = '77777777-7777-7777-7777-777777777777'
+    $splitUtf8TreeId = '88888888-8888-8888-8888-888888888888'
+    $splitUtf8Path = Join-Path $testRoot ('rollout-' + $splitUtf8SessionId + '.jsonl')
+    $firstRecord = ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' +
+        $splitUtf8SessionId + '","session_id":"' + $splitUtf8TreeId + '"}}') + "`n"
+    $firstRecordBytes = [Text.UTF8Encoding]::new($false).GetBytes($firstRecord)
+    $splitUtf8Bytes = [byte[]]::new(65539)
+    [Array]::Copy($firstRecordBytes, 0, $splitUtf8Bytes, 0, $firstRecordBytes.Length)
+    $paddingBytes = [Text.Encoding]::ASCII.GetBytes('x' * (65535 - $firstRecordBytes.Length))
+    [Array]::Copy($paddingBytes, 0, $splitUtf8Bytes, $firstRecordBytes.Length, $paddingBytes.Length)
+    [Array]::Copy([byte[]](0xE4, 0xB8, 0xAD), 0, $splitUtf8Bytes, 65535, 3)
+    $splitUtf8Bytes[65538] = 0x0A
+    [IO.File]::WriteAllBytes($splitUtf8Path, $splitUtf8Bytes)
+    Assert-Boundary ((Get-SessionTreeId -Path $splitUtf8Path) -ceq $splitUtf8TreeId) `
+        'task-tree identity must decode only the complete first record when a later UTF-8 character crosses the 64 KiB read boundary.'
 
     $treeRoot = Join-Path $testRoot 'fork-tree-deduplication'
     $treeSessions = Join-Path $treeRoot 'sessions'
@@ -430,9 +445,9 @@ try {
     $treeSnapshot = Get-CodexUsageSnapshot -DataDirectory $treeRoot -ReadOnly
     $treeSnapshot = Apply-UsageSnapshotPersistence $treeSnapshot
     Assert-Boundary ($null -ne $treeSnapshot) 'task-tree migration must preserve and persist its snapshot.'
-    Assert-Boundary ($treeSnapshot.State.TokenDetails.CacheHitTokens -eq 1200 -and
+    Assert-Boundary ($treeSnapshot.State.TokenDetails.CacheHitTokens -eq 1100 -and
         $treeSnapshot.State.TokenDetails.CacheMissTokens -eq 500) `
-        ('one task tree must retain each cumulative counter maximum while an independent root still adds; hit={0}, miss={1}.' -f
+        ('one task tree must contribute one complete highest-total record while an independent root still adds; hit={0}, miss={1}.' -f
             $treeSnapshot.State.TokenDetails.CacheHitTokens, $treeSnapshot.State.TokenDetails.CacheMissTokens)
     $treeLedger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json -ErrorAction Stop
     Assert-Boundary ($treeLedger.SchemaVersion -eq 3 -and

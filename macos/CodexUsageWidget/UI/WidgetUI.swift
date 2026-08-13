@@ -498,10 +498,11 @@ final class WidgetModel: ObservableObject {
     var hasInvalidState: Bool {
         preferenceCondition == .invalid || cacheCondition == .invalid || reminderCondition == .invalid
     }
-    var accentHexes: (String, String) {
-        if let percent = presentation.ringPercent, percent <= 10 { return (catalog.critical, catalog.critical) }
-        if let percent = presentation.ringPercent, percent <= 20 { return (catalog.warning, catalog.warning) }
-        return (theme.start, theme.end)
+    var accentHexes: (String, String) { (theme.start, theme.end) }
+    var statusHex: String {
+        if let percent = presentation.ringPercent, percent <= 10 { return catalog.critical }
+        if let percent = presentation.ringPercent, percent <= 20 { return catalog.warning }
+        return theme.start
     }
 
     func start() {
@@ -860,6 +861,7 @@ struct WidgetDetailView: View {
     @FocusState private var focusedTaskID: String?
 
     private var accent: Color { Color(widgetHex: model.accentHexes.0) }
+    private var status: Color { Color(widgetHex: model.statusHex) }
     private var state: NormalizedUsageState? { model.result?.state }
 
     var body: some View {
@@ -911,14 +913,14 @@ struct WidgetDetailView: View {
                         .foregroundStyle(accent)
                         .background(accent.opacity(0.12), in: Capsule())
                 }
-                Circle().fill(accent).frame(width: 7, height: 7).shadow(color: accent, radius: 4)
+                Circle().fill(status).frame(width: 7, height: 7).shadow(color: status, radius: 4)
             }
             HStack {
                 Text(model.language.text("detail.status"))
                 Spacer()
                 Text(model.language.text(model.presentation.statusKey))
                     .fontWeight(.semibold)
-                    .foregroundStyle(accent)
+                    .foregroundStyle(status)
                     .accessibilityIdentifier("usage-status")
             }
             .font(.system(size: 12.5))

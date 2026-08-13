@@ -622,7 +622,7 @@ struct CacheLedger: Codable, StateValidating {
     }
 
     func totals() -> CacheTotals? {
-        var contributions: [String: (hit: Int64, miss: Int64)] = [:]
+        var contributions: [String: (hit: Int64, miss: Int64, id: String)] = [:]
         for (id, record) in sessions {
             guard let rawHit = Int64(record.hitTokens), let rawMiss = Int64(record.missTokens) else { return nil }
             let hitBaseline = record.hitBaselineTokens.flatMap { Int64($0) } ?? 0
@@ -633,9 +633,17 @@ struct CacheLedger: Codable, StateValidating {
                 : (hit: rawHit, miss: rawMiss)
             let key = record.treeID ?? "session:\(id)"
             if let previous = contributions[key] {
-                contributions[key] = (max(previous.hit, candidate.hit), max(previous.miss, candidate.miss))
+                // ponytail: one complete record per task tree prevents synthetic hit/miss combinations.
+                let candidateTotal = UInt64(candidate.hit) + UInt64(candidate.miss)
+                let previousTotal = UInt64(previous.hit) + UInt64(previous.miss)
+                if candidateTotal > previousTotal ||
+                    (candidateTotal == previousTotal && candidate.hit > previous.hit) ||
+                    (candidateTotal == previousTotal && candidate.hit == previous.hit && candidate.miss > previous.miss) ||
+                    (candidateTotal == previousTotal && candidate.hit == previous.hit && candidate.miss == previous.miss && id < previous.id) {
+                    contributions[key] = (candidate.hit, candidate.miss, id)
+                }
             } else {
-                contributions[key] = candidate
+                contributions[key] = (candidate.hit, candidate.miss, id)
             }
         }
         var hit: Int64 = 0
