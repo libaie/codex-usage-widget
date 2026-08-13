@@ -56,7 +56,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-Bootstra
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-Launcher.ps1 -PackageRoot .
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\fixtures\Test-ReleasePackage.ps1 -PackageRoot .
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Windows.ps1
-.\dist\candidate\CodexUsageWidget-v1.1.0-windows.exe --self-test
+.\dist\candidate\CodexUsageWidget-v1.1.1-windows.exe --self-test
 ```
 
 ## macOS checks and unsigned build
@@ -66,7 +66,7 @@ xcodebuild -project macos/CodexUsageWidget.xcodeproj \
   -scheme CodexUsageWidget \
   -destination 'platform=macOS' \
   -derivedDataPath .build \
-  MARKETING_VERSION=1.1.0 \
+  MARKETING_VERSION=1.1.1 \
   CODE_SIGNING_ALLOWED=NO \
   test
 
@@ -75,7 +75,7 @@ xcodebuild -project macos/CodexUsageWidget.xcodeproj \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath .build \
-  MARKETING_VERSION=1.1.0 \
+  MARKETING_VERSION=1.1.1 \
   ARCHS='arm64 x86_64' \
   ONLY_ACTIVE_ARCH=NO \
   CODE_SIGNING_ALLOWED=NO \

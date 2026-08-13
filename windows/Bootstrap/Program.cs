@@ -12,8 +12,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Codex Usage Widget")]
 [assembly: AssemblyProduct("Codex Usage Widget")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 internal static class Program
 {
@@ -94,7 +94,7 @@ internal static class Program
         if (lines.Length < 3) throw new InvalidDataException();
         string[] version = lines[0].Split('\t');
         string[] zipLine = lines[1].Split('\t');
-        if (version.Length != 2 || version[0] != "VERSION" || version[1] != "1.1.0" ||
+        if (version.Length != 2 || version[0] != "VERSION" || version[1] != "1.1.1" ||
             zipLine.Length != 3 || zipLine[0] != "ZIP") throw new InvalidDataException();
         long zipLength;
         if (!Int64.TryParse(zipLine[1], NumberStyles.None, CultureInfo.InvariantCulture, out zipLength) ||

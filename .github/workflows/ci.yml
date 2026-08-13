@@ -69,16 +69,16 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Windows.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\dist\candidate\CodexUsageWidget-v1.1.0-windows.exe --self-test
+          .\dist\candidate\CodexUsageWidget-v1.1.1-windows.exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-unsigned
           path: |
-            dist/candidate/CodexUsageWidget-v1.1.0-windows.exe
-            dist/candidate/CodexUsageWidget-v1.1.0-windows.exe.sha256
-            dist/candidate/CodexUsageWidget-v1.1.0-windows.zip
-            dist/candidate/CodexUsageWidget-v1.1.0-windows.zip.sha256
+            dist/candidate/CodexUsageWidget-v1.1.1-windows.exe
+            dist/candidate/CodexUsageWidget-v1.1.1-windows.exe.sha256
+            dist/candidate/CodexUsageWidget-v1.1.1-windows.zip
+            dist/candidate/CodexUsageWidget-v1.1.1-windows.zip.sha256
           if-no-files-found: error
 
   macos:
@@ -113,7 +113,7 @@ jobs:
           VERSION_VALUE="$(tr -d '\r\n' < VERSION)"
           SCREENSHOT_DIR="/tmp/codex-widget-screenshots"
           mkdir -p "$SCREENSHOT_DIR"
-          test "$VERSION_VALUE" = "1.1.0"
+          test "$VERSION_VALUE" = "1.1.1"
           xcodebuild -version
           set +e
           CODEX_SCREENSHOT_DIR="$SCREENSHOT_DIR" xcodebuild -project macos/CodexUsageWidget.xcodeproj \
@@ -169,14 +169,14 @@ jobs:
             cmp "locales/$locale.json" "$APP/Contents/Resources/locales/$locale.json"
           done
           mkdir -p dist/candidate
-          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip
-          (cd dist/candidate && shasum -a 256 CodexUsageWidget-v1.1.0-macos-unsigned.zip > CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256)
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/candidate/CodexUsageWidget-v1.1.1-macos-unsigned.zip
+          (cd dist/candidate && shasum -a 256 CodexUsageWidget-v1.1.1-macos-unsigned.zip > CodexUsageWidget-v1.1.1-macos-unsigned.zip.sha256)
       - uses: actions/upload-artifact@v4
         with:
           name: macos-unsigned
           path: |
-            dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip
-            dist/candidate/CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256
+            dist/candidate/CodexUsageWidget-v1.1.1-macos-unsigned.zip
+            dist/candidate/CodexUsageWidget-v1.1.1-macos-unsigned.zip.sha256
           if-no-files-found: error
 
   candidate:
@@ -212,19 +212,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $candidate = Join-Path $PWD 'candidate'
           $expected = @(
-            'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
-            'CodexUsageWidget-v1.1.0-macos-unsigned.zip.sha256',
-            'CodexUsageWidget-v1.1.0-windows.exe',
-            'CodexUsageWidget-v1.1.0-windows.exe.sha256',
-            'CodexUsageWidget-v1.1.0-windows.zip',
-            'CodexUsageWidget-v1.1.0-windows.zip.sha256'
+            'CodexUsageWidget-v1.1.1-macos-unsigned.zip',
+            'CodexUsageWidget-v1.1.1-macos-unsigned.zip.sha256',
+            'CodexUsageWidget-v1.1.1-windows.exe',
+            'CodexUsageWidget-v1.1.1-windows.exe.sha256',
+            'CodexUsageWidget-v1.1.1-windows.zip',
+            'CodexUsageWidget-v1.1.1-windows.zip.sha256'
           ) | Sort-Object
           $actual = @([IO.Directory]::GetFiles($candidate) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
           if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Unsigned candidate inventory mismatch.' }
           foreach ($name in @(
-            'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
-            'CodexUsageWidget-v1.1.0-windows.exe',
-            'CodexUsageWidget-v1.1.0-windows.zip'
+            'CodexUsageWidget-v1.1.1-macos-unsigned.zip',
+            'CodexUsageWidget-v1.1.1-windows.exe',
+            'CodexUsageWidget-v1.1.1-windows.zip'
           )) {
             $hash = (Get-FileHash -LiteralPath (Join-Path $candidate $name) -Algorithm SHA256).Hash.ToLowerInvariant()
             $line = [IO.File]::ReadAllText((Join-Path $candidate ($name + '.sha256')), [Text.Encoding]::ASCII).TrimEnd("`r", "`n")
@@ -243,7 +243,7 @@ jobs:
           $manifest = [ordered]@{
             schemaVersion = 1
             stage = 'unsigned-candidate'
-            version = '1.1.0'
+            version = '1.1.1'
             commitSha = $env:CANDIDATE_SHA
             workflowRunId = [long]$env:GITHUB_RUN_ID
             readmeSha256 = (Get-FileHash -LiteralPath $readme -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -258,7 +258,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: unsigned-candidate-v1.1.0-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          name: unsigned-candidate-v1.1.1-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
           path: candidate/*
           if-no-files-found: error
           retention-days: 30
@@ -278,29 +278,39 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: unsigned-candidate-v1.1.0-${{ github.sha }}
+          name: unsigned-candidate-v1.1.1-${{ github.sha }}
           path: candidate
       - name: Publish unsigned prerelease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          VERSION_VALUE="$(jq -er '.version | select(type == "string" and length > 0)' candidate/candidate-manifest.json)"
+          if [[ "$GITHUB_REF_NAME" != "v$VERSION_VALUE" ]]; then
+            echo "::error title=Release tag::Release tag does not match candidate version."
+            exit 1
+          fi
           cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
-          ## v1.1.0 unsigned preview / 未签名预发布版
+          ## v1.1.1 unsigned preview / 未签名预发布版
 
           - Windows: unsigned EXE and portable ZIP
           - macOS: unsigned Universal app ZIP for Apple silicon and Intel Macs, macOS 13+
-          - Five interface languages and eight themes
+          - Automatically follows migrated Codex data directories and tolerates small reset-time drift
+          - Corrected cumulative cache totals by grouping sessions when task-tree metadata is available
+          - Cache-hit and cache-miss values now stay paired to one complete observation
+          - Eight themes remain selectable at low allowance levels; five interface languages are included
           - Local session observation only; no Web API calls or telemetry
 
           Windows files are not Authenticode-signed. The macOS app is not signed or notarized. On first launch, use Finder → Open, or System Settings → Privacy & Security → Open Anyway. Verify the included SHA-256 files before running.
 
+          本版本支持刷新时跟随迁移后的 Codex 数据目录，并容忍同一额度周期内的重置时间小幅漂移；同时会在任务树元数据可用时归并迁移或关联会话，修正累计缓存统计，确保命中与未命中数据来自同一次完整观测，并让低额度状态下的主题切换保持可见。
+
           Windows 文件尚未进行 Authenticode 签名；macOS 应用尚未进行 Developer ID 签名与苹果公证。首次打开 macOS 应用时，请使用访达右键“打开”，或前往“系统设置 → 隐私与安全性 → 仍要打开”。运行前请核对随附的 SHA-256。
           EOF
           gh release create "$GITHUB_REF_NAME" \
-            candidate/CodexUsageWidget-v1.1.0-* \
+            candidate/CodexUsageWidget-v1.1.1-* \
             --prerelease \
             --verify-tag \
-            --title "Codex Usage Widget v1.1.0 (Unsigned Preview)" \
+            --title "Codex Usage Widget v1.1.1 (Unsigned Preview)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --repo "$GITHUB_REPOSITORY"

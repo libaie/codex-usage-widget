@@ -4,7 +4,7 @@
 
 适用于 Windows 和 macOS 的桌面用量圆环，可自由拖拽，悬停即可查看本机 Codex 用量。
 
-[下载 v1.1.0](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0) · [English](README.md) · [MIT 许可证](LICENSE)
+[下载 v1.1.1](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.1) · [English](README.md) · [MIT 许可证](LICENSE)
 
 </div>
 
@@ -34,32 +34,33 @@ Codex 用量小组件读取本机 Codex 会话文件，以紧凑的圆环展示�
 
 - 圆环始终置顶，可拖到任意位置，靠近屏幕边缘时自动吸附。
 - 悬停查看当前限制、重置时间、令牌、上下文占用和最近 30 分钟更新的任务。
-- 展示单任务及本机累计的缓存命中、缓存未命中令牌。
-- 提供八种配色和五种界面语言：简体中文（`zh-CN`）、繁体中文（`zh-TW`）、英语（`en-US`）、日语（`ja-JP`）和韩语（`ko-KR`）。
+- 展示单任务及本机累计的缓存命中、缓存未命中令牌；本机元数据完整时按任务树归并，减少迁移或关联会话的重复计入，并从同一次完整观测中读取命中与未命中数据。
+- 提供八种配色，低额度时也可正常切换；同时支持五种界面语言：简体中文（`zh-CN`）、繁体中文（`zh-TW`）、英语（`en-US`）、日语（`ja-JP`）和韩语（`ko-KR`）。
 - 只读取本机数据，不调用 Web API，不保存账号凭据，不上传文件，也不发送遥测数据。
 
 ## 下载与安装
 
-安装包位于 [v1.1.0 发布页](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.0)。目前的 Windows 和 macOS 文件均未签名，打开前请先核对随附的 SHA-256 文件。
+安装包位于 [v1.1.1 发布页](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.1)。目前的 Windows 和 macOS 文件均未签名，打开前请先核对随附的 SHA-256 文件。
 
 ### Windows
 
 系统需要 Windows PowerShell 5.1 和 WPF。
 
-1. 下载 `CodexUsageWidget-v1.1.0-windows.exe` 及其 `.sha256` 文件。
+1. 下载 `CodexUsageWidget-v1.1.1-windows.exe` 及其 `.sha256` 文件。
 2. 核对校验值后运行 EXE。
 
-如需便携版，可下载 `CodexUsageWidget-v1.1.0-windows.zip`，解压后双击 `Start-CodexUsageWidget.vbs`。通过 VBS 启动不会遗留终端窗口。
+如需便携版，可下载 `CodexUsageWidget-v1.1.1-windows.zip`，解压后双击 `Start-CodexUsageWidget.vbs`。通过 VBS 启动不会遗留终端窗口。
 
 ### macOS
 
 系统需要 macOS 13 或更高版本。Universal 构建同时支持 Apple 芯片和 Intel Mac。
 
-1. 下载 `CodexUsageWidget-v1.1.0-macos-unsigned.zip` 及其 `.sha256` 文件。
+1. 下载 `CodexUsageWidget-v1.1.1-macos-unsigned.zip` 及其 `.sha256` 文件。
 2. 核对校验值，解压 ZIP，再将 `CodexUsageWidget.app` 移入“应用程序”。
 3. 首次启动时，在访达中按住 Control 键点按应用并选择“打开”。如果系统仍然拦截，请前往“系统设置 → 隐私与安全性 → 仍要打开”。
 
 小组件通常会自动找到当前用户的 Codex 数据。如果没有找到包含 `sessions` 的 `.codex` 文件夹，程序会提示你手动选择。
+自动发现的目录会在刷新时重新解析，因此迁移 Codex 数据或修改目录链接后，无需重启小组件。
 
 ## 使用方法
 

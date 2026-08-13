@@ -19,8 +19,8 @@ try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $build -OutputDirectory $testRoot
     Assert-Bootstrap ($LASTEXITCODE -eq 0) 'the Windows build entry failed.'
 
-    $exe = Join-Path $testRoot 'CodexUsageWidget-v1.1.0-windows.exe'
-    $zip = Join-Path $testRoot 'CodexUsageWidget-v1.1.0-windows.zip'
+    $exe = Join-Path $testRoot 'CodexUsageWidget-v1.1.1-windows.exe'
+    $zip = Join-Path $testRoot 'CodexUsageWidget-v1.1.1-windows.zip'
     $exeChecksum = $exe + '.sha256'
     $zipChecksum = $zip + '.sha256'
     foreach ($path in $exe, $zip, $exeChecksum, $zipChecksum) {

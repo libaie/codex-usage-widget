@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1 - 2026-08-13
+
+- Followed automatically discovered Codex data-directory migrations during refresh and tolerated small reset-time drift within one allowance cycle.
+- Fixed cumulative cache totals by grouping migrated and related sessions when task-tree metadata is available.
+- Kept cache-hit and cache-miss values paired to the same complete observation.
+- Kept the selected color theme visible at low allowance levels while preserving a separate warning indicator.
+
 ## 1.1.0 - 2026-08-11
 
 - Added a native macOS 13+ app with Universal `arm64` and `x86_64` builds and the same ring, details, themes, languages, dragging, and edge snapping as Windows.

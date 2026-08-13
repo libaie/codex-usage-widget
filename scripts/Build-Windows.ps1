@@ -21,7 +21,7 @@ function Get-FileHashLower([string]$Path) {
 
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 $version = [IO.File]::ReadAllText((Join-Path $package 'VERSION')).Trim()
-if ($version -cne '1.1.0') { throw 'VERSION must be 1.1.0.' }
+if ($version -cne '1.1.1') { throw 'VERSION must be 1.1.1.' }
 $runtimePaths = @(
     'CodexUsageWidget.ps1', 'Start-CodexUsageWidget.cmd', 'Start-CodexUsageWidget.vbs', 'VERSION',
     'README.md', 'README.zh-CN.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md', 'DESIGN.md',

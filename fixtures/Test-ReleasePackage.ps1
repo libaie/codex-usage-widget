@@ -143,8 +143,8 @@ $commonReadmeRequirements = @(
     'Start-CodexUsageWidget.vbs', 'zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR', 'LICENSE',
     'assets/screenshots/widget-ring.png', 'assets/screenshots/widget-details.png',
     'assets/screenshots/widget-ring-macos.png', 'assets/screenshots/widget-details-macos.png',
-    'CodexUsageWidget-v1.1.0-windows.exe', 'CodexUsageWidget-v1.1.0-windows.zip',
-    'CodexUsageWidget-v1.1.0-macos-unsigned.zip',
+    'CodexUsageWidget-v1.1.1-windows.exe', 'CodexUsageWidget-v1.1.1-windows.zip',
+    'CodexUsageWidget-v1.1.1-macos-unsigned.zip',
     'CONTRIBUTING.md', 'CHANGELOG.md'
 )
 $zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
@@ -204,7 +204,7 @@ if (-not $RuntimeArchive) {
     $documentationRequirements = @{
         'CONTRIBUTING.md' = @('Test-Contract.ps1', 'Build-Windows.ps1', 'xcodebuild', '-Demo', '--demo', 'CODE_SIGNING_ALLOWED=NO')
         'DESIGN.md' = @('local-session-observation', '-ScanWorker', '--scan-worker', 'cache-token-ledger.json')
-        'CHANGELOG.md' = @('## 1.1.0', 'macOS', '-Demo', '--demo')
+        'CHANGELOG.md' = @('## 1.1.1', 'macOS', '-Demo', '--demo')
         '.github\workflows\ci.yml' = @('workflow_dispatch', 'candidate_sha', 'candidate-manifest.json', 'readmeSha256', 'actions/download-artifact@v4', 'artifact-id', 'artifact-digest', 'Test-Bootstrap.ps1')
     }
     foreach ($documentationPath in $documentationRequirements.Keys) {
@@ -214,6 +214,11 @@ if (-not $RuntimeArchive) {
                 Fail-ReleasePackage "missing '$requiredText' in file: $documentationPath"
             }
         }
+    }
+    $releaseTagMismatchMessage = 'Release tag does not match candidate version.'
+    $workflowContent = [IO.File]::ReadAllText((Join-Path $package '.github\workflows\ci.yml'))
+    if ([regex]::Matches($workflowContent, [regex]::Escape($releaseTagMismatchMessage)).Count -ne 1) {
+        Fail-ReleasePackage 'the release workflow must contain exactly one candidate-version tag mismatch error.'
     }
 }
 

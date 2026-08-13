@@ -94,7 +94,7 @@ foreach ($relativePath in 'VERSION', 'fixtures\contract\v1\schema.md', 'fixtures
 }
 
 $version = [IO.File]::ReadAllText((Join-Path $package 'VERSION')).Trim()
-Assert-Contract ($version -ceq '1.1.0') 'VERSION must be exactly 1.1.0.'
+Assert-Contract ($version -ceq '1.1.1') 'VERSION must be exactly 1.1.1.'
 
 $expected = [IO.File]::ReadAllText($expectedPath) | ConvertFrom-Json -ErrorAction Stop
 Assert-Contract ($expected.schemaVersion -eq 1) 'expected-state schemaVersion must be 1.'
