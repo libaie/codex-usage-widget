@@ -855,6 +855,44 @@ enum SessionScanner {
             if pendingTreeIDs.contains(candidate.id) { treeMigrationCandidates.append(candidate) }
             if candidate.modified >= activeCutoff { retain(candidate, in: &activeCandidates) }
         }
+        if !pendingTreeIDs.isEmpty {
+            let archivedURL = root.appendingPathComponent("archived_sessions", isDirectory: true)
+            let archivedValues = try? archivedURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            let archived = archivedValues?.isDirectory == true && archivedValues?.isSymbolicLink != true
+                ? archivedURL.resolvingSymlinksInPath() : nil
+            var migrationIDs = Set(treeMigrationCandidates.map(\.id))
+            if let archived, DataDirectoryResolver.contains(root: root, child: archived),
+               let archivedEnumerator = FileManager.default.enumerator(
+                   at: archived,
+                   includingPropertiesForKeys: keys,
+                   options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                   errorHandler: { _, _ in true }
+               ) {
+                var archivedEntries = 0
+                for case let url as URL in archivedEnumerator {
+                    if archivedEntries >= entryLimit { break }
+                    archivedEntries += 1
+                    guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+                    if values.isSymbolicLink == true {
+                        if values.isDirectory == true { archivedEnumerator.skipDescendants() }
+                        continue
+                    }
+                    if values.isDirectory == true { continue }
+                    guard values.isRegularFile == true, url.pathExtension.lowercased() == "jsonl" else { continue }
+                    let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+                    guard DataDirectoryResolver.contains(root: archived, child: resolved) else { continue }
+                    let id = resolved.deletingPathExtension().lastPathComponent
+                    guard validSessionIdentifier(id), pendingTreeIDs.contains(id), migrationIDs.insert(id).inserted
+                    else { continue }
+                    treeMigrationCandidates.append(Candidate(
+                        url: resolved,
+                        modified: values.contentModificationDate ?? .distantPast,
+                        id: id,
+                        taskID: nil
+                    ))
+                }
+            }
+        }
         metrics.candidateFileCount = candidates.count
         metrics.readFailureCount = enumerationFailures
 

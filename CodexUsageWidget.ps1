@@ -1039,6 +1039,20 @@ function Get-CodexUsageState {
     }
     $migrationFiles = @{}
     foreach ($migrationFile in @($discovery.MigrationFiles)) { $migrationFiles[$migrationFile.BaseName] = $migrationFile.FullName }
+    $archivedTreeMigrationFiles = @{}
+    if ($pendingTreeIds.Count -gt 0) {
+        $archivedSessionsPath = [IO.Path]::Combine($DataDirectory, 'archived_sessions')
+        if ([IO.Directory]::Exists($archivedSessionsPath)) {
+            # ponytail: archived rollouts only supply the bounded first-record TreeId; they never enter live usage or task scans.
+            $archivedDiscovery = Get-BoundedSessionFiles -SessionsPath $archivedSessionsPath -MaxFiles 1 -MaxEntries 10000 `
+                -MigrationIds $pendingTreeIds -NowUtc $scanNow -DeadlineUtc ([datetime]::UtcNow.AddSeconds(3))
+            foreach ($migrationFile in @($archivedDiscovery.MigrationFiles)) {
+                if (-not $migrationFiles.ContainsKey($migrationFile.BaseName)) {
+                    $archivedTreeMigrationFiles[$migrationFile.BaseName] = $migrationFile.FullName
+                }
+            }
+        }
+    }
     if ($null -ne $baselineId -and $pendingBaselineIds.ContainsKey($baselineId) -and
         -not $snapshotIds.ContainsKey($baselineId)) {
         $legacy = $pendingBaselineIds[$baselineId]
@@ -1064,9 +1078,12 @@ function Get-CodexUsageState {
     $treeMigrationReads = 0
     foreach ($id in @($pendingTreeIds.Keys | Sort-Object)) {
         if ($treeMigrationReads -ge 256) { break }
-        if ($snapshotIds.ContainsKey($id) -or -not $migrationFiles.ContainsKey($id)) { continue }
+        if ($snapshotIds.ContainsKey($id)) { continue }
+        $treeMigrationPath = if ($migrationFiles.ContainsKey($id)) { $migrationFiles[$id] }
+            elseif ($archivedTreeMigrationFiles.ContainsKey($id)) { $archivedTreeMigrationFiles[$id] }
+        if ($null -eq $treeMigrationPath) { continue }
         $treeMigrationReads++
-        $treeId = Get-SessionTreeId -Path $migrationFiles[$id]
+        $treeId = Get-SessionTreeId -Path $treeMigrationPath
         if ($null -eq $treeId) { continue }
         $legacy = $pendingTreeIds[$id]
         $sessionTokenSnapshots.Add([pscustomobject]@{

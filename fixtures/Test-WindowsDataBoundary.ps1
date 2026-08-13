@@ -442,6 +442,56 @@ try {
     Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'task-tree deduplication must leave later fixtures with an empty ledger.'
     $script:CacheTokenLedger = $null
 
+    $archivedRoot = Join-Path $testRoot 'archived-tree-migration'
+    $archivedSessions = Join-Path $archivedRoot 'sessions'
+    $archivedHistory = Join-Path $archivedRoot 'archived_sessions'
+    [void][IO.Directory]::CreateDirectory($archivedSessions)
+    [void][IO.Directory]::CreateDirectory($archivedHistory)
+    $archivedTreeId = '66666666-6666-6666-6666-666666666666'
+    $archivedChildId = '77777777-7777-7777-7777-777777777777'
+    $archivedSessionName = 'rollout-' + $archivedChildId
+    [IO.File]::WriteAllText((Join-Path $archivedSessions 'current.jsonl'), $nullRawUsage, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines((Join-Path $archivedHistory ($archivedSessionName + '.jsonl')), @(
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' +
+            $archivedChildId + '","session_id":"' + $archivedTreeId + '","parent_thread_id":"' + $archivedTreeId + '"}}'),
+        ('x' * 70000),
+        $treeForkFinal
+    ), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $archivedRoot 'session_index.jsonl'),
+        ('{"id":"' + $archivedChildId + '","thread_name":"archived must stay hidden"}'),
+        [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($ledgerPath,
+        ([pscustomobject]@{ SchemaVersion = 3; Sessions = @([pscustomobject]@{
+                    Id = $archivedSessionName
+                    CacheHitTokens = 900
+                    CacheMissTokens = 100
+                    CacheHitBaselineTokens = $null
+                    CacheMissBaselineTokens = $null
+                    TreeId = $null
+                }) } | ConvertTo-Json -Depth 4 -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $archivedSnapshot = Get-CodexUsageSnapshot -DataDirectory $archivedRoot -ReadOnly
+    $archivedMigration = @($archivedSnapshot.State.SessionTokenSnapshots | Where-Object Id -eq $archivedSessionName)
+    Assert-Boundary ($archivedMigration.Count -eq 1 -and $archivedMigration[0].TreeId -ceq $archivedTreeId -and
+        $null -eq $archivedMigration[0].CacheHitBaselineTokens -and $null -eq $archivedMigration[0].CacheMissBaselineTokens) `
+        'a pending ledger session must recover only its task-tree id from archived_sessions, never a baseline.'
+    Assert-Boundary ($archivedSnapshot.State.LimitWindows[0].RemainingPercent -eq 55 -and
+        $archivedSnapshot.Metrics.CandidateLineCount -eq 1 -and $archivedSnapshot.Metrics.UsageEventCount -eq 1 -and
+        @($archivedSnapshot.State.ActiveTasks).Count -eq 0 -and
+        $archivedMigration[0].CacheHitTokens -eq 900 -and $archivedMigration[0].CacheMissTokens -eq 100) `
+        'archived sessions may supply migration metadata only, never usage events, active tasks, or replacement counters.'
+    $archivedSnapshot = Apply-UsageSnapshotPersistence $archivedSnapshot
+    $archivedLedger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json -ErrorAction Stop
+    $archivedStored = @($archivedLedger.Sessions | Where-Object Id -eq $archivedSessionName)[0]
+    Assert-Boundary ($archivedSnapshot.State.TokenDetails.CacheHitTokens -eq 900 -and
+        $archivedSnapshot.State.TokenDetails.CacheMissTokens -eq 100 -and
+        $archivedStored.TreeId -ceq $archivedTreeId -and $null -eq $archivedStored.CacheHitBaselineTokens -and
+        $null -eq $archivedStored.CacheMissBaselineTokens) `
+        'archived tail events must not change cumulative counters or resolve a missing live-session baseline.'
+    Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'archived task-tree migration must leave later fixtures with an empty ledger.'
+    $script:CacheTokenLedger = $null
+
     $filteredRoot = Join-Path $testRoot 'filtered-session-tokens'
     $filteredSessions = Join-Path $filteredRoot 'sessions'
     [void][IO.Directory]::CreateDirectory($filteredSessions)

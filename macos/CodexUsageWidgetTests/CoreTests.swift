@@ -375,6 +375,88 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(totals, CacheTotals(hitTokens: 1_200, missTokens: 300))
     }
 
+    func testArchivedSessionOnlyMigratesPendingTreeMetadata() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let archived = root.appendingPathComponent("archived_sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: archived, withIntermediateDirectories: false)
+        let now = Date()
+        let currentID = "11111111-1111-1111-1111-111111111111"
+        let treeID = "22222222-2222-2222-2222-222222222222"
+        let archivedID = "33333333-3333-3333-3333-333333333333"
+        let archivedName = "rollout-\(archivedID)"
+        var currentData = try sessionMeta(id: currentID, sessionID: currentID)
+        currentData.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(
+            currentData,
+            named: "rollout-\(currentID).jsonl",
+            to: sessions,
+            modified: now
+        )
+        var archivedData = try sessionMeta(id: archivedID, sessionID: treeID, parentThreadID: treeID)
+        archivedData.append(tokenEvent(totalInput: 9_000, cachedInput: 8_000, lastInput: 9_000, lastCached: 8_000))
+        try writeSession(archivedData, named: "\(archivedName).jsonl", to: archived, modified: now)
+        try Data("""
+        {"id":"\(currentID)","thread_name":"Current task"}
+        {"id":"\(archivedID)","thread_name":"Archived task"}
+        """.utf8).write(to: root.appendingPathComponent("session_index.jsonl"))
+        let ledger = CacheLedger(
+            schemaVersion: 2,
+            sessions: [archivedName: CacheRecord(hitTokens: "8000", missTokens: "1000")]
+        )
+
+        let result = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+        let migrated = result.sessions.first(where: { $0.id == archivedName })
+
+        XCTAssertEqual(migrated?.treeID, treeID)
+        XCTAssertEqual(migrated?.cacheHitTokens, "8000")
+        XCTAssertEqual(result.state.cacheHitTokens, "80")
+        XCTAssertEqual(result.state.cacheMissTokens, "20")
+        XCTAssertEqual(result.state.tasks.map(\.name), ["Current task"])
+        XCTAssertEqual(result.state.metrics.candidateFileCount, 1)
+        XCTAssertEqual(result.state.metrics.readFailureCount, 0)
+    }
+
+    func testArchivedSessionSymlinkIsNeverFollowedForTreeMigration() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let linkedArchive = root.appendingPathComponent("linked-archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: linkedArchive, withIntermediateDirectories: false)
+        let currentID = "11111111-1111-1111-1111-111111111111"
+        let linkedID = "22222222-2222-2222-2222-222222222222"
+        let linkedName = "rollout-\(linkedID)"
+        var currentData = try sessionMeta(id: currentID, sessionID: currentID)
+        currentData.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(
+            currentData,
+            named: "rollout-\(currentID).jsonl",
+            to: sessions,
+            modified: Date()
+        )
+        try writeSession(
+            try sessionMeta(id: linkedID, sessionID: currentID, parentThreadID: currentID),
+            named: "\(linkedName).jsonl",
+            to: linkedArchive,
+            modified: Date()
+        )
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("archived_sessions"),
+            withDestinationURL: linkedArchive
+        )
+        let ledger = CacheLedger(
+            schemaVersion: 2,
+            sessions: [linkedName: CacheRecord(hitTokens: "80", missTokens: "20")]
+        )
+
+        let result = try SessionScanner.scan(dataDirectory: root, cacheLedger: ledger)
+
+        XCTAssertFalse(result.sessions.contains(where: { $0.id == linkedName }))
+        XCTAssertEqual(result.state.cacheHitTokens, "80")
+        XCTAssertEqual(result.state.metrics.candidateFileCount, 1)
+    }
+
     func testTreeMigrationAddsTwoHundredFiftySixHistoricalRowsBeyondCurrentScan() throws {
         let root = try temporaryDirectory()
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
