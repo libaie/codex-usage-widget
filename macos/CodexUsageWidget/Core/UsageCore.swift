@@ -40,6 +40,7 @@ struct SessionTokenSnapshot: Equatable {
     var cacheHitBaselineTokens: String? = nil
     var cacheMissBaselineTokens: String? = nil
     var cacheBaselineAttempts: Int64 = 0
+    var treeID: String? = nil
 
     func jsonObject() -> [String: Any] {
         [
@@ -48,7 +49,8 @@ struct SessionTokenSnapshot: Equatable {
             "cacheMissTokens": jsonValue(cacheMissTokens),
             "cacheHitBaselineTokens": jsonValue(cacheHitBaselineTokens),
             "cacheMissBaselineTokens": jsonValue(cacheMissBaselineTokens),
-            "cacheBaselineAttempts": cacheBaselineAttempts
+            "cacheBaselineAttempts": cacheBaselineAttempts,
+            "treeID": jsonValue(treeID)
         ]
     }
 }
@@ -543,10 +545,12 @@ struct CacheRecord: Codable, StateValidating {
     var hitBaselineTokens: String? = nil
     var missBaselineTokens: String? = nil
     var baselineAttempts: Int64? = nil
+    var treeID: String? = nil
     var isValid: Bool {
         guard validToken(hitTokens), validToken(missTokens),
               (hitBaselineTokens == nil) == (missBaselineTokens == nil),
-              (0...CacheLedger.maximumBaselineAttempts).contains(baselineAttempts ?? 0)
+              (0...CacheLedger.maximumBaselineAttempts).contains(baselineAttempts ?? 0),
+              treeID == nil || validTreeIdentifier(treeID!)
         else { return false }
         guard let hitBaselineTokens, let missBaselineTokens else { return true }
         return validToken(hitBaselineTokens) && validToken(missBaselineTokens) &&
@@ -564,15 +568,15 @@ struct CacheLedger: Codable, StateValidating {
     var sessions: [String: CacheRecord]
 
     static let maximumBaselineAttempts: Int64 = 10_000
-    static let defaultValue = CacheLedger(schemaVersion: 2, sessions: [:])
+    static let defaultValue = CacheLedger(schemaVersion: 3, sessions: [:])
     var isValid: Bool {
-        (schemaVersion == 1 || schemaVersion == 2) && sessions.count <= 10_000 && sessions.allSatisfy {
+        (1...3).contains(schemaVersion) && sessions.count <= 10_000 && sessions.allSatisfy {
             validSessionIdentifier($0.key) && $0.value.isValid
         }
     }
 
     mutating func merge(_ snapshots: [SessionTokenSnapshot]) throws -> CacheTotals? {
-        guard snapshots.count <= 60 else { throw CoreError.invalidData }
+        guard snapshots.count <= 287 else { throw CoreError.invalidData }
         var updated = sessions
         for snapshot in snapshots {
             guard validSessionIdentifier(snapshot.id) else { throw CoreError.invalidData }
@@ -589,7 +593,8 @@ struct CacheLedger: Codable, StateValidating {
                 return value
             }
             guard (baselineHit == nil) == (baselineMiss == nil),
-                  (0...Self.maximumBaselineAttempts).contains(snapshot.cacheBaselineAttempts) else {
+                  (0...Self.maximumBaselineAttempts).contains(snapshot.cacheBaselineAttempts),
+                  snapshot.treeID == nil || validTreeIdentifier(snapshot.treeID!) else {
                 throw CoreError.invalidData
             }
             let previous = updated[snapshot.id]
@@ -599,30 +604,45 @@ struct CacheLedger: Codable, StateValidating {
             let previousBaselineMiss = previous.flatMap { $0.missBaselineTokens }.flatMap { Int64($0) }
             if let previousBaselineHit, let previousBaselineMiss, let baselineHit, let baselineMiss,
                (previousBaselineHit != baselineHit || previousBaselineMiss != baselineMiss) { continue }
+            if let previousTreeID = previous?.treeID, let treeID = snapshot.treeID,
+               previousTreeID != treeID { continue }
             updated[snapshot.id] = CacheRecord(
                 hitTokens: String(max(previousHit, hit)),
                 missTokens: String(max(previousMiss, miss)),
                 hitBaselineTokens: (previousBaselineHit ?? baselineHit).map { String($0) },
                 missBaselineTokens: (previousBaselineMiss ?? baselineMiss).map { String($0) },
-                baselineAttempts: max(previous?.baselineAttempts ?? 0, snapshot.cacheBaselineAttempts)
+                baselineAttempts: max(previous?.baselineAttempts ?? 0, snapshot.cacheBaselineAttempts),
+                treeID: previous?.treeID ?? snapshot.treeID
             )
         }
-        let candidate = CacheLedger(schemaVersion: 2, sessions: updated)
+        let candidate = CacheLedger(schemaVersion: 3, sessions: updated)
         guard candidate.isValid else { throw CoreError.invalidData }
         self = candidate
         return totals()
     }
 
     func totals() -> CacheTotals? {
-        var hit: Int64 = 0
-        var miss: Int64 = 0
-        for record in sessions.values {
-            guard let nextHit = Int64(record.hitTokens), let nextMiss = Int64(record.missTokens) else { return nil }
+        var contributions: [String: (hit: Int64, miss: Int64)] = [:]
+        for (id, record) in sessions {
+            guard let rawHit = Int64(record.hitTokens), let rawMiss = Int64(record.missTokens) else { return nil }
             let hitBaseline = record.hitBaselineTokens.flatMap { Int64($0) } ?? 0
             let missBaseline = record.missBaselineTokens.flatMap { Int64($0) } ?? 0
-            guard hitBaseline <= nextHit, missBaseline <= nextMiss else { return nil }
-            let hitResult = hit.addingReportingOverflow(nextHit - hitBaseline)
-            let missResult = miss.addingReportingOverflow(nextMiss - missBaseline)
+            guard hitBaseline <= rawHit, missBaseline <= rawMiss else { return nil }
+            let candidate = record.treeID == nil
+                ? (hit: rawHit - hitBaseline, miss: rawMiss - missBaseline)
+                : (hit: rawHit, miss: rawMiss)
+            let key = record.treeID ?? "session:\(id)"
+            if let previous = contributions[key] {
+                contributions[key] = (max(previous.hit, candidate.hit), max(previous.miss, candidate.miss))
+            } else {
+                contributions[key] = candidate
+            }
+        }
+        var hit: Int64 = 0
+        var miss: Int64 = 0
+        for contribution in contributions.values {
+            let hitResult = hit.addingReportingOverflow(contribution.hit)
+            let missResult = miss.addingReportingOverflow(contribution.miss)
             guard !hitResult.overflow, !missResult.overflow else { return nil }
             hit = hitResult.partialValue
             miss = missResult.partialValue
@@ -774,10 +794,12 @@ enum SessionScanner {
         var enumerationFailures = 0
         var inspectedEntries = 0
         let pendingMigrationIDs = Set(cacheLedger.sessions.keys.filter {
-            cacheLedger.sessions[$0]?.hitBaselineTokens == nil &&
+            cacheLedger.sessions[$0]?.treeID == nil && cacheLedger.sessions[$0]?.hitBaselineTokens == nil &&
                 (cacheLedger.sessions[$0]?.baselineAttempts ?? 0) < CacheLedger.maximumBaselineAttempts
         })
+        let pendingTreeIDs = Set(cacheLedger.sessions.keys.filter { cacheLedger.sessions[$0]?.treeID == nil })
         var migrationCandidate: Candidate?
+        var treeMigrationCandidates: [Candidate] = []
         let entryLimit = min(maximumEntries, 10_000)
         let activeCutoff = now.addingTimeInterval(-30 * 60)
         func retain(_ candidate: Candidate, in list: inout [Candidate]) {
@@ -830,6 +852,7 @@ enum SessionScanner {
                     migrationCandidate = candidate
                 }
             }
+            if pendingTreeIDs.contains(candidate.id) { treeMigrationCandidates.append(candidate) }
             if candidate.modified >= activeCutoff { retain(candidate, in: &activeCandidates) }
         }
         metrics.candidateFileCount = candidates.count
@@ -848,13 +871,18 @@ enum SessionScanner {
                 if readPaths.insert(candidate.url.path).inserted { readCandidates.append(candidate) }
             }
         }
+        let treeOnlyCandidates = treeMigrationCandidates
+            .filter { !readPaths.contains($0.url.path) }
+            .sorted { $0.id < $1.id }
+            .prefix(256)
         let usagePaths = Set(candidates.map { $0.url.path })
         let activePaths = Set(activeCandidates.map { $0.url.path })
         var ledgerPaths = usagePaths
         if let migrationCandidate { ledgerPaths.insert(migrationCandidate.url.path) }
         let baselineTargetID = migrationCandidate?.id ?? candidates
             .filter {
-                cacheLedger.sessions[$0.id]?.hitBaselineTokens == nil &&
+                cacheLedger.sessions[$0.id]?.treeID == nil &&
+                    cacheLedger.sessions[$0.id]?.hitBaselineTokens == nil &&
                     (cacheLedger.sessions[$0.id]?.baselineAttempts ?? 0) < CacheLedger.maximumBaselineAttempts
             }
             .min {
@@ -866,6 +894,8 @@ enum SessionScanner {
         var sessionSnapshots: [SessionTokenSnapshot] = []
         var tasks: [UsageTaskSnapshot] = []
         for candidate in readCandidates {
+            let knownRecord = cacheLedger.sessions[candidate.id]
+            let treeID = knownRecord?.treeID ?? (try? sessionTreeIdentifier(at: candidate.url))
             var fileState: NormalizedUsageState?
             do {
                 var data = try tail(of: candidate.url, maximumBytes: 256 * 1024)
@@ -879,7 +909,7 @@ enum SessionScanner {
                     combined.append(0x0a)
                 }
                 if ledgerPaths.contains(candidate.url.path) {
-                    let known = cacheLedger.sessions[candidate.id]
+                    let known = knownRecord
                     let observedHit = fileState?.cacheHitTokens.flatMap({ Int64($0) })
                     let observedMiss = fileState?.cacheMissTokens.flatMap({ Int64($0) })
                     if known != nil || (observedHit != nil && observedMiss != nil) {
@@ -902,7 +932,8 @@ enum SessionScanner {
                             cacheMissTokens: String(rawMiss),
                             cacheHitBaselineTokens: baseline.map { String($0.hit) },
                             cacheMissBaselineTokens: baseline.map { String($0.miss) },
-                            cacheBaselineAttempts: nextAttempts
+                            cacheBaselineAttempts: nextAttempts,
+                            treeID: treeID
                         ))
                     }
                 }
@@ -916,7 +947,8 @@ enum SessionScanner {
                         cacheHitTokens: known.hitTokens,
                         cacheMissTokens: known.missTokens,
                         cacheBaselineAttempts: attempts < CacheLedger.maximumBaselineAttempts
-                            ? attempts + 1 : attempts
+                            ? attempts + 1 : attempts,
+                        treeID: treeID
                     ))
                 }
                 if candidate.url.path != migrationOnlyPath { metrics.readFailureCount += 1 }
@@ -941,6 +973,19 @@ enum SessionScanner {
                     reasoningOutputPercent: fileState?.reasoningOutputPercent
                 ))
             }
+        }
+        for candidate in treeOnlyCandidates {
+            guard let known = cacheLedger.sessions[candidate.id],
+                  let treeID = try? sessionTreeIdentifier(at: candidate.url) else { continue }
+            sessionSnapshots.append(SessionTokenSnapshot(
+                id: candidate.id,
+                cacheHitTokens: known.hitTokens,
+                cacheMissTokens: known.missTokens,
+                cacheHitBaselineTokens: known.hitBaselineTokens,
+                cacheMissBaselineTokens: known.missBaselineTokens,
+                cacheBaselineAttempts: known.baselineAttempts ?? 0,
+                treeID: treeID
+            ))
         }
         var state = UsageContract.evaluate(data: combined, now: now, metrics: metrics)
         state.tasks = tasks.sorted {
@@ -1009,6 +1054,27 @@ enum SessionScanner {
             data.removeSubrange(...newline)
         }
         return data
+    }
+
+    private static func sessionTreeIdentifier(at url: URL) throws -> String? {
+        guard let fileID = trailingUUID(from: url.deletingPathExtension().lastPathComponent) else { return nil }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: 64 * 1024) ?? Data()
+        let line = data.firstIndex(of: 0x0a).map { Data(data[..<$0]) } ?? data
+        guard
+            let decoded = try? JSONSerialization.jsonObject(with: line),
+            let event = decoded as? [String: Any],
+            event["type"] as? String == "session_meta",
+            let payload = event["payload"] as? [String: Any],
+            let rawID = payload["id"] as? String,
+            UUID(uuidString: rawID)?.uuidString.lowercased() == fileID
+        else { return nil }
+        guard let rawTreeID = payload["session_id"] else {
+            return payload["parent_thread_id"] == nil && payload["forked_from_id"] == nil ? fileID : nil
+        }
+        guard let text = rawTreeID as? String, let treeID = UUID(uuidString: text) else { return nil }
+        return treeID.uuidString.lowercased()
     }
 
     private static func forkCacheBaseline(
@@ -1103,6 +1169,10 @@ enum SessionScanner {
     }
 }
 
+private func validTreeIdentifier(_ text: String) -> Bool {
+    UUID(uuidString: text)?.uuidString.lowercased() == text
+}
+
 private func validPercentage(_ text: String) -> Bool {
     let parts = text.split(separator: ".", omittingEmptySubsequences: false)
     guard parts.count == 2, !parts[0].isEmpty, parts[1].count == 1,
@@ -1125,7 +1195,7 @@ private func jsonInt64(_ raw: Any?) -> Int64? {
 
 private extension UsageScanResult {
     func conservativeJSONByteUpperBound() throws -> Int {
-        guard sessions.count <= 31, state.tasks.count <= 30,
+        guard sessions.count <= 287, state.tasks.count <= 30,
               state.metrics.validEventCount >= 0, state.metrics.validEventCount <= 100_000,
               state.metrics.malformedLineCount >= 0, state.metrics.malformedLineCount <= 100_000,
               state.metrics.unknownEventCount >= 0, state.metrics.unknownEventCount <= 100_000,
@@ -1171,7 +1241,8 @@ private extension UsageScanResult {
                    session.cacheHitBaselineTokens == nil || validToken(session.cacheHitBaselineTokens!),
                    session.cacheMissBaselineTokens == nil || validToken(session.cacheMissBaselineTokens!),
                    (session.cacheHitBaselineTokens == nil) == (session.cacheMissBaselineTokens == nil),
-                   (0...CacheLedger.maximumBaselineAttempts).contains(session.cacheBaselineAttempts)
+                   (0...CacheLedger.maximumBaselineAttempts).contains(session.cacheBaselineAttempts),
+                   session.treeID == nil || validTreeIdentifier(session.treeID!)
             else { throw CoreError.invalidData }
             if let baselineHit = session.cacheHitBaselineTokens.flatMap({ Int64($0) }),
                let baselineMiss = session.cacheMissBaselineTokens.flatMap({ Int64($0) }) {
@@ -1184,6 +1255,7 @@ private extension UsageScanResult {
             try add(session.cacheMissTokens, maximumUTF8Bytes: 19)
             try add(session.cacheHitBaselineTokens, maximumUTF8Bytes: 19)
             try add(session.cacheMissBaselineTokens, maximumUTF8Bytes: 19)
+            try add(session.treeID, maximumUTF8Bytes: 36)
         }
         guard state.tasks == state.tasks.sorted(by: {
             if $0.observedAt != $1.observedAt { return $0.observedAt > $1.observedAt }
@@ -1369,7 +1441,7 @@ enum ScanSupervisor {
             jsonInt64(object["schemaVersion"]) == 1,
             object["generation"] as? String == generation,
             let stateObject = object["state"] as? [String: Any],
-            let sessionObjects = object["sessions"] as? [[String: Any]], sessionObjects.count <= 31
+            let sessionObjects = object["sessions"] as? [[String: Any]], sessionObjects.count <= 287
         else { throw CoreError.invalidData }
         var state = try normalizedState(from: stateObject)
         let sessions = try sessionObjects.map { try sessionSnapshot(from: $0) }
@@ -1400,7 +1472,7 @@ enum ScanSupervisor {
     private static func sessionSnapshot(from object: [String: Any]) throws -> SessionTokenSnapshot {
         guard Set(object.keys) == Set([
             "id", "cacheHitTokens", "cacheMissTokens", "cacheHitBaselineTokens", "cacheMissBaselineTokens",
-            "cacheBaselineAttempts"
+            "cacheBaselineAttempts", "treeID"
         ]),
               let id = object["id"] as? String, validSessionIdentifier(id),
               let attempts = jsonInt64(object["cacheBaselineAttempts"]),
@@ -1412,13 +1484,18 @@ enum ScanSupervisor {
             guard let text = raw as? String, validToken(text) else { throw CoreError.invalidData }
             return text
         }
+        let treeID: String?
+        if object["treeID"] is NSNull { treeID = nil }
+        else if let value = object["treeID"] as? String, validTreeIdentifier(value) { treeID = value }
+        else { throw CoreError.invalidData }
         return SessionTokenSnapshot(
             id: id,
             cacheHitTokens: try token("cacheHitTokens"),
             cacheMissTokens: try token("cacheMissTokens"),
             cacheHitBaselineTokens: try token("cacheHitBaselineTokens"),
             cacheMissBaselineTokens: try token("cacheMissBaselineTokens"),
-            cacheBaselineAttempts: attempts
+            cacheBaselineAttempts: attempts,
+            treeID: treeID
         )
     }
 

@@ -62,6 +62,23 @@ final class CoreTests: XCTestCase {
         """.utf8)
     }
 
+    private func sessionMeta(
+        id: String,
+        sessionID: String,
+        parentThreadID: String? = nil,
+        forkedFromID: String? = nil
+    ) throws -> Data {
+        var payload: [String: Any] = ["id": id, "session_id": sessionID]
+        if let parentThreadID { payload["parent_thread_id"] = parentThreadID }
+        if let forkedFromID { payload["forked_from_id"] = forkedFromID }
+        var data = try JSONSerialization.data(
+            withJSONObject: ["type": "session_meta", "payload": payload],
+            options: [.sortedKeys]
+        )
+        data.append(0x0a)
+        return data
+    }
+
     func testReviewedContractFixtures() throws {
         let document = try JSONSerialization.jsonObject(
             with: Data(contentsOf: contractRoot.appendingPathComponent("expected-state.json"))) as! [String: Any]
@@ -206,6 +223,198 @@ final class CoreTests: XCTestCase {
         ).isValid)
     }
 
+    func testLedgerCountsClonedRolloutsOncePerTaskTreeAndAddsIndependentRoot() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let rootID = "11111111-1111-1111-1111-111111111111"
+        let childID = "22222222-2222-2222-2222-222222222222"
+        let forkID = "33333333-3333-3333-3333-333333333333"
+        let independentID = "44444444-4444-4444-4444-444444444444"
+        var clonedUsage = tokenEvent(totalInput: 1_000, cachedInput: 800, lastInput: 100, lastCached: 80)
+        clonedUsage.append(tokenEvent(totalInput: 1_500, cachedInput: 1_200, lastInput: 500, lastCached: 400))
+        func write(_ meta: Data, id: String, usage: Data) throws {
+            var data = meta
+            data.append(usage)
+            try writeSession(data, named: "rollout-\(id).jsonl", to: sessions, modified: Date())
+        }
+        try write(try sessionMeta(id: rootID, sessionID: rootID), id: rootID, usage: clonedUsage)
+        try write(
+            try sessionMeta(id: childID, sessionID: rootID, parentThreadID: rootID),
+            id: childID,
+            usage: clonedUsage
+        )
+        try write(
+            try sessionMeta(id: forkID, sessionID: rootID, parentThreadID: rootID, forkedFromID: rootID),
+            id: forkID,
+            usage: clonedUsage
+        )
+        try write(
+            try sessionMeta(id: independentID, sessionID: independentID),
+            id: independentID,
+            usage: tokenEvent(totalInput: 500, cachedInput: 400, lastInput: 500, lastCached: 400)
+        )
+
+        var ledger = CacheLedger.defaultValue
+        let totals = try XCTUnwrap(ledger.merge(SessionScanner.scan(dataDirectory: root).sessions))
+
+        XCTAssertEqual(totals, CacheTotals(hitTokens: 1_600, missTokens: 400))
+    }
+
+    func testTreeTotalsUseIndependentRawHighWaterMarks() {
+        let treeID = "11111111-1111-1111-1111-111111111111"
+        let ledger = CacheLedger(schemaVersion: 3, sessions: [
+            "a": CacheRecord(
+                hitTokens: "100", missTokens: "20",
+                hitBaselineTokens: "90", missBaselineTokens: "10", treeID: treeID
+            ),
+            "b": CacheRecord(
+                hitTokens: "90", missTokens: "30",
+                hitBaselineTokens: "80", missBaselineTokens: "20", treeID: treeID
+            )
+        ])
+
+        XCTAssertEqual(ledger.totals(), CacheTotals(hitTokens: 100, missTokens: 30))
+    }
+
+    func testTreeMetadataRejectsMismatchedIdentityAndUnsafeChildFallback() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let rootID = "11111111-1111-1111-1111-111111111111"
+        let childID = "22222222-2222-2222-2222-222222222222"
+        let mismatchedID = "33333333-3333-3333-3333-333333333333"
+        let invalidID = "44444444-4444-4444-4444-444444444444"
+        var rootMeta = try JSONSerialization.data(
+            withJSONObject: ["type": "session_meta", "payload": ["id": rootID]], options: [.sortedKeys]
+        )
+        rootMeta.append(0x0a)
+        rootMeta.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(rootMeta, named: "rollout-\(rootID).jsonl", to: sessions, modified: Date())
+        let childPayload: [String: Any] = ["id": childID, "parent_thread_id": rootID]
+        var childMeta = try JSONSerialization.data(
+            withJSONObject: ["type": "session_meta", "payload": childPayload], options: [.sortedKeys]
+        )
+        childMeta.append(0x0a)
+        childMeta.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(childMeta, named: "rollout-\(childID).jsonl", to: sessions, modified: Date())
+        let mismatchedPayload: [String: Any] = ["id": rootID, "session_id": rootID]
+        var mismatchedMeta = try JSONSerialization.data(
+            withJSONObject: ["type": "session_meta", "payload": mismatchedPayload], options: [.sortedKeys]
+        )
+        mismatchedMeta.append(0x0a)
+        mismatchedMeta.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(mismatchedMeta, named: "rollout-\(mismatchedID).jsonl", to: sessions, modified: Date())
+        var invalidMeta = try JSONSerialization.data(
+            withJSONObject: ["type": "session_meta", "payload": ["id": invalidID, "session_id": "invalid"]],
+            options: [.sortedKeys]
+        )
+        invalidMeta.append(0x0a)
+        invalidMeta.append(tokenEvent(totalInput: 100, cachedInput: 80, lastInput: 100, lastCached: 80))
+        try writeSession(invalidMeta, named: "rollout-\(invalidID).jsonl", to: sessions, modified: Date())
+
+        let snapshots = try SessionScanner.scan(dataDirectory: root).sessions
+
+        XCTAssertEqual(snapshots.first(where: { $0.id.hasSuffix(rootID) })?.treeID, rootID)
+        XCTAssertNil(snapshots.first(where: { $0.id.hasSuffix(childID) })?.treeID)
+        XCTAssertNil(snapshots.first(where: { $0.id.hasSuffix(mismatchedID) })?.treeID)
+        XCTAssertNil(snapshots.first(where: { $0.id.hasSuffix(invalidID) })?.treeID)
+    }
+
+    func testV2LedgerRemainsFullyCountedUntilTreeMetadataIsObserved() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("cache-token-ledger.json")
+        try Data("""
+        {"schemaVersion":2,"sessions":{"legacy-a":{"hitTokens":"100","missTokens":"20"},"legacy-b":{"hitTokens":"200","missTokens":"30"}}}
+        """.utf8).write(to: url)
+
+        let loaded = LocalStateStore.load(CacheLedger.self, from: url, defaultValue: .defaultValue)
+
+        XCTAssertEqual(loaded.condition, .valid)
+        XCTAssertEqual(loaded.value.totals(), CacheTotals(hitTokens: 300, missTokens: 50))
+    }
+
+    func testScannerMigratesTreeMetadataForV2LedgerRowsOutsideNewestThirty() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date()
+        let rootID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let childID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        let rootName = "rollout-\(rootID)"
+        let childName = "rollout-\(childID)"
+        try writeSession(
+            try sessionMeta(id: rootID, sessionID: rootID),
+            named: "\(rootName).jsonl",
+            to: sessions,
+            modified: now.addingTimeInterval(-3_600)
+        )
+        try writeSession(
+            try sessionMeta(id: childID, sessionID: rootID, parentThreadID: rootID),
+            named: "\(childName).jsonl",
+            to: sessions,
+            modified: now.addingTimeInterval(-3_600)
+        )
+        for index in 0..<30 {
+            let id = String(format: "00000000-0000-0000-0000-%012d", index)
+            try writeSession(
+                try sessionMeta(id: id, sessionID: id),
+                named: "rollout-\(id).jsonl",
+                to: sessions,
+                modified: now.addingTimeInterval(TimeInterval(index))
+            )
+        }
+        var ledger = CacheLedger(schemaVersion: 2, sessions: [
+            rootName: CacheRecord(hitTokens: "1200", missTokens: "300"),
+            childName: CacheRecord(hitTokens: "1200", missTokens: "300")
+        ])
+
+        let scanned = try SessionScanner.scan(dataDirectory: root, now: now, cacheLedger: ledger)
+        let totals = try XCTUnwrap(ledger.merge(scanned.sessions))
+
+        XCTAssertEqual(totals, CacheTotals(hitTokens: 1_200, missTokens: 300))
+    }
+
+    func testTreeMigrationAddsTwoHundredFiftySixHistoricalRowsBeyondCurrentScan() throws {
+        let root = try temporaryDirectory()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: false)
+        let now = Date()
+        var records: [String: CacheRecord] = [:]
+        for index in 0..<330 {
+            let id = String(format: "00000000-0000-0000-0000-%012d", index)
+            let name = "rollout-\(id)"
+            var data = try sessionMeta(id: id, sessionID: id)
+            if index >= 300 {
+                data.append(tokenEvent(totalInput: 2, cachedInput: 1, lastInput: 2, lastCached: 1))
+            }
+            try writeSession(
+                data,
+                named: "\(name).jsonl",
+                to: sessions,
+                modified: now.addingTimeInterval(TimeInterval(index))
+            )
+            records[name] = CacheRecord(hitTokens: "1", missTokens: "1")
+        }
+        var ledger = CacheLedger(schemaVersion: 2, sessions: records)
+
+        let first = try SessionScanner.scan(dataDirectory: root, now: now.addingTimeInterval(330), cacheLedger: ledger)
+        XCTAssertEqual(first.sessions.count, 287)
+        let generation = "0123456789abcdef0123456789abcdef"
+        XCTAssertEqual(
+            try ScanSupervisor.decodeEnvelope(
+                ScanWorker.encodePayload(first, generation: generation), generation: generation
+            ).sessions.count,
+            287
+        )
+        _ = try ledger.merge(first.sessions)
+        let pending = Set(ledger.sessions.compactMap { $0.value.treeID == nil ? $0.key : nil })
+        let second = try SessionScanner.scan(dataDirectory: root, now: now.addingTimeInterval(330), cacheLedger: ledger)
+
+        XCTAssertEqual(pending.count, 43)
+        XCTAssertEqual(second.sessions.filter { pending.contains($0.id) && $0.treeID != nil }.count, 43)
+    }
+
     func testForkHistoryPrefixIsSeparatedFromRawTaskAndLedgerTotals() throws {
         let root = try temporaryDirectory()
         let sessions = root.appendingPathComponent("sessions", isDirectory: true)
@@ -339,7 +548,7 @@ final class CoreTests: XCTestCase {
         )
 
         XCTAssertEqual(try ledger.merge([snapshot]), CacheTotals(hitTokens: 530, missTokens: 145))
-        XCTAssertEqual(ledger.schemaVersion, 2)
+        XCTAssertEqual(ledger.schemaVersion, 3)
         XCTAssertTrue(try LocalStateStore.save(ledger, to: url, previous: .valid))
         var reloaded = LocalStateStore.load(CacheLedger.self, from: url, defaultValue: .defaultValue).value
         XCTAssertEqual(try reloaded.merge([snapshot]), CacheTotals(hitTokens: 530, missTokens: 145))
@@ -522,6 +731,12 @@ final class CoreTests: XCTestCase {
         )) as! [String: Any]
         var objects = envelope["sessions"] as! [[String: Any]]
         objects[0]["cacheBaselineAttempts"] = maximum + 1
+        envelope["sessions"] = objects
+        XCTAssertThrowsError(try ScanSupervisor.decodeEnvelope(
+            JSONSerialization.data(withJSONObject: envelope), generation: generation
+        ))
+        objects[0]["cacheBaselineAttempts"] = 0
+        objects[0]["treeID"] = "not-a-canonical-uuid"
         envelope["sessions"] = objects
         XCTAssertThrowsError(try ScanSupervisor.decodeEnvelope(
             JSONSerialization.data(withJSONObject: envelope), generation: generation

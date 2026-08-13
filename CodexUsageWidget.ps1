@@ -523,6 +523,57 @@ function Get-SessionCacheTokenBaseline {
     return $null
 }
 
+function Get-SessionTreeId {
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $fileId = [IO.Path]::GetFileNameWithoutExtension($Path)
+        if ($fileId -notmatch '([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$') { return $null }
+        $fileSessionId = ([guid]$Matches[1]).ToString()
+        $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+        try {
+            $count = [int][math]::Min(65536L, $stream.Length)
+            if ($count -eq 0) { return $null }
+            $bytes = [byte[]]::new($count)
+            $offset = 0
+            while ($offset -lt $count) {
+                $read = $stream.Read($bytes, $offset, $count - $offset)
+                if ($read -le 0) { break }
+                $offset += $read
+            }
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $offset)
+        }
+        finally { $stream.Dispose() }
+
+        foreach ($line in $text -split "`n") {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try { $event = $line.TrimEnd("`r") | ConvertFrom-Json -ErrorAction Stop }
+            catch { return $null }
+            $eventType = $event.PSObject.Properties['type']
+            if ($null -eq $eventType -or $eventType.Value -cne 'session_meta') { return $null }
+            $payload = $event.PSObject.Properties['payload']
+            if ($null -eq $payload -or $payload.Value -isnot [pscustomobject]) { return $null }
+            $metaId = $payload.Value.PSObject.Properties['id']
+            $parsedMetaId = [guid]::Empty
+            if ($null -eq $metaId -or $metaId.Value -isnot [string] -or
+                -not [guid]::TryParse($metaId.Value, [ref]$parsedMetaId) -or
+                $parsedMetaId.ToString() -cne $fileSessionId) { return $null }
+            $sessionId = $payload.Value.PSObject.Properties['session_id']
+            $parsedSessionId = [guid]::Empty
+            if ($null -ne $sessionId) {
+                if ($sessionId.Value -isnot [string] -or
+                    -not [guid]::TryParse($sessionId.Value, [ref]$parsedSessionId)) { return $null }
+                return $parsedSessionId.ToString()
+            }
+            if ($null -ne $payload.Value.PSObject.Properties['parent_thread_id'] -or
+                $null -ne $payload.Value.PSObject.Properties['forked_from_id']) { return $null }
+            return $fileSessionId
+        }
+    }
+    catch { }
+    return $null
+}
+
 function Get-CumulativeCacheBaselineMigrationIds {
     $ids = @{}
     try {
@@ -533,7 +584,7 @@ function Get-CumulativeCacheBaselineMigrationIds {
         $sessions = $stored.PSObject.Properties['Sessions']
         $version = $stored.PSObject.Properties['SchemaVersion']
         if ($stored -isnot [pscustomobject] -or $null -eq $sessions -or
-            ($null -ne $version -and ([decimal]$version.Value -ne 2))) { return @{} }
+            ($null -ne $version -and ([decimal]$version.Value -notin 2, 3))) { return @{} }
         $loaded = 0
         foreach ($item in @($sessions.Value)) {
             if ($loaded++ -ge 10000) { return @{} }
@@ -549,12 +600,19 @@ function Get-CumulativeCacheBaselineMigrationIds {
             $missValue = Get-TokenNumber $item 'CacheMissTokens'
             $hasBaseline = $null -ne $baselineHit -and $null -ne $baselineMiss -and
                 $null -ne $baselineHit.Value -and $null -ne $baselineMiss.Value
+            $tree = $item.PSObject.Properties['TreeId']
+            $parsedTree = [guid]::Empty
+            if ($null -ne $tree -and $null -ne $tree.Value -and
+                ($tree.Value -isnot [string] -or -not [guid]::TryParse($tree.Value, [ref]$parsedTree) -or
+                    $parsedTree.ToString() -cne $tree.Value)) { return @{} }
             $ids[$id.Value] = [pscustomobject]@{
                 CacheHitTokens = $hitValue
                 CacheMissTokens = $missValue
                 CacheHitBaselineTokens = if ($hasBaseline) { Get-TokenNumber $item 'CacheHitBaselineTokens' } else { $null }
                 CacheMissBaselineTokens = if ($hasBaseline) { Get-TokenNumber $item 'CacheMissBaselineTokens' } else { $null }
+                TreeId = if ($null -ne $tree) { $tree.Value } else { $null }
                 NeedsBaseline = -not $hasBaseline
+                NeedsTreeId = $null -eq $tree -or $null -eq $tree.Value
             }
         }
     }
@@ -838,9 +896,13 @@ function Get-CodexUsageState {
     $taskNames = Read-TaskNameIndex $taskIndexPath
     $scanNow = [datetime]::UtcNow
     $migrationIds = Get-CumulativeCacheBaselineMigrationIds
+    $pendingBaselineIds = @{}
+    $pendingTreeIds = @{}
     $pendingMigrationIds = @{}
     foreach ($id in @($migrationIds.Keys | Sort-Object)) {
-        if ($migrationIds[$id].NeedsBaseline) { $pendingMigrationIds[$id] = $migrationIds[$id] }
+        if ($migrationIds[$id].NeedsBaseline) { $pendingBaselineIds[$id] = $migrationIds[$id] }
+        if ($migrationIds[$id].NeedsTreeId) { $pendingTreeIds[$id] = $migrationIds[$id] }
+        if ($migrationIds[$id].NeedsBaseline -or $migrationIds[$id].NeedsTreeId) { $pendingMigrationIds[$id] = $migrationIds[$id] }
     }
     $discovery = Get-BoundedSessionFiles -SessionsPath $sessionsPath -MaxFiles 30 -MaxEntries 10000 `
         -TaskNames $taskNames -MigrationIds $pendingMigrationIds -NowUtc $scanNow -DeadlineUtc $scanNow.AddSeconds(3)
@@ -879,7 +941,7 @@ function Get-CodexUsageState {
         $readPaths[$candidate.FullName] = $true
     }
     $baselineCandidates = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($id in $pendingMigrationIds.Keys) { [void]$baselineCandidates.Add($id) }
+    foreach ($id in $pendingBaselineIds.Keys) { [void]$baselineCandidates.Add($id) }
     foreach ($file in $files) {
         if ($file.BaseName -notmatch '^rollout-' -or $file.BaseName -notmatch '^[A-Za-z0-9._-]{1,200}$') { continue }
         $known = if ($migrationIds.ContainsKey($file.BaseName)) { $migrationIds[$file.BaseName] } else { $null }
@@ -932,6 +994,8 @@ function Get-CodexUsageState {
                         CacheMissTokens = if ($null -ne $known) { $known.CacheMissBaselineTokens } else { 0L }
                     }
                 }
+                $treeId = if ($null -ne $known -and -not $known.NeedsTreeId) { $known.TreeId }
+                else { Get-SessionTreeId -Path $file.FullName }
                 $rawHit = $fileState.TokenDetails.CacheHitTokens
                 $rawMiss = $fileState.TokenDetails.CacheMissTokens
                 if ($mustReadBaseline) {
@@ -952,6 +1016,7 @@ function Get-CodexUsageState {
                             CacheMissTokens = $rawMiss
                             CacheHitBaselineTokens = $baseline.CacheHitTokens
                             CacheMissBaselineTokens = $baseline.CacheMissTokens
+                            TreeId = $treeId
                         })
                         $snapshotIds[$file.BaseName] = $true
                     }
@@ -974,24 +1039,46 @@ function Get-CodexUsageState {
     }
     $migrationFiles = @{}
     foreach ($migrationFile in @($discovery.MigrationFiles)) { $migrationFiles[$migrationFile.BaseName] = $migrationFile.FullName }
-    if ($null -ne $baselineId -and $pendingMigrationIds.ContainsKey($baselineId) -and
+    if ($null -ne $baselineId -and $pendingBaselineIds.ContainsKey($baselineId) -and
         -not $snapshotIds.ContainsKey($baselineId)) {
-        $legacy = $pendingMigrationIds[$baselineId]
+        $legacy = $pendingBaselineIds[$baselineId]
         $baseline = if ($baselineAttempted -and $baselineId -ceq $script:CacheTokenBaselineCursor) { $baselineAttemptResult }
         elseif ($migrationFiles.ContainsKey($baselineId)) {
             Get-SessionCacheTokenBaseline -Path $migrationFiles[$baselineId]
         }
         if ($null -ne $baseline -and [decimal]$baseline.CacheHitTokens -le [decimal]$legacy.CacheHitTokens -and
             [decimal]$baseline.CacheMissTokens -le [decimal]$legacy.CacheMissTokens) {
+            $treeId = if (-not $legacy.NeedsTreeId) { $legacy.TreeId }
+            elseif ($migrationFiles.ContainsKey($baselineId)) { Get-SessionTreeId -Path $migrationFiles[$baselineId] }
             $sessionTokenSnapshots.Add([pscustomobject]@{
                 Id = $baselineId
                 CacheHitTokens = [long]$legacy.CacheHitTokens
                 CacheMissTokens = [long]$legacy.CacheMissTokens
                 CacheHitBaselineTokens = $baseline.CacheHitTokens
                 CacheMissBaselineTokens = $baseline.CacheMissTokens
+                TreeId = $treeId
             })
+            $snapshotIds[$baselineId] = $true
         }
     }
+    $treeMigrationReads = 0
+    foreach ($id in @($pendingTreeIds.Keys | Sort-Object)) {
+        if ($treeMigrationReads -ge 256) { break }
+        if ($snapshotIds.ContainsKey($id) -or -not $migrationFiles.ContainsKey($id)) { continue }
+        $treeMigrationReads++
+        $treeId = Get-SessionTreeId -Path $migrationFiles[$id]
+        if ($null -eq $treeId) { continue }
+        $legacy = $pendingTreeIds[$id]
+        $sessionTokenSnapshots.Add([pscustomobject]@{
+            Id = $id
+            CacheHitTokens = [long]$legacy.CacheHitTokens
+            CacheMissTokens = [long]$legacy.CacheMissTokens
+            CacheHitBaselineTokens = $legacy.CacheHitBaselineTokens
+            CacheMissBaselineTokens = $legacy.CacheMissBaselineTokens
+            TreeId = $treeId
+        })
+        $snapshotIds[$id] = $true
+        }
     $state = Get-NewestUsageState -Events $events.ToArray() -LimitId 'codex'
     if ($null -ne $state) {
         $sortedSessions = @($sessionTokenSnapshots.ToArray() | Sort-Object { [string]$_.Id })
@@ -1178,12 +1265,16 @@ function Test-UsageScanSnapshot {
         if ($windows.Count -eq 2 -and ($windows[0].Name -cne 'primary' -or $windows[1].Name -cne 'secondary')) { return $false }
 
         $sessions = @($Snapshot.State.SessionTokenSnapshots)
-        if ($sessions.Count -gt 31) { return $false }
+        if ($sessions.Count -gt 287) { return $false }
         $previousId = $null
         $sessionIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($session in $sessions) {
-            if (-not (& $hasExactProperties $session 'CacheHitBaselineTokens,CacheHitTokens,CacheMissBaselineTokens,CacheMissTokens,Id') -or
+            $parsedTreeId = [guid]::Empty
+            if (-not (& $hasExactProperties $session 'CacheHitBaselineTokens,CacheHitTokens,CacheMissBaselineTokens,CacheMissTokens,Id,TreeId') -or
                 $session.Id -isnot [string] -or $session.Id -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
+                ($null -ne $session.TreeId -and
+                    ($session.TreeId -isnot [string] -or -not [guid]::TryParse($session.TreeId, [ref]$parsedTreeId) -or
+                        $parsedTreeId.ToString() -cne $session.TreeId)) -or
                 -not $sessionIds.Add($session.Id) -or
                 ($null -ne $previousId -and [string]::CompareOrdinal($previousId, $session.Id) -ge 0) -or
                 -not (& $isCounter $session.CacheHitTokens -Nullable) -or
@@ -1562,7 +1653,7 @@ function Get-UsageWorkerScriptText {
     $functionNames = @(
         'Get-TokenNumber', 'Get-TokenPercent', 'ConvertTo-LimitWindow', 'ConvertTo-UsageState',
         'Get-EventTokenDetails', 'ConvertTo-ObservedAt', 'Get-EventRateLimits', 'Read-TaskNameIndex',
-        'Get-ActiveTaskCandidates', 'Read-SessionEvents', 'Get-SessionCacheTokenBaseline',
+        'Get-ActiveTaskCandidates', 'Read-SessionEvents', 'Get-SessionCacheTokenBaseline', 'Get-SessionTreeId',
         'Get-CumulativeCacheBaselineMigrationIds', 'Get-NewestUsageState',
         'ConvertTo-CodexDataDirectoryPath', 'Resolve-CodexDataDirectory', 'Get-BoundedSessionFiles',
         'Get-CodexUsageState', 'Get-CodexUsageDiagnostic', 'Get-CodexUsageSnapshot',
@@ -2049,7 +2140,7 @@ function Update-CumulativeCacheTokens {
                 $stored = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
                 if ($stored -isnot [pscustomobject]) { throw 'Cache ledger root must be an object.' }
                 $versionProperty = $stored.PSObject.Properties['SchemaVersion']
-                if ($null -ne $versionProperty -and ([decimal]$versionProperty.Value -ne 2)) { throw 'Unsupported cache ledger schema.' }
+                if ($null -ne $versionProperty -and ([decimal]$versionProperty.Value -notin 2, 3)) { throw 'Unsupported cache ledger schema.' }
                 $storedSessions = $stored.PSObject.Properties['Sessions']
                 if ($null -eq $storedSessions) { throw 'Missing sessions.' }
                 $loaded = 0
@@ -2073,11 +2164,18 @@ function Update-CumulativeCacheTokens {
                     $baselineMiss = if ($hasBaselineMiss) { & $toCounter $baselineMissProperty.Value } else { $null }
                     if (($null -eq $baselineHit) -ne ($null -eq $baselineMiss) -or
                         ($null -ne $baselineHit -and ($baselineHit -gt $hit -or $baselineMiss -gt $miss))) { throw 'Invalid stored baseline.' }
+                    $treeProperty = $item.PSObject.Properties['TreeId']
+                    $treeId = if ($null -ne $treeProperty) { $treeProperty.Value } else { $null }
+                    $parsedTree = [guid]::Empty
+                    if ($null -ne $treeId -and ($treeId -isnot [string] -or
+                        -not [guid]::TryParse($treeId, [ref]$parsedTree) -or
+                        $parsedTree.ToString() -cne $treeId)) { throw 'Invalid stored tree.' }
                     $knownSessions[$idProperty.Value] = [pscustomobject]@{
                         CacheHitTokens  = $hit
                         CacheMissTokens = $miss
                         CacheHitBaselineTokens = $baselineHit
                         CacheMissBaselineTokens = $baselineMiss
+                        TreeId = $treeId
                     }
                 }
                 $storeStatus = 'valid'
@@ -2096,6 +2194,7 @@ function Update-CumulativeCacheTokens {
             CacheMissTokens = [long]$tokens.CacheMissTokens
             CacheHitBaselineTokens = $tokens.CacheHitBaselineTokens
             CacheMissBaselineTokens = $tokens.CacheMissBaselineTokens
+            TreeId = $tokens.TreeId
         }
     }
     $dirty = $false
@@ -2106,6 +2205,7 @@ function Update-CumulativeCacheTokens {
         $missProperty = $session.PSObject.Properties['CacheMissTokens']
         $baselineHitProperty = $session.PSObject.Properties['CacheHitBaselineTokens']
         $baselineMissProperty = $session.PSObject.Properties['CacheMissBaselineTokens']
+        $treeProperty = $session.PSObject.Properties['TreeId']
         if ($null -eq $idProperty -or $idProperty.Value -isnot [string] -or
             $idProperty.Value -cnotmatch '^[A-Za-z0-9._-]{1,200}$' -or
             $null -eq $hitProperty -or $null -eq $missProperty) { continue }
@@ -2116,21 +2216,31 @@ function Update-CumulativeCacheTokens {
         $baselineMiss = if ($null -ne $baselineMissProperty -and $null -ne $baselineMissProperty.Value) { & $toCounter $baselineMissProperty.Value } else { $null }
         if (($null -eq $baselineHit) -ne ($null -eq $baselineMiss) -or
             ($null -ne $baselineHit -and ($baselineHit -gt $hit -or $baselineMiss -gt $miss))) { continue }
+        $treeId = if ($null -ne $treeProperty) { $treeProperty.Value } else { $null }
+        $parsedTreeId = [guid]::Empty
+        if ($null -ne $treeId -and ($treeId -isnot [string] -or
+            -not [guid]::TryParse($treeId, [ref]$parsedTreeId) -or
+            $parsedTreeId.ToString() -cne $treeId)) { continue }
 
         $previous = $candidateSessions[$idProperty.Value]
         $nextHit = if ($null -eq $previous -or $hit -gt $previous.CacheHitTokens) { $hit } else { [long]$previous.CacheHitTokens }
         $nextMiss = if ($null -eq $previous -or $miss -gt $previous.CacheMissTokens) { $miss } else { [long]$previous.CacheMissTokens }
         $nextBaselineHit = if ($null -ne $previous -and $null -ne $previous.CacheHitBaselineTokens) { $previous.CacheHitBaselineTokens } else { $baselineHit }
         $nextBaselineMiss = if ($null -ne $previous -and $null -ne $previous.CacheMissBaselineTokens) { $previous.CacheMissBaselineTokens } else { $baselineMiss }
+        $nextTreeId = if ($null -ne $previous -and $null -ne $previous.TreeId) { $previous.TreeId } else { $treeId }
         if ($null -ne $previous -and $null -ne $previous.CacheHitBaselineTokens -and $null -ne $baselineHit -and
             ($baselineHit -ne $previous.CacheHitBaselineTokens -or $baselineMiss -ne $previous.CacheMissBaselineTokens)) { continue }
+        if ($null -ne $previous -and $null -ne $previous.TreeId -and $null -ne $treeId -and
+            $treeId -cne $previous.TreeId) { continue }
         if ($null -eq $previous -or $nextHit -ne $previous.CacheHitTokens -or $nextMiss -ne $previous.CacheMissTokens -or
-            $nextBaselineHit -ne $previous.CacheHitBaselineTokens -or $nextBaselineMiss -ne $previous.CacheMissBaselineTokens) {
+            $nextBaselineHit -ne $previous.CacheHitBaselineTokens -or $nextBaselineMiss -ne $previous.CacheMissBaselineTokens -or
+            $nextTreeId -cne $previous.TreeId) {
             $candidateSessions[$idProperty.Value] = [pscustomobject]@{
                 CacheHitTokens  = $nextHit
                 CacheMissTokens = $nextMiss
                 CacheHitBaselineTokens = $nextBaselineHit
                 CacheMissBaselineTokens = $nextBaselineMiss
+                TreeId = $nextTreeId
             }
             $dirty = $true
         }
@@ -2148,10 +2258,11 @@ function Update-CumulativeCacheTokens {
                         CacheMissTokens = [long]$tokens.CacheMissTokens
                         CacheHitBaselineTokens = $tokens.CacheHitBaselineTokens
                         CacheMissBaselineTokens = $tokens.CacheMissBaselineTokens
+                        TreeId = $tokens.TreeId
                     }
                 }
             )
-            $json = [pscustomobject]@{ SchemaVersion = 2; Sessions = $storedSessions } | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop
+            $json = [pscustomobject]@{ SchemaVersion = 3; Sessions = $storedSessions } | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop
             $path = Join-Path (Join-Path $env:LOCALAPPDATA 'CodexUsageWidget') 'cache-token-ledger.json'
             if (-not (Save-TextAtomically -Path $path -Text $json)) { return $null }
         }
@@ -2163,11 +2274,29 @@ function Update-CumulativeCacheTokens {
     if ($null -ne $Persisted) { $Persisted.Value = $true }
 
     if ($script:CacheTokenLedger.Sessions.Count -eq 0) { return $null }
+    $treeTotals = @{}
+    foreach ($entry in $script:CacheTokenLedger.Sessions.GetEnumerator()) {
+        $tokens = $entry.Value
+        $adjustedHit = if ($null -ne $tokens.TreeId) { [decimal]$tokens.CacheHitTokens }
+        else { [decimal]$tokens.CacheHitTokens - [decimal]$(if ($null -ne $tokens.CacheHitBaselineTokens) { $tokens.CacheHitBaselineTokens } else { 0 }) }
+        $adjustedMiss = if ($null -ne $tokens.TreeId) { [decimal]$tokens.CacheMissTokens }
+        else { [decimal]$tokens.CacheMissTokens - [decimal]$(if ($null -ne $tokens.CacheMissBaselineTokens) { $tokens.CacheMissBaselineTokens } else { 0 }) }
+        $treeKey = if ($null -ne $tokens.TreeId) { 'tree:' + $tokens.TreeId } else { 'session:' + $entry.Key }
+        $tree = $treeTotals[$treeKey]
+        if ($null -eq $tree) {
+            $treeTotals[$treeKey] = [pscustomobject]@{ CacheHitTokens = $adjustedHit; CacheMissTokens = $adjustedMiss }
+        }
+        else {
+            # ponytail: each cumulative counter keeps its tree maximum so later branch switches cannot make the display fall.
+            if ($adjustedHit -gt $tree.CacheHitTokens) { $tree.CacheHitTokens = $adjustedHit }
+            if ($adjustedMiss -gt $tree.CacheMissTokens) { $tree.CacheMissTokens = $adjustedMiss }
+        }
+    }
     $cacheHitTokens = [decimal]0
     $cacheMissTokens = [decimal]0
-    foreach ($tokens in $script:CacheTokenLedger.Sessions.Values) {
-        $cacheHitTokens += [decimal]$tokens.CacheHitTokens - [decimal]$(if ($null -ne $tokens.CacheHitBaselineTokens) { $tokens.CacheHitBaselineTokens } else { 0 })
-        $cacheMissTokens += [decimal]$tokens.CacheMissTokens - [decimal]$(if ($null -ne $tokens.CacheMissBaselineTokens) { $tokens.CacheMissBaselineTokens } else { 0 })
+    foreach ($tree in $treeTotals.Values) {
+        $cacheHitTokens += $tree.CacheHitTokens
+        $cacheMissTokens += $tree.CacheMissTokens
     }
     if ($cacheHitTokens -gt [long]::MaxValue -or $cacheMissTokens -gt [long]::MaxValue) { return $null }
     $cacheHitTokens = [long]$cacheHitTokens
@@ -2387,7 +2516,7 @@ function Reset-WidgetLocalState {
             Left = $null; Top = $null; Monitor = $null; Theme = 7
             CodexDataDirectory = $null; Language = $Language
         } | ConvertTo-Json -Compress)),
-        @('cache-token-ledger.json', '{"Sessions":[]}'),
+        @('cache-token-ledger.json', '{"SchemaVersion":3,"Sessions":[]}'),
         @('reminders.json', '{"SentKeys":[]}')
     )
     foreach ($item in $defaults) {

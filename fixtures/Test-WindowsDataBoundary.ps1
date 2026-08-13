@@ -74,6 +74,13 @@ try {
     $null = Update-CumulativeCacheTokens @([pscustomobject]@{ Id = 'session'; CacheHitTokens = 8; CacheMissTokens = 2 })
     Assert-Boundary ($script:CacheTokenLedger.StoreStatus -ceq 'invalid') 'an invalid cache ledger must be identified explicitly.'
     Assert-Boundary (([Convert]::ToBase64String([IO.File]::ReadAllBytes($ledgerPath))) -ceq ([Convert]::ToBase64String($invalidBytes))) 'an invalid cache ledger must remain byte-identical.'
+    $invalidTreeLedger = '{"SchemaVersion":3,"Sessions":[{"Id":"session","CacheHitTokens":8,"CacheMissTokens":2,"CacheHitBaselineTokens":0,"CacheMissBaselineTokens":0,"TreeId":"not-a-guid"}]}'
+    [IO.File]::WriteAllText($ledgerPath, $invalidTreeLedger, [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $null = Update-CumulativeCacheTokens @()
+    Assert-Boundary ($script:CacheTokenLedger.StoreStatus -ceq 'invalid' -and
+        [IO.File]::ReadAllText($ledgerPath) -ceq $invalidTreeLedger) `
+        'schema v3 must reject a noncanonical task-tree id without rewriting the ledger.'
 
     $reminderPath = Join-Path $stateRoot 'reminders.json'
     [IO.File]::WriteAllBytes($reminderPath, $invalidBytes)
@@ -362,6 +369,77 @@ try {
         (Test-UsageScanSnapshot $protocolSnapshot)) `
         'a found ordinary legacy session may use zero baseline without exceeding the thirty-plus-one protocol bound.'
     Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'baseline migration boundary tests must restore an empty ledger.'
+    $script:CacheTokenLedger = $null
+
+    $invalidTreeSessionId = '55555555-5555-5555-5555-555555555555'
+    $invalidTreePath = Join-Path $testRoot ('rollout-' + $invalidTreeSessionId + '.jsonl')
+    [IO.File]::WriteAllText($invalidTreePath,
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' +
+            $invalidTreeSessionId + '","session_id":"not-a-guid"}}'),
+        [Text.UTF8Encoding]::new($false))
+    Assert-Boundary ($null -eq (Get-SessionTreeId -Path $invalidTreePath)) `
+        'an explicitly invalid session_id must remain unknown instead of being relabeled as a root task.'
+    $lateMetaPath = Join-Path $testRoot ('late-rollout-' + $invalidTreeSessionId + '.jsonl')
+    [IO.File]::WriteAllLines($lateMetaPath, @(
+        '{bad json',
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' +
+            $invalidTreeSessionId + '","session_id":"' + $invalidTreeSessionId + '"}}')
+    ), [Text.UTF8Encoding]::new($false))
+    Assert-Boundary ($null -eq (Get-SessionTreeId -Path $lateMetaPath)) `
+        'task-tree identity must come only from the first nonempty record, never a later metadata-shaped line.'
+
+    $treeRoot = Join-Path $testRoot 'fork-tree-deduplication'
+    $treeSessions = Join-Path $treeRoot 'sessions'
+    [void][IO.Directory]::CreateDirectory($treeSessions)
+    $treeRootId = '11111111-1111-1111-1111-111111111111'
+    $treeForkAId = '22222222-2222-2222-2222-222222222222'
+    $treeForkBId = '33333333-3333-3333-3333-333333333333'
+    $independentId = '44444444-4444-4444-4444-444444444444'
+    $treePrefix = '{"timestamp":"2026-08-12T00:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"total_tokens":110},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":45,"window_minutes":10080,"resets_at":4102444800},"secondary":null}}}'
+    $treeRootFinal = '{"timestamp":"2026-08-12T00:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":900,"cached_input_tokens":720,"output_tokens":90,"total_tokens":990},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":46,"window_minutes":10080,"resets_at":4102444800},"secondary":null}}}'
+    $treeForkFinal = '{"timestamp":"2026-08-12T00:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1100,"cached_input_tokens":700,"output_tokens":110,"total_tokens":1210},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":620,"output_tokens":100,"total_tokens":1100},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":47,"window_minutes":10080,"resets_at":4102444800},"secondary":null}}}'
+    $independentPrefix = $treePrefix.Replace('"input_tokens":100,"cached_input_tokens":80', '"input_tokens":50,"cached_input_tokens":40').Replace('"total_tokens":110', '"total_tokens":60')
+    $independentFinal = $treeRootFinal.Replace('"input_tokens":1000,"cached_input_tokens":800', '"input_tokens":500,"cached_input_tokens":400').Replace('"total_tokens":1100', '"total_tokens":600')
+    [IO.File]::WriteAllLines((Join-Path $treeSessions ('rollout-' + $treeRootId + '.jsonl')), @(
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' + $treeRootId + '","session_id":"' + $treeRootId + '"}}'),
+        $treePrefix, $treeRootFinal
+    ), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines((Join-Path $treeSessions ('rollout-' + $treeForkAId + '.jsonl')), @(
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' + $treeForkAId + '","session_id":"' + $treeRootId + '","forked_from_id":"' + $treeRootId + '"}}'),
+        $treePrefix, $treeForkFinal
+    ), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines((Join-Path $treeSessions ('rollout-' + $treeForkBId + '.jsonl')), @(
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' + $treeForkBId + '","session_id":"' + $treeRootId + '","parent_thread_id":"' + $treeRootId + '"}}'),
+        $treePrefix, $treeRootFinal
+    ), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllLines((Join-Path $treeSessions ('rollout-' + $independentId + '.jsonl')), @(
+        ('{"timestamp":"2026-08-12T00:00:00.000Z","type":"session_meta","payload":{"id":"' + $independentId + '","session_id":"' + $independentId + '"}}'),
+        $independentPrefix, $independentFinal
+    ), [Text.UTF8Encoding]::new($false))
+    $legacyTreeSessions = @(
+        [pscustomobject]@{ Id = 'rollout-' + $treeRootId; CacheHitTokens = 800; CacheMissTokens = 200; CacheHitBaselineTokens = 0; CacheMissBaselineTokens = 0 },
+        [pscustomobject]@{ Id = 'rollout-' + $treeForkAId; CacheHitTokens = 700; CacheMissTokens = 400; CacheHitBaselineTokens = 0; CacheMissBaselineTokens = 0 },
+        [pscustomobject]@{ Id = 'rollout-' + $treeForkBId; CacheHitTokens = 800; CacheMissTokens = 200; CacheHitBaselineTokens = 0; CacheMissBaselineTokens = 0 },
+        [pscustomobject]@{ Id = 'rollout-' + $independentId; CacheHitTokens = 400; CacheMissTokens = 100; CacheHitBaselineTokens = 0; CacheMissBaselineTokens = 0 }
+    )
+    [IO.File]::WriteAllText($ledgerPath,
+        ([pscustomobject]@{ SchemaVersion = 2; Sessions = $legacyTreeSessions } | ConvertTo-Json -Depth 4 -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $script:CacheTokenLedger = $null
+    $script:CacheTokenBaselineCursor = $null
+    $treeSnapshot = Get-CodexUsageSnapshot -DataDirectory $treeRoot -ReadOnly
+    $treeSnapshot = Apply-UsageSnapshotPersistence $treeSnapshot
+    Assert-Boundary ($null -ne $treeSnapshot) 'task-tree migration must preserve and persist its snapshot.'
+    Assert-Boundary ($treeSnapshot.State.TokenDetails.CacheHitTokens -eq 1200 -and
+        $treeSnapshot.State.TokenDetails.CacheMissTokens -eq 500) `
+        ('one task tree must retain each cumulative counter maximum while an independent root still adds; hit={0}, miss={1}.' -f
+            $treeSnapshot.State.TokenDetails.CacheHitTokens, $treeSnapshot.State.TokenDetails.CacheMissTokens)
+    $treeLedger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json -ErrorAction Stop
+    Assert-Boundary ($treeLedger.SchemaVersion -eq 3 -and
+        @($treeLedger.Sessions | Where-Object TreeId -eq $treeRootId).Count -eq 3 -and
+        @($treeLedger.Sessions | Where-Object TreeId -eq $independentId).Count -eq 1) `
+        'one scan must migrate every available v2 task-tree identity without clearing historical counters.'
+    Assert-Boundary (Reset-WidgetLocalState -Language 'zh-CN') 'task-tree deduplication must leave later fixtures with an empty ledger.'
     $script:CacheTokenLedger = $null
 
     $filteredRoot = Join-Path $testRoot 'filtered-session-tokens'
