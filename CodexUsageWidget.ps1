@@ -1311,54 +1311,6 @@ function Test-UsageScanSnapshot {
     catch { return $false }
 }
 
-function Get-UsageJsonWorstCaseByteCount {
-    param(
-        [AllowNull()]$Value,
-        [ValidateRange(0, 32)][int]$Depth = 0
-    )
-
-    if ($Depth -ge 32) { return 262145L }
-    if ($null -eq $Value) { return 4L }
-    if ($Value -is [string]) { return [math]::Min(262145L, 2L + 6L * $Value.Length) }
-    if ($Value -is [bool]) { return 5L }
-    if ($Value -is [datetime] -or $Value -is [datetimeoffset]) { return 386L }
-    if ($Value -is [System.ValueType]) { return 32L }
-
-    $total = 2L
-    if ($Value -is [pscustomobject]) {
-        $properties = @($Value.PSObject.Properties)
-        for ($index = 0; $index -lt $properties.Count; $index++) {
-            $property = $properties[$index]
-            $total += 3L + 6L * $property.Name.Length
-            $total += Get-UsageJsonWorstCaseByteCount -Value $property.Value -Depth ($Depth + 1)
-            if ($index -gt 0) { $total++ }
-            if ($total -gt 262144) { return 262145L }
-        }
-        return $total
-    }
-    if ($Value -is [Collections.IDictionary]) {
-        $entries = @($Value.GetEnumerator())
-        for ($index = 0; $index -lt $entries.Count; $index++) {
-            $name = [string]$entries[$index].Key
-            $total += 3L + 6L * $name.Length
-            $total += Get-UsageJsonWorstCaseByteCount -Value $entries[$index].Value -Depth ($Depth + 1)
-            if ($index -gt 0) { $total++ }
-            if ($total -gt 262144) { return 262145L }
-        }
-        return $total
-    }
-    if ($Value -is [Collections.IEnumerable]) {
-        $items = @($Value)
-        for ($index = 0; $index -lt $items.Count; $index++) {
-            $total += Get-UsageJsonWorstCaseByteCount -Value $items[$index] -Depth ($Depth + 1)
-            if ($index -gt 0) { $total++ }
-            if ($total -gt 262144) { return 262145L }
-        }
-        return $total
-    }
-    return 262145L
-}
-
 function Write-UsageScanResult {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -1372,7 +1324,7 @@ function Write-UsageScanResult {
         $parent = [IO.DirectoryInfo]::new([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path)))
         if (-not $parent.Exists -or ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
         $result = [pscustomobject]@{ schemaVersion = 1; generation = $Generation; snapshot = $Snapshot }
-        if ((Get-UsageJsonWorstCaseByteCount $result) -gt 262144) { return $false }
+        # ponytail: the exact schema gate above bounds allocation; only the encoded byte count decides protocol fit.
         $json = $result | ConvertTo-Json -Depth 16 -Compress -ErrorAction Stop
         if ([Text.UTF8Encoding]::new($false, $true).GetByteCount($json) -gt 262144) { return $false }
         return Save-TextAtomically -Path $Path -Text $json
@@ -1657,7 +1609,7 @@ function Get-UsageWorkerScriptText {
         'Get-CumulativeCacheBaselineMigrationIds', 'Get-NewestUsageState',
         'ConvertTo-CodexDataDirectoryPath', 'Resolve-CodexDataDirectory', 'Get-BoundedSessionFiles',
         'Get-CodexUsageState', 'Get-CodexUsageDiagnostic', 'Get-CodexUsageSnapshot',
-        'Test-UsageScanSnapshot', 'Get-UsageJsonWorstCaseByteCount', 'Save-TextAtomically',
+        'Test-UsageScanSnapshot', 'Save-TextAtomically',
         'Write-UsageScanResult', 'New-UsageWorkerDeadline', 'Invoke-UsageScanWorker'
     )
     $builder = [Text.StringBuilder]::new("param([switch]`$ScanWorker)`r`n")

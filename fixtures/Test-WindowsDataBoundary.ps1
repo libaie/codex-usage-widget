@@ -585,6 +585,25 @@ try {
     $producerPath = Join-Path $workerRoot 'producer-rejected.json'
     Assert-Boundary (-not (Write-UsageScanResult -Snapshot $nestedForgery.snapshot -Generation $generation -Path $producerPath) -and
         -not [IO.File]::Exists($producerPath)) 'the producer must reject an invalid snapshot before serialization or any result write.'
+    $originalSessions = $workerResult.snapshot.State.SessionTokenSnapshots
+    $workerResult.snapshot.State.SessionTokenSnapshots = @(
+        0..250 | ForEach-Object {
+            $treeId = ('00000000-0000-0000-0000-{0:d12}' -f $_)
+            [pscustomobject]@{
+                Id = 'rollout-' + $treeId
+                CacheHitTokens = 109235873408L
+                CacheMissTokens = 2545844526L
+                CacheHitBaselineTokens = 66576486383L
+                CacheMissBaselineTokens = 1335480301L
+                TreeId = $treeId
+            }
+        }
+    )
+    $largeValidPath = Join-Path $workerRoot 'large-valid.json'
+    Assert-Boundary ((Write-UsageScanResult -Snapshot $workerResult.snapshot -Generation $generation -Path $largeValidPath) -and
+        [IO.File]::Exists($largeValidPath) -and ([IO.FileInfo]$largeValidPath).Length -le 262144) `
+        'a valid task-tree migration payload must be judged by its encoded size, not rejected by a generic estimate.'
+    $workerResult.snapshot.State.SessionTokenSnapshots = $originalSessions
     $received = Receive-UsageScanProcess -Job $workerJob -TimeoutSeconds 10
     Assert-Boundary ($received.Status -ceq 'completed' -and -not $received.ProcessExited -and -not [IO.File]::Exists($workerOutput)) 'the parent must consume one result without stopping the reusable worker host.'
     $validatedSnapshot = $received.Snapshot
