@@ -2,13 +2,13 @@
 
 # Codex Usage Widget
 
-A small, draggable desktop widget for viewing locally observed Codex usage on Windows and macOS.
+A small, draggable desktop widget for viewing Codex usage calculated locally on Windows and macOS.
 
 [Download v1.1.1](https://github.com/libaie/codex-usage-widget/releases/tag/v1.1.1) · [简体中文](README.zh-CN.md) · [MIT license](LICENSE)
 
 </div>
 
-Codex Usage Widget reads local Codex session files and presents the remaining allowance, token usage, cache tokens, context use, and recently active tasks in a compact ring. It is an independent personal project, not an official OpenAI or Codex project. The values are local session observations, not official billing or account data.
+Codex Usage Widget calculates usage information on your device from Codex's local records, then presents the remaining allowance, token usage, cache tokens, context use, and recently active tasks in a compact ring. Session files stay on your device, and the widget sends no telemetry. It is an independent personal project, not an official OpenAI or Codex project. Displayed totals are local estimates and may differ from official OpenAI billing or account data.
 
 ## Screenshots
 
@@ -85,4 +85,4 @@ The project is available under the [MIT license](LICENSE). See [Contributing](CO
 
 ## Disclaimer
 
-Codex session formats can change. Displayed limits, reset times, task activity, and token statistics are best-effort observations from local files, not authoritative OpenAI usage, billing, or entitlement data.
+Codex local data formats can change. Displayed limits, reset times, task activity, and token statistics are calculated locally and may differ from OpenAI's official usage, billing, or entitlement data.

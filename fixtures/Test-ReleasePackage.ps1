@@ -150,18 +150,19 @@ $commonReadmeRequirements = @(
 $zhIndependentProject = ([char[]](0x72EC, 0x7ACB, 0x4E2A, 0x4EBA, 0x9879, 0x76EE) -join '')
 $zhUnofficialProject = ([char[]](0x4E0D, 0x662F) -join '') + ' OpenAI ' + [char]0x6216 + ' Codex ' +
     ([char[]](0x5B98, 0x65B9, 0x9879, 0x76EE) -join '')
-$zhLocalSessionObservations = ([char[]](0x672C, 0x673A, 0x4F1A, 0x8BDD, 0x89C2, 0x6D4B) -join '')
-$zhNotOfficialBillingOrAccountData = ([char[]](
-    0x4E0D, 0x662F, 0x5B98, 0x65B9, 0x8D26, 0x5355, 0x6216, 0x8D26, 0x6237, 0x6570, 0x636E
+$zhSessionFilesStayLocal = ([char[]](
+    0x4F1A, 0x8BDD, 0x6587, 0x4EF6, 0x59CB, 0x7EC8, 0x4FDD, 0x7559, 0x5728, 0x672C, 0x673A
 ) -join '')
+$zhNoTelemetry = ([char[]](0x4E0D, 0x4F1A, 0x53D1, 0x9001, 0x9065, 0x6D4B, 0x6570, 0x636E) -join '')
+$zhLocalEstimate = ([char[]](0x672C, 0x5730, 0x4F30, 0x7B97) -join '')
 $readmeRequirements = @{
     'README.md' = @(
         'README.zh-CN.md', 'independent personal project', 'not an official OpenAI or Codex project',
-        'local session observations', 'not official billing or account data'
+        'Session files stay on your device', 'sends no telemetry', 'local estimates'
     )
     'README.zh-CN.md' = @(
         'README.md', $zhIndependentProject, $zhUnofficialProject,
-        $zhLocalSessionObservations, $zhNotOfficialBillingOrAccountData
+        $zhSessionFilesStayLocal, $zhNoTelemetry, $zhLocalEstimate
     )
 }
 foreach ($readmePath in $readmeRequirements.Keys) {
